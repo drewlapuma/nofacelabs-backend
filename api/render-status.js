@@ -1,3 +1,16 @@
+// api/render-status.js
+import { withCORS } from '../utils/cors';
+
+async function handler(req, res) {
+  // --- your existing logic here ---
+  // For example:
+  // if (req.method !== 'POST') return res.status(405).json({error:'Method not allowed'});
+  // const body = req.body;
+  // ... do stuff ...
+  return res.status(200).json({ ok: true });
+}
+
+export default withCORS(handler); // ✅ adds headers + handles OPTIONS
 export default async function handler(req, res) {
   const CREATOMATE_API_KEY = process.env.CREATOMATE_API_KEY;
   const id = req.query.id;
