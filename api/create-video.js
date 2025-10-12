@@ -1,46 +1,53 @@
-// api/create-video.js
-import { withCORS } from '../utils/cors';
+// Minimal create-video endpoint to prove the route works
 
-async function handler(req, res) {
-  // --- your existing logic here ---
-  // For example:
-  // if (req.method !== 'POST') return res.status(405).json({error:'Method not allowed'});
-  // const body = req.body;
-  // ... do stuff ...
-  return res.status(200).json({ ok: true });
-}
+const ALLOWED = new Set([
+  'https://nofacelabsai.webflow.io', // your Webflow domain
+  // 'http://localhost:3000',        // add if you test locally
+  // 'https://your-custom-domain.com'
+]);
 
-export default withCORS(handler); // ✅ adds headers + handles OPTIONS
-
-export default async function handler(req, res) {
-  if (req.method !== 'POST') return res.status(405).end();
-
-  const CREATOMATE_API_KEY = process.env.CREATOMATE_API_KEY;
-  if (!CREATOMATE_API_KEY) return res.status(500).json({ error: 'Missing CREATOMATE_API_KEY' });
-
-  try {
-    const { templateId, script, imageUrl, audioUrl } = req.body || {};
-    if (!templateId) return res.status(400).json({ error: 'Missing templateId' });
-
-    // 👇 change these selectors to your actual layer names in Creatomate
-    const modifications = [];
-    if (script)   modifications.push({ selector: 'name:Text-KWT', text: script });
-    if (imageUrl) modifications.push({ selector: 'name:Image-BXJ', image: imageUrl });
-    if (audioUrl) modifications.push({ selector: 'name:Voiceover-J28', audio: audioUrl });
-
-    const r = await fetch('https://api.creatomate.com/v1/renders', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${CREATOMATE_API_KEY}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ templateId, modifications })
-    });
-    const data = await r.json();
-    if (!r.ok) return res.status(r.status).json({ error: data.error || 'Creatomate start failed' });
-
-    res.json({ renderId: data.id });
-  } catch (e) {
-    res.status(500).json({ error: String(e.message || e) });
+function setCORS(req, res) {
+  const origin = req.headers.origin;
+  if (origin && ALLOWED.has(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
   }
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 }
+
+module.exports = async (req, res) => {
+  try {
+    if (req.method === 'OPTIONS') {
+      setCORS(req, res);
+      return res.status(200).end();
+    }
+
+    setCORS(req, res);
+
+    if (req.method !== 'POST') {
+      return res.status(405).json({ error: 'Method Not Allowed' });
+    }
+
+    // Body might come as object or string
+    let body = req.body;
+    if (!body || typeof body !== 'object') {
+      try { body = JSON.parse(req.body || '{}'); } catch { body = {}; }
+    }
+
+    console.log('create-video body:', body);
+
+    return res.status(200).json({
+      ok: true,
+      body,
+      env: {
+        hasOpenAI: !!process.env.OPENAI_API_KEY,
+        hasCreatomate: !!process.env.CREATOMATE_API_KEY,
+        hasElevenLabs: !!process.env.ELEVENLABS_API_KEY
+      }
+    });
+  } catch (err) {
+    console.error('create-video failed:', err);
+    return res.status(500).json({ error: String(err?.message || err) });
+  }
+};
