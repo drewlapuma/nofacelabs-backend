@@ -59,3 +59,22 @@ module.exports = async (req, res) => {
     });
   }
 };
+module.exports = async (req, res) => {
+  // CORS
+  res.setHeader('Access-Control-Allow-Origin', 'https://nofacelabsai.webflow.io');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') return res.status(200).end();
+
+  if (req.method !== 'POST') {
+    return res.status(405).json({ error: 'Method Not Allowed' });
+  }
+
+  try {
+    // TODO: call Creatomate render / kick off job, etc.
+    return res.status(200).json({ ok: true, route: 'create-video' });
+  } catch (err) {
+    console.error('create-video error:', err);
+    return res.status(500).json({ error: 'Server error' });
+  }
+};
