@@ -72,3 +72,21 @@ module.exports = async (req, res) => {
     return res.status(500).json({ error: 'create_failed' });
   }
 };
+const TEMPLATES = {
+  '9:16': process.env.CREATO_TEMPLATE_916,
+  '1:1' : process.env.CREATO_TEMPLATE_11,
+  '16:9': process.env.CREATO_TEMPLATE_169,
+};
+
+function templateFor(aspect) {
+  const id = TEMPLATES[aspect];
+  if (!id) throw new Error(`No template configured for aspect ${aspect}`);
+  return id;
+}
+
+// inside your handler:
+const template_id = templateFor(body.aspectRatio); // '9:16' | '1:1' | '16:9'
+await creatomate.post('/renders', {
+  template_id,
+  modifications: { /* Headline, image_url, voice_url, etc. */ }
+});
