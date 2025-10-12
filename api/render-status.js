@@ -24,3 +24,21 @@ export default async function handler(req, res) {
 
   res.json({ status: d.status, url: d.url || null, progress: d.progress || 0 });
 }
+module.exports = async (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', 'https://nofacelabsai.webflow.io');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') return res.status(200).end();
+
+  if (req.method !== 'GET') {
+    return res.status(405).json({ error: 'Method Not Allowed' });
+  }
+
+  try {
+    // TODO: poll Creatomate / job status and return it
+    return res.status(200).json({ ok: true, route: 'render-status' });
+  } catch (err) {
+    console.error('render-status error:', err);
+    return res.status(500).json({ error: 'Server error' });
+  }
+};
