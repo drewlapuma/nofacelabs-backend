@@ -1,9 +1,8 @@
-// Minimal create-video endpoint to prove the route works
+// api/create-video.js  (temporary debug build)
 
 const ALLOWED = new Set([
-  'https://nofacelabsai.webflow.io', // your Webflow domain
-  // 'http://localhost:3000',        // add if you test locally
-  // 'https://your-custom-domain.com'
+  'https://nofacelabsai.webflow.io', // your Webflow site
+  // 'http://localhost:3000',         // add if testing locally
 ]);
 
 function setCORS(req, res) {
@@ -17,6 +16,7 @@ function setCORS(req, res) {
 }
 
 module.exports = async (req, res) => {
+  const started = new Date().toISOString();
   try {
     if (req.method === 'OPTIONS') {
       setCORS(req, res);
@@ -25,29 +25,37 @@ module.exports = async (req, res) => {
 
     setCORS(req, res);
 
-    if (req.method !== 'POST') {
-      return res.status(405).json({ error: 'Method Not Allowed' });
-    }
-
-    // Body might come as object or string
+    // Parse body safely
     let body = req.body;
     if (!body || typeof body !== 'object') {
       try { body = JSON.parse(req.body || '{}'); } catch { body = {}; }
     }
 
-    console.log('create-video body:', body);
-
+    // Echo back everything we care about
     return res.status(200).json({
       ok: true,
+      started,
+      method: req.method,
+      path: req.url || '/api/create-video',
+      headers: {
+        origin: req.headers.origin || null,
+        'content-type': req.headers['content-type'] || null,
+      },
       body,
       env: {
-        hasOpenAI: !!process.env.OPENAI_API_KEY,
-        hasCreatomate: !!process.env.CREATOMATE_API_KEY,
-        hasElevenLabs: !!process.env.ELEVENLABS_API_KEY
+        has_OPENAI_API_KEY: !!process.env.OPENAI_API_KEY,
+        has_CREATOMATE_API_KEY: !!process.env.CREATOMATE_API_KEY,
+        has_ELEVENLABS_API_KEY: !!process.env.ELEVENLABS_API_KEY,
       }
     });
+
   } catch (err) {
-    console.error('create-video failed:', err);
-    return res.status(500).json({ error: String(err?.message || err) });
+    // Return error details in the response so you can see them without logs
+    return res.status(500).json({
+      ok: false,
+      started,
+      error: String(err?.message || err),
+      stack: (err && err.stack) ? String(err.stack) : null
+    });
   }
 };
