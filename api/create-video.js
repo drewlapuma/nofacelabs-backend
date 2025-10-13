@@ -206,3 +206,47 @@ module.exports = async (req, res) => {
     return res.status(500).json({ error: 'INTERNAL', message: String(err?.message || err) });
   }
 };
+// ---- normalize incoming aspect and resolve the template id ----
+const rawAspect = (body.aspectRatio ?? '').toString().trim();
+const aspect = rawAspect.replace(/\s/g, '');   // '9:16', '1:1', '16:9'
+
+// IMPORTANT: env var *names* must match these exactly:
+const TPL_916 = process.env.CREATO_TEMPLATE_916;  // vertical 9:16
+const TPL_11  = process.env.CREATO_TEMPLATE_11;   // square 1:1
+const TPL_169 = process.env.CREATO_TEMPLATE_169;  // horizontal 16:9
+
+const MAP = { '9:16': TPL_916, '1:1': TPL_11, '16:9': TPL_169 };
+const templateId = MAP[aspect];
+
+// Deep log so you can see exactly what the function sees in prod
+console.log('[CREATE_VIDEO] ENV_STATUS', {
+  hasApiKey: !!process.env.CREATOMATE_API_KEY,
+  aspect,
+  rawAspect,
+  env916: TPL_916 ? `${TPL_916.slice(0,6)}…` : null,
+  env11:  TPL_11  ? `${TPL_11.slice(0,6)}…`  : null,
+  env169: TPL_169 ? `${TPL_169.slice(0,6)}…` : null,
+});
+
+if (!templateId) {
+  console.error('[CREATE_VIDEO] NO_TEMPLATE_FOR_ASPECT', {
+    aspect,
+    missing: {
+      '9:16': !TPL_916,
+      '1:1':  !TPL_11,
+      '16:9': !TPL_169,
+    }
+  });
+  return res.status(400).json({
+    ok: false,
+    code: 'NO_TEMPLATE_FOR_ASPECT',
+    aspect,
+    missing: {
+      '9:16': !TPL_916,
+      '1:1':  !TPL_11,
+      '16:9': !TPL_169,
+    }
+  });
+}
+
+console.log('[CREATE_VIDEO] USING_TEMPLATE', { aspect, templateId: `${templateId.slice(0,6)}…` });
