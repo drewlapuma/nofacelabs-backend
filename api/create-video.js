@@ -70,8 +70,7 @@ module.exports = async (req, res) => {
 
     // --- call Creatomate (CJS-friendly dynamic import) ---
     const fetch = (...args) =>
-      import('node-fetch').then(({ default: f }) => f(...args));
-
+    
     const resp = await fetch('https://api.creatomate.com/v1/renders', {
       method: 'POST',
       headers: {
