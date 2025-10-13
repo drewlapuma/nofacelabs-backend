@@ -1,92 +1,73 @@
 // /api/create-video.js  (CommonJS)
-const fetch = global.fetch || require('node-fetch'); // Vercel has fetch in Node 18+, but this keeps it safe
 
 module.exports = async (req, res) => {
-  // CORS preflight
-  if (req.method === 'OPTIONS') {
-    res.setHeader('Access-Control-Allow-Origin', process.env.ALLOWED_ORIGIN || '*');
-    res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-    return res.status(200).end();
-  }
-
-  // CORS for normal request
-  res.setHeader('Access-Control-Allow-Origin', process.env.ALLOWED_ORIGIN || '*');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  // --- CORS ---
+  const allowOrigin = process.env.ALLOW_ORIGIN || '*';
+  res.setHeader('Access-Control-Allow-Origin', allowOrigin);
+  res.setHeader('Access-Control-Allow-Methods', 'POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') return res.status(200).end();
+  if (req.method !== 'POST')  return res.status(405).json({ error: 'METHOD_NOT_ALLOWED' });
 
   try {
-    // If you’re on Next.js “old” API routes, req.body is already parsed.
-    // (If you switched to Edge runtime or something custom, you’d need await req.json().)
-    const body = req.body || {};
-    console.log('CREATE_VIDEO body:', body);
+    const body = typeof req.body === 'object' && req.body
+      ? req.body
+      : JSON.parse(req.body || '{}');
 
-    // --- Minimal Creatomate render request ---
-    // Make sure you set CREATOMATE_API_KEY in Vercel → Project → Settings → Environment Variables
-    const apiKey = process.env.CREATOMATE_API_KEY;
-    if (!apiKey) {
-      console.error('Missing CREATOMATE_API_KEY');
-      return res.status(500).json({ error: 'missing_api_key' });
+    // Map aspect ratio -> Creatomate template id (set these in Vercel env)
+    const TEMPLATES = {
+      '9:16': process.env.CREATO_TEMPLATE_916,
+      '1:1' : process.env.CREATO_TEMPLATE_11,
+      '16:9': process.env.CREATO_TEMPLATE_169,
+    };
+
+    const aspect = (body.aspectRatio || '9:16').trim();
+    const template_id = TEMPLATES[aspect];
+
+    if (!template_id) {
+      console.error('CREATE_VIDEO: missing template for aspect', aspect);
+      return res.status(400).json({ error: 'NO_TEMPLATE_FOR_ASPECT', aspect });
     }
 
-    // Build a basic payload; customize from your template
+    // Build Creatomate payload (keys must match your template layer names)
     const payload = {
-      template_id: process.env.CREATOMATE_TEMPLATE_ID, // or use "template" if you send the full JSON
-      // dynamic data you want to inject:
+      template_id,
       modifications: {
-        // e.g., match your layer names:
-        Headline: body.headline || 'Sample Headline',
-        image_url: body.image_url || 'https://picsum.photos/1080/1920',
-        voice_url: body.voice_url || null, // if you already have TTS URL
+        // Adjust names to match your Creatomate layers exactly
+        Headline:  body.headline   || 'Sample Headline',
+        image_url: body.imageUrl   || 'https://picsum.photos/1080/1920',
+        voice_url: body.voiceUrl   || null
       }
     };
 
-    console.log('CREATE_VIDEO calling Creatomate with payload:', payload);
+    console.log('CREATE_VIDEO payload ->', JSON.stringify(payload));
 
-    const cr = await fetch('https://api.creatomate.com/v1/renders', {
+    const r = await fetch('https://api.creatomate.com/v1/renders', {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${apiKey}`,
+        'Authorization': `Bearer ${process.env.CREATOMATE_API_KEY}`,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify(payload)
     });
 
-    const json = await cr.json();
-    console.log('CREATE_VIDEO Creatomate raw response:', json);
-
-    // Creatomate usually returns an object with id/status or an array (depending on endpoint).
-    // If it’s an array, take json[0].id; if it’s an object, take json.id.
-    const jobId = Array.isArray(json) ? json[0]?.id : json?.id;
-
-    if (!jobId) {
-      console.error('CREATE_VIDEO no job id found in response');
-      return res.status(502).json({ error: 'no_job_id', raw: json });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      console.error('CREATE_VIDEO Creatomate error:', data);
+      return res.status(502).json({ error: 'CREATOMATE_ERROR', detail: data });
     }
 
-    console.log('CREATE_VIDEO job id:', jobId);
+    // Creatomate usually returns { id, ... } or an array
+    const jobId = data?.id ?? (Array.isArray(data) ? data[0]?.id : undefined);
+    if (!jobId) {
+      console.error('CREATE_VIDEO no job id in response:', data);
+      return res.status(502).json({ error: 'NO_JOB_ID', raw: data });
+    }
+
+    console.log('CREATE_VIDEO job_id ->', jobId);
     return res.status(200).json({ job_id: jobId });
   } catch (err) {
-    // Log everything you can
-    console.error('CREATE_VIDEO error:', err?.response?.data || err?.message || err);
-    return res.status(500).json({ error: 'create_failed' });
+    console.error('CREATE_VIDEO handler error:', err);
+    return res.status(500).json({ error: 'INTERNAL', message: String(err?.message || err) });
   }
 };
-const TEMPLATES = {
-  '9:16': process.env.CREATO_TEMPLATE_916,
-  '1:1' : process.env.CREATO_TEMPLATE_11,
-  '16:9': process.env.CREATO_TEMPLATE_169,
-};
-
-function templateFor(aspect) {
-  const id = TEMPLATES[aspect];
-  if (!id) throw new Error(`No template configured for aspect ${aspect}`);
-  return id;
-}
-
-// inside your handler:
-const template_id = templateFor(body.aspectRatio); // '9:16' | '1:1' | '16:9'
-await creatomate.post('/renders', {
-  template_id,
-  modifications: { /* Headline, image_url, voice_url, etc. */ }
-});
