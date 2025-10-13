@@ -1,41 +1,26 @@
-// api/generate-script.js  (CommonJS)
-const { allowCors } = require('../utils/cors');
+// /api/generate-script.js  (CommonJS)
 
-module.exports = allowCors(async (req, res) => {
-  if (req.method !== 'POST') return res.status(405).json({ error: 'Method Not Allowed' });
+module.exports = async (req, res) => {
+  const allowOrigin = process.env.ALLOW_ORIGIN || '*';
+  res.setHeader('Access-Control-Allow-Origin', allowOrigin);
+  res.setHeader('Access-Control-Allow-Methods', 'POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') return res.status(200).end();
+  if (req.method !== 'POST')    return res.status(405).json({ error: 'METHOD_NOT_ALLOWED' });
 
   try {
-    const { prompt } = req.body || {};
+    const body = typeof req.body === 'object' && req.body
+      ? req.body
+      : JSON.parse(req.body || '{}');
 
-    // Node 18+ on Vercel has a global fetch. No need for node-fetch.
-    const r = await fetch('https://api.openai.com/v1/responses', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        model: 'gpt-5-mini',
-        input: `Write a short video script:\n${prompt || ''}`
-      })
-    });
+    // TODO: replace with your OpenAI call
+    const script = `Title: ${body?.storyType || 'Untitled'}
+Paragraph 1...
+Paragraph 2...`;
 
-    const data = await r.json();
-    if (!r.ok) {
-      console.error('OpenAI error:', data);
-      return res.status(500).json({ error: 'OpenAI request failed', details: data });
-    }
-
-    const text =
-      data.output_text ||
-      data.choices?.[0]?.message?.content ||
-      data.choices?.[0]?.text ||
-      '';
-
-    return res.status(200).json({ ok: true, text });
+    return res.status(200).json({ script });
   } catch (err) {
-    console.error('generate-script error:', err);
-    return res.status(500).json({ error: 'Server error' });
+    console.error('GENERATE_SCRIPT error:', err);
+    return res.status(500).json({ error: 'INTERNAL', message: String(err?.message || err) });
   }
-});
-
+};
