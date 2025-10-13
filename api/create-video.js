@@ -1,5 +1,8 @@
 // /api/create-video.js  (CommonJS)
-const fetch = (...args) => import('node-fetch').then(({default: f}) => f(...args));
+// Use the platform fetch if available; otherwise lazy-import node-fetch (ESM)
+const doFetch = (...args) =>
+  (globalThis.fetch ? globalThis.fetch(...args)
+                    : import('node-fetch').then(m => m.default(...args)));
 
 module.exports = async (req, res) => {
   try {
