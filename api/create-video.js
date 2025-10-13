@@ -52,34 +52,43 @@ module.exports = async (req, res) => {
       voice_url: null
     };
 
-    // Call Creatomate using the **built-in** fetch (no node-fetch!)
-    const resp = await fetch("https://api.creatomate.com/v1/renders", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${process.env.CREATOMATE_API_KEY}`,
-        "Content-Type": "application/json"
-      },
-      // Creatomate accepts either `{ template_id, modifications }`
-      // or `{ source: { template_id, modifications } }`. Both work; we'll use the short one:
-      body: JSON.stringify([{ template_id, modifications }]) // array => multiple renders supported
-    });
-
-    const json = await resp.json();
-
-    if (!resp.ok) {
-      // bubble up Creatomate's helpful error
-      return res.status(resp.status).json({ error: "CREATOMATE_ERROR", details: json });
-    }
-
-    // Creatomate returns an array; each item has an id (job id)
-    const job_id = Array.isArray(json) ? json[0]?.id : json?.id || json?.job_id;
-    if (!job_id) {
-      return res.status(502).json({ error: "NO_JOB_ID_IN_RESPONSE", raw: json });
-    }
-
-    return res.status(200).json({ ok: true, job_id });
-  } catch (err) {
-    console.error("[CREATE_VIDEO] ERROR", err);
-    return res.status(500).json({ error: "CREATE_VIDEO_CRASH", message: err.message });
-  }
+    // ----- Creatomate call with rich error logging -----
+const payload = {
+  // using object form instead of array (both are valid, but this is the simplest)
+  source: { template_id, modifications },
 };
+
+const resp = await fetch("https://api.creatomate.com/v1/renders", {
+  method: "POST",
+  headers: {
+    "Authorization": `Bearer ${process.env.CREATOMATE_API_KEY}`,
+    "Content-Type": "application/json",
+  },
+  body: JSON.stringify(payload),
+});
+
+// read body safely whether it's JSON or text
+const rawText = await resp.text();
+let respJson;
+try { respJson = JSON.parse(rawText); } catch { respJson = { raw: rawText }; }
+
+if (!resp.ok) {
+  console.error("[CREATOMATE_ERROR]", {
+    status: resp.status,
+    body: respJson,
+    sent: payload,
+  });
+  return res.status(resp.status).json({
+    error: "CREATOMATE_ERROR",
+    status: resp.status,
+    details: respJson,
+  });
+}
+
+// success
+const job_id = Array.isArray(respJson) ? respJson[0]?.id : respJson?.id || respJson?.job_id;
+if (!job_id) {
+  console.error("[CREATE_VIDEO] No job id in response", respJson);
+  return res.status(502).json({ error: "NO_JOB_ID_IN_RESPONSE", details: respJson });
+}
+return res.status(200).json({ ok: true, job_id });
