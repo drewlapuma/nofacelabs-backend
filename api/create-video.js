@@ -67,29 +67,35 @@ module.exports = async function handler(req, res) {
     };
     if (voice_url) modifications.voice_url = voice_url;
 
-    // === Use RENDERS WRAPPER (some accounts require this shape) ===
-    const payload = {
-      renders: [
-        {
-          template_id,          // top-level template reference
-          modifications,
-          format: "mp4",        // force video
-          // frame_rate: 30,    // optional
-        }
-      ]
-    };
+   // === Use RENDERS WRAPPER + source.template_id (required by some accounts) ===
+const payload = {
+  renders: [
+    {
+      source: {
+        template_id,       // <-- inside source
+        modifications,
+      },
+      format: "mp4",       // force video
+      // frame_rate: 30,   // optional
+    },
+  ],
+};
 
-    // Safe preview (don’t log full headline)
-    console.log("[CREATE_VIDEO] CALL_PAYLOAD_PREVIEW", {
-      uses_wrapper: true,
-      item_count: payload.renders.length,
-      item0: {
-        format: payload.renders[0].format,
-        template_id_preview: template_id.slice(0,6) + "…" + template_id.slice(-4),
-        has_voice_url: !!modifications.voice_url,
-        headline_len: (modifications.Headline || "").length,
-      }
-    });
+// Safe preview (don’t log full headline)
+const first = payload.renders[0];
+console.log("[CREATE_VIDEO] CALL_PAYLOAD_PREVIEW", {
+  uses_wrapper: true,
+  item_count: payload.renders.length,
+  item0: {
+    format: first.format,
+    has_source: !!first.source,
+    source_template_preview: first.source?.template_id
+      ? first.source.template_id.slice(0, 6) + "…" + first.source.template_id.slice(-4)
+      : "missing",
+    has_voice_url: !!modifications.voice_url,
+    headline_len: (modifications.Headline || "").length,
+  },
+});
 
     const resp = await fetch("https://api.creatomate.com/v1/renders", {
       method: "POST",
