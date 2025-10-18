@@ -20,17 +20,16 @@ module.exports = async function handler(req, res) {
   }
 
   try {
-    // Parse body safely whether Webflow sends JSON string or object
     const body =
       typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {});
 
     const {
       storyType,
       customPrompt,
-      voice,          // (not used directly here; your template can use voice_url if present)
-      language,       // (available if you decide to branch templates later)
-      durationSec,    // (available if you want to vary templates later)
-      aspectRatio,    // "9:16" | "1:1" | "16:9"
+      voice,        // not used directly
+      language,     // available for future branching
+      durationSec,  // available for future branching
+      aspectRatio,  // "9:16" | "1:1" | "16:9"
       artStyle
     } = body;
 
@@ -38,11 +37,10 @@ module.exports = async function handler(req, res) {
       storyType, voice, language, durationSec, aspectRatio, artStyle
     });
 
-    // Normalize aspect just in case ("9x16" -> "9:16")
     const aspect = String(aspectRatio || "").trim().replace("x", ":");
 
-    // Pick template id by aspect ratio (env var names you set in Vercel)
-    const env916 = process.env.CREATO_TEMPLATE_916 || process.env.CREATO_TEMPLATE_919; // safety alias
+    // env template ids
+    const env916 = process.env.CREATO_TEMPLATE_916 || process.env.CREATO_TEMPLATE_919;
     const env11  = process.env.CREATO_TEMPLATE_11;
     const env169 = process.env.CREATO_TEMPLATE_169;
 
@@ -69,35 +67,30 @@ module.exports = async function handler(req, res) {
       return res.status(400).json({ error: "NO_TEMPLATE_FOR_ASPECT", aspect });
     }
 
-    // Your template’s selectors must match these keys in the editor:
-    // Text layer -> Selector: Headline
-    // Image layer -> Selector: image_url
-    // (Optional) Audio layer -> Selector: voice_url
+    // selectors must exist in the template
     const modifications = {
       Headline: (customPrompt && customPrompt.trim())
         ? customPrompt.trim()
         : (storyType || "Sample Headline"),
       image_url: "https://picsum.photos/1080/1920",
     };
-    // Only include voice_url if you really have an audio layer with that selector
     if (body.voice_url) {
       modifications.voice_url = body.voice_url;
     }
 
-    // ---- Creatomate request payload (FORCE MP4) ----
-    // Wrapping inside { source: {...} } is important; format:'mp4' prevents image snapshots.
-    const payload = {
-      source: {
+    // === IMPORTANT: array payload, with top-level format: 'mp4' ===
+    const payload = [
+      {
         template_id,
-        format: "mp4",            // << force video output
-        // frame_rate: 30,        // (optional) uncomment to force FPS
         modifications,
-      },
-    };
+        format: "mp4",            // <- this forces video render
+        // frame_rate: 30,        // optional
+        // snapshot: false,       // optional safety; defaults to false for mp4
+      }
+    ];
 
-    console.log("[CREATE_VIDEO] CALL_PAYLOAD", { aspect, templateId: template_id });
+    console.log("[CREATE_VIDEO] CALL_PAYLOAD_META", { aspect, templateId: template_id });
 
-    // Node 18+ on Vercel has fetch built-in; no node-fetch needed.
     const resp = await fetch("https://api.creatomate.com/v1/renders", {
       method: "POST",
       headers: {
@@ -110,6 +103,9 @@ module.exports = async function handler(req, res) {
     const rawText = await resp.text();
     let respJson;
     try { respJson = JSON.parse(rawText); } catch { respJson = { raw: rawText }; }
+
+    // Helpful diagnostics in logs:
+    console.log("[CREATE_VIDEO] RAW_RESPONSE", rawText);
 
     if (!resp.ok) {
       console.error("[CREATOMATE_ERROR]", {
@@ -124,7 +120,7 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    // Creatomate can return either an array of jobs or a single job object
+    // Array response -> first job’s id
     const job_id = Array.isArray(respJson)
       ? respJson[0]?.id
       : (respJson?.id || respJson?.job_id);
@@ -141,3 +137,4 @@ module.exports = async function handler(req, res) {
     return res.status(500).json({ error: "SERVER_ERROR", message: err.message });
   }
 };
+
