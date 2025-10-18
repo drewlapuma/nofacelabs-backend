@@ -27,10 +27,10 @@ module.exports = async function handler(req, res) {
     const {
       storyType,
       customPrompt,
-      voice,
-      language,
-      durationSec,
-      aspectRatio,  // "9:16" | "1:1" | "16:9"
+      voice,          // (not used directly here; your template can use voice_url if present)
+      language,       // (available if you decide to branch templates later)
+      durationSec,    // (available if you want to vary templates later)
+      aspectRatio,    // "9:16" | "1:1" | "16:9"
       artStyle
     } = body;
 
@@ -38,9 +38,11 @@ module.exports = async function handler(req, res) {
       storyType, voice, language, durationSec, aspectRatio, artStyle
     });
 
-    // Pick template id by aspect ratio
-    const aspect = (aspectRatio || "").trim();
-    const env916 = process.env.CREATO_TEMPLATE_916 || process.env.CREATO_TEMPLATE_919; // safety
+    // Normalize aspect just in case ("9x16" -> "9:16")
+    const aspect = String(aspectRatio || "").trim().replace("x", ":");
+
+    // Pick template id by aspect ratio (env var names you set in Vercel)
+    const env916 = process.env.CREATO_TEMPLATE_916 || process.env.CREATO_TEMPLATE_919; // safety alias
     const env11  = process.env.CREATO_TEMPLATE_11;
     const env169 = process.env.CREATO_TEMPLATE_169;
 
@@ -72,7 +74,7 @@ module.exports = async function handler(req, res) {
     // Image layer -> Selector: image_url
     // (Optional) Audio layer -> Selector: voice_url
     const modifications = {
-      Headline: customPrompt?.trim()
+      Headline: (customPrompt && customPrompt.trim())
         ? customPrompt.trim()
         : (storyType || "Sample Headline"),
       image_url: "https://picsum.photos/1080/1920",
@@ -82,9 +84,15 @@ module.exports = async function handler(req, res) {
       modifications.voice_url = body.voice_url;
     }
 
-    // Creatomate request payload
+    // ---- Creatomate request payload (FORCE MP4) ----
+    // Wrapping inside { source: {...} } is important; format:'mp4' prevents image snapshots.
     const payload = {
-      source: { template_id, modifications },
+      source: {
+        template_id,
+        format: "mp4",            // << force video output
+        // frame_rate: 30,        // (optional) uncomment to force FPS
+        modifications,
+      },
     };
 
     console.log("[CREATE_VIDEO] CALL_PAYLOAD", { aspect, templateId: template_id });
@@ -133,4 +141,3 @@ module.exports = async function handler(req, res) {
     return res.status(500).json({ error: "SERVER_ERROR", message: err.message });
   }
 };
-
