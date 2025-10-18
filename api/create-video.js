@@ -78,16 +78,19 @@ module.exports = async function handler(req, res) {
       modifications.voice_url = body.voice_url;
     }
 
-    // === IMPORTANT: array payload, with top-level format: 'mp4' ===
-    const payload = [
-      {
-        template_id,
-        modifications,
-        format: "mp4",            // <- this forces video render
-        // frame_rate: 30,        // optional
-        // snapshot: false,       // optional safety; defaults to false for mp4
-      }
-    ];
+    // === IMPORTANT: array payload, with top-level format: 'mp4' AND source{...} ===
+const payload = [
+  {
+    format: "mp4",                    // forces video
+    // frame_rate: 30,               // optional
+    // snapshot: false,              // optional safety (defaults false for mp4)
+    source: {
+      template_id,
+      modifications,
+    },
+  }
+];
+
 
     console.log("[CREATE_VIDEO] CALL_PAYLOAD_META", { aspect, templateId: template_id });
 
