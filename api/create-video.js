@@ -1,6 +1,4 @@
 // api/create-video.js  (CommonJS on Vercel)
-// package.json should be: { "type": "commonjs" }
-
 const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN || "*";
 
 function setCors(res) {
@@ -11,37 +9,17 @@ function setCors(res) {
 
 module.exports = async function handler(req, res) {
   setCors(res);
-
-  if (req.method === "OPTIONS") {
-    return res.status(200).end();
-  }
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "METHOD_NOT_ALLOWED" });
-  }
+  if (req.method === "OPTIONS") return res.status(200).end();
+  if (req.method !== "POST")  return res.status(405).json({ error: "METHOD_NOT_ALLOWED" });
 
   try {
-    const body =
-      typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {});
-
-    const {
-      storyType,
-      customPrompt,
-      voice,
-      language,
-      durationSec,
-      aspectRatio,  // "9:16" | "1:1" | "16:9"
-      artStyle
-    } = body;
-
-    console.log("[CREATE_VIDEO] INPUT", {
-      storyType, voice, language, durationSec, aspectRatio, artStyle
-    });
+    const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {});
+    const { storyType, customPrompt, voice, language, durationSec, aspectRatio, artStyle } = body;
 
     const aspect = (aspectRatio || "").trim();
     const env916 = process.env.CREATO_TEMPLATE_916 || process.env.CREATO_TEMPLATE_919;
     const env11  = process.env.CREATO_TEMPLATE_11;
     const env169 = process.env.CREATO_TEMPLATE_169;
-
     const templateMap = { "9:16": env916, "1:1": env11, "16:9": env169 };
     const template_id = templateMap[aspect];
 
@@ -54,31 +32,25 @@ module.exports = async function handler(req, res) {
       template_id_preview: template_id ? template_id.slice(0,6) + "…" : "none"
     });
 
-    if (!process.env.CREATOMATE_API_KEY) {
-      return res.status(500).json({ error: "MISSING_CREATOMATE_API_KEY" });
-    }
+    if (!process.env.CREATOMATE_API_KEY) return res.status(500).json({ error: "MISSING_CREATOMATE_API_KEY" });
     if (!template_id) {
       console.error("[CREATE_VIDEO] missing template for aspect", aspect);
       return res.status(400).json({ error: "NO_TEMPLATE_FOR_ASPECT", aspect });
     }
 
-    // ---- Build modifications (selectors must exist in your template) ----
     const modifications = {
-      Headline: (customPrompt && customPrompt.trim())
-        ? customPrompt.trim()
-        : (storyType || "Sample Headline"),
+      Headline: (customPrompt && customPrompt.trim()) ? customPrompt.trim() : (storyType || "Sample Headline"),
       image_url: "https://picsum.photos/1080/1920",
     };
-    if (body.voice_url) {
-      modifications.voice_url = body.voice_url;
-    }
+    if (body.voice_url) modifications.voice_url = body.voice_url;
 
-    // ---- Three shapes to satisfy all API variants ----
-    const itemTopLevel = { format: "mp4", template_id, modifications };
+    // Variants
+    const itemTopLevel   = { format: "mp4", template_id, modifications };
     const itemWithSource = { format: "mp4", source: { template_id, modifications } };
-    const shapeA = [ itemTopLevel ];         // array, top-level template_id
-    const shapeB = [ itemWithSource ];       // array, source.template_id
+    const shapeB = [ itemWithSource ];        // array + source.template_id  <-- try FIRST
+    const shapeD = itemWithSource;            // single object (no array)
     const shapeC = { renders: [ itemTopLevel ] }; // object wrapper with renders[]
+    const shapeA = [ itemTopLevel ];          // array + top-level template_id
 
     async function trySend(payload, label) {
       console.log(`[CREATE_VIDEO] TRY ${label}`, JSON.stringify(payload).slice(0,500));
@@ -92,34 +64,21 @@ module.exports = async function handler(req, res) {
       });
       const text = await resp.text();
       let json; try { json = JSON.parse(text); } catch { json = { raw: text }; }
-
       console.log(`[CREATE_VIDEO] RESP ${label}`, resp.status, JSON.stringify(json).slice(0,500));
-
       return { ok: resp.ok, status: resp.status, data: json };
     }
 
-    // Try A → B → C
-    let attempt = await trySend(shapeA, "A(array+template_id)");
-    if (!attempt.ok && attempt.status === 400) {
-      attempt = await trySend(shapeB, "B(array+source.template_id)");
-    }
-    if (!attempt.ok && attempt.status === 400) {
-      attempt = await trySend(shapeC, "C(object+renders[])");
-    }
+    // New order: B → D → C → A
+    let attempt = await trySend(shapeB, "B(array+source.template_id)");
+    if (!attempt.ok && attempt.status === 400) attempt = await trySend(shapeD, "D(single object + source.template_id)");
+    if (!attempt.ok && attempt.status === 400) attempt = await trySend(shapeC, "C(object+renders[])");
+    if (!attempt.ok && attempt.status === 400) attempt = await trySend(shapeA, "A(array+template_id)");
 
     if (!attempt.ok) {
-      console.error("[CREATOMATE_ERROR]", {
-        status: attempt.status,
-        body: attempt.data
-      });
-      return res.status(attempt.status).json({
-        error: "CREATOMATE_ERROR",
-        status: attempt.status,
-        details: attempt.data,
-      });
+      console.error("[CREATOMATE_ERROR]", { status: attempt.status, body: attempt.data });
+      return res.status(attempt.status).json({ error: "CREATOMATE_ERROR", status: attempt.status, details: attempt.data });
     }
 
-    // Creatomate may return an array or an object
     const respJson = attempt.data;
     const job_id = Array.isArray(respJson)
       ? (respJson[0]?.id || respJson[0]?.job_id)
