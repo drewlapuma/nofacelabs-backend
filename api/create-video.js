@@ -1,13 +1,10 @@
 // api/create-video.js  (CommonJS on Vercel)
-// package.json => { "type": "commonjs" }
-
 const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN || "*";
 
 function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", ALLOW_ORIGIN);
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With");
-  res.setHeader("Vary", "Origin");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 }
 
 module.exports = async function handler(req, res) {
@@ -17,9 +14,8 @@ module.exports = async function handler(req, res) {
 
   try {
     const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {});
-    const { storyType, customPrompt, aspectRatio } = body;
+    const { storyType, customPrompt, voice, language, durationSec, aspectRatio, artStyle } = body;
 
-    // Map aspect → template id from env
     const aspect = (aspectRatio || "").trim();
     const env916 = process.env.CREATO_TEMPLATE_916 || process.env.CREATO_TEMPLATE_919;
     const env11  = process.env.CREATO_TEMPLATE_11;
@@ -27,73 +23,73 @@ module.exports = async function handler(req, res) {
     const templateMap = { "9:16": env916, "1:1": env11, "16:9": env169 };
     const template_id = templateMap[aspect];
 
-    console.log("[CREATE_VIDEO] ENV", {
-      apiKey: !!process.env.CREATOMATE_API_KEY,
+    console.log("[CREATE_VIDEO] ENV_STATUS", {
+      hasApiKey: !!process.env.CREATOMATE_API_KEY,
       aspect,
-      have916: !!env916, have11: !!env11, have169: !!env169,
-      templatePreview: template_id ? template_id.slice(0,6) + "…" : "none"
+      env916: env916 ? "set" : "missing",
+      env11 : env11  ? "set" : "missing",
+      env169: env169 ? "set" : "missing",
+      template_id_preview: template_id ? template_id.slice(0,6) + "…" : "none"
     });
 
-    if (!process.env.CREATOMATE_API_KEY)
+    if (!process.env.CREATOMATE_API_KEY) {
       return res.status(500).json({ error: "MISSING_CREATOMATE_API_KEY" });
-    if (!template_id)
+    }
+    if (!template_id) {
+      console.error("[CREATE_VIDEO] missing template for aspect", aspect);
       return res.status(400).json({ error: "NO_TEMPLATE_FOR_ASPECT", aspect });
+    }
 
-    // Modifications – selectors must match your template
     const modifications = {
-      Headline: (customPrompt && customPrompt.trim())
-        ? customPrompt.trim()
-        : (storyType || "Sample Headline"),
-      image_url: "https://picsum.photos/1080/1920"
-      // voice_url: body.voice_url   // only if your template has a layer with selector "voice_url"
+      // make sure these selector names match your template
+      Headline: (customPrompt && customPrompt.trim()) ? customPrompt.trim() : (storyType || "Sample Headline"),
+      image_url: "https://picsum.photos/1080/1920",
     };
+    if (body.voice_url) modifications.voice_url = body.voice_url;
 
-    // ---- SHAPE 1: single object, top-level format, source.template_id ----
-    const payload1 = {
-      format: "mp4",                  // force video AT TOP LEVEL
+    // --- Force a true video render ---
+    const seconds = Number(durationSec) || 75; // pick 60–90 in your UI; default 75
+    const payload = {
+      format: "mp4",
+      duration: seconds, // << crucial: prevents snapshot JPG
+      fps: 30,           // optional, but reinforces “video”
       source: {
         template_id,
         modifications
-        // (do NOT put format/duration inside source for this attempt)
       }
     };
+    // You may also send as an array; either is valid:
+    // const payload = [ { format: "mp4", duration: seconds, fps: 30, source: { template_id, modifications } } ];
 
-    // ---- SHAPE 2: array of that same object (some projects expect an array) ----
-    const payload2 = [ payload1 ];
+    console.log("[CREATE_VIDEO] PAYLOAD_PREVIEW", {
+      format: payload.format,
+      duration: payload.duration,
+      fps: payload.fps,
+      has_template: !!template_id,
+      headline_len: (modifications.Headline || "").length
+    });
 
-    async function send(label, payload) {
-      console.log(`[CREATE_VIDEO] TRY ${label}:`, JSON.stringify(payload).slice(0, 600));
-      const resp = await fetch("https://api.creatomate.com/v1/renders", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${process.env.CREATOMATE_API_KEY}`,
-          "Content-Type": "application/json",
-          Accept: "application/json",
-        },
-        body: JSON.stringify(payload),
-      });
-      const raw = await resp.text();
-      let data; try { data = JSON.parse(raw); } catch { data = { raw }; }
-      console.log(`[CREATE_VIDEO] RESP ${label}:`, resp.status, JSON.stringify(data).slice(0, 800));
-      return { ok: resp.ok, status: resp.status, data };
+    const resp = await fetch("https://api.creatomate.com/v1/renders", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${process.env.CREATOMATE_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+
+    const raw = await resp.text();
+    let json; try { json = JSON.parse(raw); } catch { json = { raw }; }
+    console.log("[CREATE_VIDEO] RESP", resp.status, Array.isArray(json) ? json[0] : json);
+
+    if (!resp.ok) {
+      return res.status(resp.status).json({ error: "CREATOMATE_ERROR", details: json });
     }
 
-    // Try SHAPE 1, then SHAPE 2 only if we get a 400
-    let r = await send("SINGLE", payload1);
-    if (!r.ok && r.status === 400) {
-      r = await send("ARRAY", payload2);
-    }
-
-    if (!r.ok) {
-      return res.status(r.status).json({ error: "CREATOMATE_ERROR", details: r.data });
-    }
-
-    // Extract job id (object or array)
-    const data = r.data;
-    const job_id = Array.isArray(data) ? (data[0]?.id || data[0]?.job_id) : (data?.id || data?.job_id);
+    const job_id = Array.isArray(json) ? (json[0]?.id || json[0]?.job_id) : (json?.id || json?.job_id);
     if (!job_id) {
-      console.error("[CREATE_VIDEO] NO_JOB_ID_IN_RESPONSE", data);
-      return res.status(502).json({ error: "NO_JOB_ID_IN_RESPONSE", details: data });
+      console.error("[CREATE_VIDEO] NO_JOB_ID_IN_RESPONSE", json);
+      return res.status(502).json({ error: "NO_JOB_ID_IN_RESPONSE", details: json });
     }
 
     return res.status(200).json({ ok: true, job_id });
