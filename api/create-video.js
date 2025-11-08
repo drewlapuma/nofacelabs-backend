@@ -1,4 +1,4 @@
-// api/create-video.js  (CommonJS)
+// api/create-video.js  (CommonJS on Vercel)
 const https = require('https');
 
 const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN || '*';
@@ -18,7 +18,7 @@ function postJSON(url, headers, bodyObj) {
         path: pathname,
         method: 'POST', // force HTTP/1.1
         headers: {
-          'Authorization': headers.Authorization,
+          Authorization: headers.Authorization,
           'Content-Type': 'application/json',
           'Content-Length': Buffer.byteLength(data),
         },
@@ -53,16 +53,15 @@ module.exports = async function handler(req, res) {
       language    = 'English',
       voice       = 'Adam',
       aspectRatio = '9:16',
-      // optional overrides
-      perBeatSec  = 10, // ~10–12 sec per beat is comfy
-      voice_url   = null, // if you generate TTS elsewhere, pass it here
+      perBeatSec  = 10,      // fallback if generate-script doesn’t return durations
+      voice_url   = null,    // pass TTS url here if you have one
     } = body;
 
     if (!process.env.CREATOMATE_API_KEY) {
       return res.status(500).json({ error: 'MISSING_CREATOMATE_API_KEY' });
     }
 
-    // Pick template ID by aspect ratio (you already have these envs set)
+    // Map aspect ratio -> your template IDs
     const templateMap = {
       '9:16': process.env.CREATO_TEMPLATE_916,
       '1:1' : process.env.CREATO_TEMPLATE_11,
@@ -73,53 +72,98 @@ module.exports = async function handler(req, res) {
       return res.status(400).json({ error: 'NO_TEMPLATE_FOR_ASPECT', aspectRatio });
     }
 
-    // 1) Ask our script endpoint for narration + beats
-    const scriptResp = await fetch(`${process.env.PUBLIC_BASE_URL || ''}/api/generate-script`, {
+    // 1) Get narration + beats
+    const scriptURL = `${process.env.PUBLIC_BASE_URL || ''}/api/generate-script`;
+    const scriptResp = await fetch(scriptURL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ storyType, artStyle, language, targetBeats: 6 }),
-    }).then(r => r.json());
+      body: JSON.stringify({
+        storyType, artStyle, language,
+        targetBeats: 6,
+      }),
+    }).then(r => r.json()).catch(() => null);
 
     if (!scriptResp?.beats?.length || !scriptResp?.narration) {
       return res.status(502).json({ error: 'SCRIPT_EMPTY', details: scriptResp });
     }
 
-    const beats = scriptResp.beats.slice(0, 10); // cap to number of scenes you built
-    const narration = scriptResp.narration;
-
-    // 2) Map beats -> template selectors
-    // Your template must have Scene1_*, Scene2_*, … selectors as noted above.
-    const mods = {
-      Narration: narration, // your hidden text layer for TTS / reference
-
-      // Optional voice URL if your template has an audio layer with selector "voice_url"
-      ...(voice_url ? { voice_url } : {}),
-    };
-
-    beats.forEach((b, i) => {
-      const idx = i + 1;
-      mods[`Scene${idx}_Text`]    = b.caption;
-      // For now, use an AI/stock image endpoint; swap with your own generator or CDN
-      // You can pipe b.imagePrompt into your image generator; as a placeholder use picsum with a seed
-      mods[`Scene${idx}_Image`]   = `https://picsum.photos/seed/${encodeURIComponent(b.imagePrompt || idx)}/1080/1920`;
-      mods[`Scene${idx}_Visible`] = true;
-    });
-
-    // Hide any unused scenes (e.g., if you made 10 slots but got 6 beats)
-    for (let i = beats.length + 1; i <= 10; i++) {
-      mods[`Scene${i}_Visible`] = false;
+    // Normalize beats -> ensure start/duration exist and are cumulative
+    const beatsIn = scriptResp.beats.slice(0, 10); // limit to number of scenes built
+    const beats = [];
+    let cursor = 0;
+    for (const b of beatsIn) {
+      const dur = Math.max(1, Math.round(b.duration || perBeatSec));
+      const start = (typeof b.start === 'number' ? b.start : cursor);
+      beats.push({
+        start,
+        duration: dur,
+        caption: b.caption || '',
+        imagePrompt: b.imagePrompt || '',        // optional from your script endpoint
+        image: b.image || null,                  // if you already resolved an image URL
+      });
+      cursor = start + dur;
     }
 
-    // 3) Compute total duration from beats (or omit if your template defines it internally)
-    const duration = Math.max(5, Math.round(beats.length * perBeatSec));
+    // 2) Build property-level modifications matching your template selectors:
+    //   Beat{n}_Image     -> time.start, time.duration, source
+    //   Beat{n}_Caption   -> time.start, time.duration, text
+    //   Narration         -> text
+    //   Voiceover         -> source   (optional)
+    const modifications = [];
 
-    // 4) Fire Creatomate with the *single-object* payload (this is the shape that produced MP4 for you)
-    const payload = {
+    // Narration text
+    modifications.push({
+      selector: 'Narration',
+      property: 'text',
+      value: scriptResp.narration,
+    });
+
+    // Optional TTS audio
+    if (voice_url) {
+      modifications.push({
+        selector: 'Voiceover',
+        property: 'source',
+        value: voice_url,
+      });
+    }
+
+    // Per-beat image + caption timings + content
+    beats.forEach((b, i) => {
+      const n = i + 1;
+
+      // Image timing + source
+      modifications.push(
+        { selector: `Beat${n}_Image`, property: 'time.start',    value: b.start },
+        { selector: `Beat${n}_Image`, property: 'time.duration', value: b.duration },
+        { selector: `Beat${n}_Image`, property: 'source',        value: b.image || `https://picsum.photos/seed/${encodeURIComponent(b.imagePrompt || `beat-${n}`)}/1080/1920` },
+      );
+
+      // Caption timing + text
+      modifications.push(
+        { selector: `Beat${n}_Caption`, property: 'time.start',    value: b.start },
+        { selector: `Beat${n}_Caption`, property: 'time.duration', value: b.duration },
+        { selector: `Beat${n}_Caption`, property: 'text',          value: b.caption || '' },
+      );
+    });
+
+    // 3) Send Creatomate request — use ARRAY payload (this is the shape that returned MP4 for you)
+    const payload = [{
       template_id,
-      modifications: mods,
       output_format: 'mp4',
-      duration, // comment this out if your template’s timeline is fully self-determined
-    };
+      modifications,
+      // Do NOT set global duration here; individual layer durations control the timeline.
+      // If your template needs a hard cap, you can add: duration: beats.at(-1).start + beats.at(-1).duration
+    }];
+
+    // Preview log (safe)
+    console.log('[CREATE_VIDEO] PAYLOAD_PREVIEW', JSON.stringify({
+      item_count: payload.length,
+      first_item: {
+        template_id: template_id?.slice(0, 8) + '…',
+        mods: modifications.length,
+        first_mod: modifications[0],
+      },
+    }));
 
     const resp = await postJSON(
       'https://api.creatomate.com/v1/renders',
@@ -127,8 +171,9 @@ module.exports = async function handler(req, res) {
       payload
     );
 
+    console.log('[CREATE_VIDEO] RESP', resp.status, typeof resp.json === 'object' ? JSON.stringify(resp.json).slice(0, 300) : resp.json);
+
     if (resp.status !== 202) {
-      console.error('[CREATOMATE_ERROR]', resp.status, resp.json);
       return res.status(resp.status).json({ error: 'CREATOMATE_ERROR', details: resp.json });
     }
 
