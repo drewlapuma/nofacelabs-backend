@@ -62,15 +62,14 @@ module.exports = async function handler(req, res) {
       language    = 'English',
       voice       = 'Adam',
       aspectRatio = '9:16',
-      perBeatSec  = 10,   // ~seconds per beat
-      voice_url   = null, // optional: if you generate TTS elsewhere
+      perBeatSec  = 10,
+      voice_url   = null,
     } = body;
 
     if (!process.env.CREATOMATE_API_KEY) {
       return res.status(500).json({ error: 'MISSING_CREATOMATE_API_KEY' });
     }
 
-    // Pick template ID by aspect ratio
     const templateMap = {
       '9:16': process.env.CREATO_TEMPLATE_916,
       '1:1' : process.env.CREATO_TEMPLATE_11,
@@ -84,8 +83,8 @@ module.exports = async function handler(req, res) {
         .json({ error: 'NO_TEMPLATE_FOR_ASPECT', aspectRatio });
     }
 
-    // ---- 1) Call /api/generate-script on *this* backend ----
-    const baseUrl = `https://${req.headers.host}`;
+    // ---- 1) Call /api/generate-script on THIS backend ----
+    const baseUrl   = `https://${req.headers.host}`;
     const scriptUrl = `${baseUrl}/api/generate-script`;
 
     const scriptResp = await fetch(scriptUrl, {
@@ -109,29 +108,30 @@ module.exports = async function handler(req, res) {
       return res.status(502).json({ error: 'SCRIPT_EMPTY', details: scriptResp });
     }
 
-    const beats = scriptResp.beats.slice(0, 10); // up to 10 scenes you built
-    const narration = scriptResp.narration;
+    const beats      = scriptResp.beats.slice(0, 10); // up to 10 beats
+    const narration  = scriptResp.narration;
 
-    // ---- 2) Build Creatomate modifications from beats ----
+    // ---- 2) Build modifications USING YOUR ACTUAL SELECTORS ----
+    // Text layer named "Narration" (make it dynamic for text)
     const mods = {
       Narration: narration,
       ...(voice_url ? { voice_url } : {}),
     };
 
+    // Your layers are Beat1_Caption, Beat2_Caption, Beat3_Caption, ...
+    // and Beat1_Image, Beat2_Image, Beat3_Image, ...
     beats.forEach((b, i) => {
       const idx = i + 1;
-      mods[`Scene${idx}_Text`] = b.caption;
-      mods[`Scene${idx}_Image`] =
+      mods[`Beat${idx}_Caption`] = b.caption;
+
+      // swap the image source (your image layers must have Dynamic → Source)
+      mods[`Beat${idx}_Image`] =
         `https://picsum.photos/seed/${encodeURIComponent(
           b.imagePrompt || `${storyType}-${idx}`
         )}/1080/1920`;
-      mods[`Scene${idx}_Visible`] = true;
     });
 
-    for (let i = beats.length + 1; i <= 10; i++) {
-      mods[`Scene${i}_Visible`] = false;
-    }
-
+    // you *can* also hide extra beats later with Beat4_Visible etc
     const duration = Math.max(5, Math.round(beats.length * perBeatSec));
 
     const payload = {
