@@ -58,12 +58,12 @@ module.exports = async function handler(req, res) {
 
     const {
       storyType   = 'Motivational',
-      artStyle    = 'Scary toon',
+      artStyle    = 'Scary toon',  // will be overridden by Webflow choice
       language    = 'English',
       voice       = 'Adam',
       aspectRatio = '9:16',
       perBeatSec  = 10,
-      voice_url   = null,
+      voice_url   = null,          // if you later pass a TTS URL
     } = body;
 
     if (!process.env.CREATOMATE_API_KEY) {
@@ -94,7 +94,7 @@ module.exports = async function handler(req, res) {
         storyType,
         artStyle,
         language,
-        targetBeats: 6,
+        targetBeats: 6, // how many beats you *want* (max)
       }),
     }).then((r) => r.json());
 
@@ -108,30 +108,41 @@ module.exports = async function handler(req, res) {
       return res.status(502).json({ error: 'SCRIPT_EMPTY', details: scriptResp });
     }
 
-    const beats      = scriptResp.beats.slice(0, 10); // up to 10 beats
+    // ---- 2) Build modifications USING YOUR ACTUAL SELECTORS ----
+    const maxScenes  = 6;                         // you built 6 beats in the template
+    const beats      = scriptResp.beats.slice(0, maxScenes);
     const narration  = scriptResp.narration;
 
-    // ---- 2) Build modifications USING YOUR ACTUAL SELECTORS ----
-    // Text layer named "Narration" (make it dynamic for text)
+    // Text layer named "Narration" and an audio layer using selector "Voiceover"
     const mods = {
       Narration: narration,
+      Voiceover: narration,          // so the Voiceover audio layer can read it
       ...(voice_url ? { voice_url } : {}),
     };
 
-    // Your layers are Beat1_Caption, Beat2_Caption, Beat3_Caption, ...
-    // and Beat1_Image, Beat2_Image, Beat3_Image, ...
+    // Beat1_Caption / Beat1_Image / Beat1_Visible etc.
     beats.forEach((b, i) => {
       const idx = i + 1;
+
+      // On-screen caption
       mods[`Beat${idx}_Caption`] = b.caption;
 
-      // swap the image source (your image layers must have Dynamic → Source)
-      mods[`Beat${idx}_Image`] =
-        `https://picsum.photos/seed/${encodeURIComponent(
-          b.imagePrompt || `${storyType}-${idx}`
-        )}/1080/1920`;
+      // Strong prompt for your DALL-E/OpenAI image layer
+      const pieces = [];
+      if (b.imagePrompt) pieces.push(b.imagePrompt);
+      pieces.push(`${artStyle} style illustration`);
+      pieces.push('vertical 9:16, no text overlay, high quality');
+
+      mods[`Beat${idx}_Image`]   = pieces.join(', ');
+      mods[`Beat${idx}_Visible`] = true; // if you added a visibility selector
     });
 
-    // you *can* also hide extra beats later with Beat4_Visible etc
+    // Hide any unused scenes (if template has Beat*_Visible toggles)
+    for (let i = beats.length + 1; i <= maxScenes; i++) {
+      mods[`Beat${i}_Visible`] = false;
+    }
+
+    // Duration based on number of beats (~perBeatSec each)
     const duration = Math.max(5, Math.round(beats.length * perBeatSec));
 
     const payload = {
