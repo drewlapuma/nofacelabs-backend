@@ -56,6 +56,7 @@ module.exports = async function handler(req, res) {
         ? JSON.parse(req.body || '{}')
         : (req.body || {});
 
+    console.log('[CREATE_VIDEO] CLIENT_BODY', body);
     const {
       storyType   = 'Motivational',
       artStyle    = 'Scary toon',  // will be overridden by Webflow choice
