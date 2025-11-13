@@ -1,8 +1,8 @@
-// api/generate-script.js  (CommonJS, Node 18+)
+// /api/generate-script.js  (CommonJS, Node 18+)
 
-const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN || '*';
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;     // make sure this is set in Vercel
-const OPENAI_MODEL   = process.env.OPENAI_MODEL || 'gpt-5-mini'; // or override if you want
+const ALLOW_ORIGIN   = process.env.ALLOW_ORIGIN || '*';
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const OPENAI_MODEL   = process.env.OPENAI_MODEL || 'gpt-5-mini'; // override in env if needed
 
 function setCors(res) {
   res.setHeader('Access-Control-Allow-Origin', ALLOW_ORIGIN);
@@ -10,101 +10,105 @@ function setCors(res) {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 }
 
-/**
- * Decide "mode" based on storyType text.
- */
+/* -----------------------
+   Story-type classification
+------------------------ */
 function classifyStoryType(storyTypeRaw) {
-  const s = String(storyTypeRaw || '').toLowerCase();
+  const s = String(storyTypeRaw || '').trim().toLowerCase();
 
-  if (s.includes('scary'))        return 'scary';
-  if (s.includes('urban'))        return 'urbanLegend';
+  // Normalize common labels from your UI
+  if (s === 'interesting history' || s === 'history') return 'history';
+  if (s.includes('urban legend')) return 'urbanLegend';
   if (s.includes('bedtime'))      return 'bedtime';
   if (s.includes('what if'))      return 'whatIf';
-  if (s.includes('history'))      return 'history';
   if (s.includes('fun fact'))     return 'funFacts';
   if (s.includes('philosophy'))   return 'philosophy';
   if (s.includes('motivational')) return 'motivational';
   if (s.includes('custom'))       return 'customPrompt';
   if (s.includes('random'))       return 'random';
+  if (s.includes('scary'))        return 'scary';
 
   return 'generic';
 }
 
-/**
- * Build a style description for the model.
- */
+/* -----------------------
+   Style hints to steer model
+------------------------ */
 function buildStyleHints(mode) {
   switch (mode) {
-    case 'scary':
-      return 'Write a creepy but Tiktok-safe horror story with suspense and a twist. No gore or graphic violence.';
-    case 'urbanLegend':
-      return 'Write it like a spooky urban legend people tell each other, with a mysterious or ambiguous ending.';
-    case 'bedtime':
-      return 'Write a calm, cozy, gentle bedtime story with a soft, reassuring ending. No horror or intense danger.';
-    case 'whatIf':
-      return 'Write a speculative “what if” scenario that explores interesting possibilities in a fun, imaginative way.';
     case 'history':
-      return 'Write an interesting, easy-to-follow narrative about real or highly plausible historical events. Focus on a single theme or event.';
+      return 'Write an interesting, easy-to-follow narrative about a real historical event or figure. Keep it factual, specific, and engaging.';
+    case 'urbanLegend':
+      return 'Write a spooky urban-legend style tale with tension and a mysterious ending. No gore.';
+    case 'bedtime':
+      return 'Write a calm, cozy bedtime story with a gentle, reassuring ending.';
+    case 'whatIf':
+      return 'Write a speculative “what if” scenario, exploring surprising possibilities in a grounded, vivid way.';
     case 'funFacts':
-      return 'Write a fun narration that flows as a story but delivers multiple surprising and interesting facts around a single topic.';
+      return 'Write a flowing narration that delivers several surprising, accurate facts around one topic, tied together with light storytelling.';
     case 'philosophy':
-      return 'Write a reflective, thought-provoking short story that explores a philosophical idea in a concrete, relatable way.';
+      return 'Write a reflective short story that illustrates a philosophical idea through concrete events.';
     case 'motivational':
-      return 'Write an inspiring story about struggle, growth, and eventual success, with a clear motivational takeaway.';
+      return 'Write an inspiring story about struggle, growth, and eventual success with a clear takeaway.';
+    case 'scary':
+      return 'Write a creepy but platform-safe scary story that relies on suspense and atmosphere. No gore.';
     case 'random':
-      return 'Write any creative, surprising short story with a strong hook and satisfying ending.';
-    case 'customPrompt':
-      return 'Follow the user’s custom prompt strictly and turn it into a short, coherent narrative.';
+      return 'Write a creative, surprising short story with a strong hook and satisfying ending.';
     default:
-      return 'Write a short, engaging narrative that is easy to follow and works well as a vertical video voiceover.';
+      return 'Write a short, engaging narrative that works well as a vertical video voiceover.';
   }
 }
 
-/**
- * Simple fallback generator if OpenAI fails.
- */
+/* -----------------------
+   Mode-specific fallback (no generic motivational default)
+------------------------ */
 function fallbackStory({ storyType, artStyle, language, targetBeats }) {
   const mode = classifyStoryType(storyType);
-  const base =
-    mode === 'scary'
-      ? 'A short scary story about something strange that happens one night.'
-      : mode === 'bedtime'
-      ? 'A calm bedtime story where everything ends peacefully.'
-      : mode === 'history'
-      ? 'A short narration about an interesting moment in history.'
-      : mode === 'funFacts'
-      ? 'A narration that shares several fun facts in a story-like way.'
-      : 'A short motivational-style story about someone overcoming a challenge.';
+
+  const baseByMode = {
+    history:      'A short narration about an interesting moment in history.',
+    urbanLegend:  'A short spooky tale told as an urban legend with a mysterious ending.',
+    bedtime:      'A calm bedtime story where everything ends peacefully.',
+    whatIf:       'A speculative “what if” scenario exploring surprising possibilities.',
+    funFacts:     'A narration that shares several fun facts in a story-like way.',
+    philosophy:   'A reflective story exploring a philosophical idea in a concrete way.',
+    motivational: 'A short motivational story about overcoming a challenge.',
+    scary:        'A short scary story about something strange that happens one night.',
+    random:       'A creative short story with a surprising hook and a neat ending.',
+    generic:      'A short, engaging narrative suitable for a vertical video voiceover.'
+  };
+
+  const narration = baseByMode[mode] || baseByMode.generic;
 
   const beats = [];
-  const count = targetBeats || 6;
+  const count = Math.max(3, Number(targetBeats || 6));
   for (let i = 1; i <= count; i++) {
     beats.push({
       index: i,
       caption: `Beat ${i}`,
-      imagePrompt: `${artStyle} style illustration of scene ${i} related to: ${base}`,
+      imagePrompt: `${artStyle || 'Realistic'} style vertical 9:16 illustration of scene ${i} that fits: ${narration}. Include mood, setting, and action. No text overlay.`
     });
   }
 
-  return { narration: base, beats };
+  return { narration, beats };
 }
 
-/**
- * Call OpenAI to generate narration + beats.
- */
+/* -----------------------
+   OpenAI call
+------------------------ */
 async function callOpenAI({ storyType, artStyle, language, targetBeats, customPrompt }) {
   if (!OPENAI_API_KEY) {
     console.warn('[GENERATE_SCRIPT] Missing OPENAI_API_KEY, using fallback.');
     return fallbackStory({ storyType, artStyle, language, targetBeats });
   }
 
-  const mode = classifyStoryType(storyType);
+  const mode       = classifyStoryType(storyType);
   const styleHints = buildStyleHints(mode);
-  const beatsCount = targetBeats || 6;
+  const beatsCount = Math.max(3, Number(targetBeats || 6));
 
   const userTopic =
-    mode === 'customPrompt' && customPrompt
-      ? `Base the story on this user prompt:\n"${customPrompt}"`
+    (mode === 'customPrompt' && customPrompt)
+      ? `Base the story on this user prompt:\n"${String(customPrompt).trim()}"`
       : `Story type: ${storyType || 'Random AI story'}`;
 
   const prompt = `
@@ -118,17 +122,16 @@ Number of beats (scenes): ${beatsCount}.
 Each "beat" is one scene in the video.
 For each beat, provide:
 - caption: a very short title (2–5 words) for on-screen text.
-- imagePrompt: a rich visual description for an AI image model.
+- imagePrompt: a rich visual description for an AI image model (vertical 9:16, clear subject, setting, mood, lighting, and composition). No text overlay.
 
 Art style hint: ${artStyle || 'Realistic'}.
-Make sure each imagePrompt mentions the mood and setting, and works in vertical 9:16 video.
 
 ${userTopic}
 
-Return ONLY valid JSON in this exact shape:
+Return ONLY strict JSON in this exact shape:
 
 {
-  "narration": "full voiceover text for the whole video, 60–90 seconds when spoken",
+  "narration": "full voiceover text for the whole video, ~60–90 seconds when spoken",
   "beats": [
     {
       "caption": "Short on-screen title",
@@ -138,7 +141,7 @@ Return ONLY valid JSON in this exact shape:
 }
   `.trim();
 
-  const response = await fetch('https://api.openai.com/v1/chat/completions', {
+  const resp = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${OPENAI_API_KEY}`,
@@ -147,24 +150,18 @@ Return ONLY valid JSON in this exact shape:
     body: JSON.stringify({
       model: OPENAI_MODEL,
       messages: [
-        {
-          role: 'system',
-          content:
-            'You are a JSON-only API. Always return strictly valid JSON with no extra text.',
-        },
-        {
-          role: 'user',
-          content: prompt,
-        },
+        { role: 'system', content: 'You are a JSON-only API. Always return strictly valid JSON. Do not include any extra text.' },
+        { role: 'user',   content: prompt }
       ],
       temperature: 0.9,
+      // If your model supports it, this hardens JSON output:
+      response_format: { type: 'json_object' }
     }),
   });
 
-  const data = await response.json().catch(() => ({}));
-
-  if (!response.ok) {
-    console.error('[GENERATE_SCRIPT] OpenAI error', response.status, data);
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    console.error('[GENERATE_SCRIPT] OpenAI error', resp.status, data);
     return fallbackStory({ storyType, artStyle, language, targetBeats });
   }
 
@@ -173,7 +170,7 @@ Return ONLY valid JSON in this exact shape:
   try {
     parsed = JSON.parse(raw);
   } catch (e) {
-    console.error('[GENERATE_SCRIPT] JSON parse failed, raw content:', raw);
+    console.error('[GENERATE_SCRIPT] JSON parse failed, raw:', raw);
     return fallbackStory({ storyType, artStyle, language, targetBeats });
   }
 
@@ -182,13 +179,16 @@ Return ONLY valid JSON in this exact shape:
     return fallbackStory({ storyType, artStyle, language, targetBeats });
   }
 
-  // normalize beats
+  // Normalize beats
   const beats = parsed.beats
     .slice(0, beatsCount)
     .map((b, i) => ({
       index: i + 1,
       caption: String(b.caption || `Beat ${i + 1}`),
-      imagePrompt: String(b.imagePrompt || `${artStyle} style illustration of beat ${i + 1}`),
+      imagePrompt: String(
+        b.imagePrompt ||
+        `${artStyle || 'Realistic'} style vertical 9:16 illustration of beat ${i + 1}`
+      )
     }));
 
   return {
@@ -197,34 +197,31 @@ Return ONLY valid JSON in this exact shape:
   };
 }
 
+/* -----------------------
+   HTTP handler
+------------------------ */
 module.exports = async (req, res) => {
   setCors(res);
-
   if (req.method === 'OPTIONS') return res.status(200).end();
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'METHOD_NOT_ALLOWED' });
-  }
+  if (req.method !== 'POST') return res.status(405).json({ error: 'METHOD_NOT_ALLOWED' });
 
   try {
-    const body =
-      typeof req.body === 'string'
-        ? JSON.parse(req.body || '{}')
-        : (req.body || {});
+    const body = (typeof req.body === 'string')
+      ? JSON.parse(req.body || '{}')
+      : (req.body || {});
 
     const {
-      storyType   = 'Random AI story',
-      artStyle    = 'Realistic',
-      language    = 'English',
-      targetBeats = 6,
-      customPrompt = '',
+      storyType    = 'Random AI story',   // supports: Random AI story, What if?, Bedtime Story, Interesting History, Urban Legends, Fun facts, Philosophy, Motivational, Scary, Custom Prompt
+      artStyle     = 'Realistic',
+      language     = 'English',
+      targetBeats  = 6,
+      customPrompt = ''
     } = body;
 
+    const mode = classifyStoryType(storyType);
     console.log('[GENERATE_SCRIPT] INPUT', {
-      storyType,
-      artStyle,
-      language,
-      targetBeats,
-      hasCustomPrompt: !!customPrompt,
+      storyType, mode, artStyle, language, targetBeats,
+      hasCustomPrompt: !!customPrompt
     });
 
     const result = await callOpenAI({
@@ -255,4 +252,3 @@ module.exports = async (req, res) => {
     });
   }
 };
-
