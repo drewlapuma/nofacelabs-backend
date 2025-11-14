@@ -2,7 +2,7 @@
 
 const ALLOW_ORIGIN   = process.env.ALLOW_ORIGIN || '*';
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const OPENAI_MODEL   = process.env.OPENAI_MODEL || 'gpt-5-mini'; // override in env if needed
+const OPENAI_MODEL   = process.env.OPENAI_MODEL || 'gpt-4.1-mini'; // override in env if needed
 
 function setCors(res) {
   res.setHeader('Access-Control-Allow-Origin', ALLOW_ORIGIN);
