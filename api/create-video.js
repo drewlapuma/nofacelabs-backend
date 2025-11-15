@@ -46,17 +46,13 @@ function postJSON(url, headers, bodyObj) {
   });
 }
 
-// Rough speech timing helper → how many beats we need for this narration
-function estimateBeatsFromNarration(narration, minBeats, maxBeats) {
-  const text = (narration || '').trim();
-  if (!text) return minBeats;
-
-  const chars = text.length;
-  const charsPerBeat = 180; // ~4–6 seconds spoken
-  let est = Math.round(chars / charsPerBeat);
-  if (!est || !Number.isFinite(est)) est = minBeats;
-
-  return Math.max(minBeats, Math.min(maxBeats, est));
+// Rough speech timing helper (words -> seconds)
+function estimateSpeechSeconds(narration) {
+  const text  = (narration || '').trim();
+  if (!text) return 0;
+  const words = (text.match(/\S+/g) || []).length;
+  const wordsPerSec = 2.5; // ~150 wpm
+  return words / wordsPerSec;
 }
 
 module.exports = async function handler(req, res) {
@@ -73,32 +69,18 @@ module.exports = async function handler(req, res) {
         : (req.body || {});
 
     const {
-      storyType      = 'Random AI story',
-      artStyle       = 'Realistic',
-      language       = 'English',
-      voice          = 'Adam',
-      aspectRatio    = '9:16',
-      customPrompt   = '',
-      durationRange  = '60-90', // "30-60" or "60-90" from your dropdown
-      // tuning knobs:
-      perBeatSec     = 4,       // ~4 seconds per scene
-      voice_url      = null,    // if you eventually plug ElevenLabs in
+      storyType     = 'Random AI story',
+      artStyle      = 'Realistic',
+      language      = 'English',
+      voice         = 'Adam',
+      aspectRatio   = '9:16',
+      customPrompt  = '',
+      durationRange = '60-90',   // "30-60" or "60-90"
+      voice_url     = null,      // future: if you plug in ElevenLabs
     } = body;
 
     if (!process.env.CREATOMATE_API_KEY) {
       return res.status(500).json({ error: 'MISSING_CREATOMATE_API_KEY' });
-    }
-
-    // Map the dropdown choice → min / max duration in seconds
-    let minDurationSec = 60;
-    let maxDurationSec = 90;
-
-    if (durationRange === '30-60') {
-      minDurationSec = 30;
-      maxDurationSec = 60;
-    } else if (durationRange === '60-90') {
-      minDurationSec = 60;
-      maxDurationSec = 90;
     }
 
     // Pick template ID by aspect ratio
@@ -115,6 +97,14 @@ module.exports = async function handler(req, res) {
         .json({ error: 'NO_TEMPLATE_FOR_ASPECT', aspectRatio });
     }
 
+    // Map durationRange -> soft bounds in seconds
+    let minSec = 60;
+    let maxSec = 90;
+    if (durationRange === '30-60') {
+      minSec = 30;
+      maxSec = 60;
+    }
+
     // 1) Call /api/generate-script on THIS backend to get narration
     const baseUrl   = `https://${req.headers.host}`;
     const scriptUrl = `${baseUrl}/api/generate-script`;
@@ -127,8 +117,7 @@ module.exports = async function handler(req, res) {
         artStyle,
         language,
         customPrompt,
-        minDurationSec,
-        maxDurationSec,
+        durationRange,  // tell script generator what we want
       }),
     }).then((r) => r.json());
 
@@ -136,8 +125,7 @@ module.exports = async function handler(req, res) {
       hasNarration: !!scriptResp?.narration,
       storyType,
       artStyle,
-      minDurationSec,
-      maxDurationSec,
+      durationRange,
     });
 
     const narration = (scriptResp && scriptResp.narration) || '';
@@ -148,16 +136,33 @@ module.exports = async function handler(req, res) {
         .json({ error: 'SCRIPT_EMPTY', details: scriptResp });
     }
 
-    // 2) Decide how many beats we need based on narration length
-    const MIN_BEATS = 6;
-    const MAX_BEATS = 18; // increase if your template has more Beat slots
-    const beatCount = estimateBeatsFromNarration(
-      narration,
-      MIN_BEATS,
-      MAX_BEATS
-    );
+    // 2) Estimate how long the narration actually is
+    const speechSec = estimateSpeechSeconds(narration);
 
-    // 3) Build modifications USING your selectors:
+    // Target duration: at least narration + 2 seconds, inside the chosen bucket if possible
+    let targetSec = Math.round(speechSec + 2);
+
+    // gently nudge into the bucket, but NEVER shorter than speechSec + 2
+    if (targetSec < minSec) targetSec = minSec;
+    if (targetSec > maxSec) {
+      // if narration is a bit longer than the bucket, allow it to stretch
+      if (targetSec < maxSec + 10) {
+        // okay to overflow a little
+      } else {
+        // last resort: just keep it at speechSec + 2 even if it’s over
+        targetSec = Math.round(speechSec + 2);
+      }
+    }
+
+    // 3) Decide how many beats based on duration
+    const MIN_BEATS = 8;   // you can tweak this
+    const MAX_BEATS = 24;  // must match how many Beat slots you made in the template
+
+    let beatCount = Math.round(targetSec / 3.5); // ~3.5s per scene
+    if (!beatCount || !Number.isFinite(beatCount)) beatCount = 10;
+    beatCount = Math.max(MIN_BEATS, Math.min(MAX_BEATS, beatCount));
+
+    // 4) Build modifications USING your selectors:
     //    - Narration (full script)
     //    - Voiceover (same text, for your TTS layer)
     //    - Beat1_Image, Beat1_Caption, Beat1_Visible, ... up to beatCount
@@ -174,36 +179,30 @@ module.exports = async function handler(req, res) {
 
     for (let i = 1; i <= beatCount; i++) {
       const sceneTitle = `Scene ${i}`;
-      const imgPrompt = `${style} style illustration of scene ${i} from this story: ${narration}. ${style} style, vertical 9:16, no text overlay, high quality`;
+      const imgPrompt =
+        `${style} style illustration of scene ${i} from this story: ${narration}. `
+        + `${style} style, vertical 9:16, no text overlay, high quality`;
 
       mods[`Beat${i}_Caption`] = sceneTitle;
       mods[`Beat${i}_Image`]   = imgPrompt;
       mods[`Beat${i}_Visible`] = true;
     }
 
-    // Hide any extra beats in the template above beatCount (up to MAX_BEATS)
+    // Hide any extra beats in the template above beatCount
     for (let i = beatCount + 1; i <= MAX_BEATS; i++) {
       mods[`Beat${i}_Visible`] = false;
     }
-
-    // 4) Estimate video duration from beatCount, then clamp it to the chosen range
-    let durationEst = Math.round(beatCount * perBeatSec);
-    if (!Number.isFinite(durationEst) || durationEst <= 0) {
-      durationEst = Math.round((minDurationSec + maxDurationSec) / 2);
-    }
-
-    const duration = Math.max(minDurationSec, Math.min(maxDurationSec, durationEst));
 
     const payload = {
       template_id,
       modifications: mods,
       output_format: 'mp4',
-      duration,
+      duration: targetSec,
     };
 
     console.log('[CREATE_VIDEO] PAYLOAD_PREVIEW', {
       template_id_preview: template_id.slice(0, 6) + '…',
-      duration,
+      targetSec,
       beatCount,
     });
 
