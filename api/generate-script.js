@@ -87,14 +87,7 @@ function fallbackNarration({ storyType }) {
 }
 
 /* --------- Call OpenAI: narration ONLY --------- */
-async function callOpenAI({
-  storyType,
-  artStyle,
-  language,
-  customPrompt,
-  minDurationSec,
-  maxDurationSec,
-}) {
+async function callOpenAI({ storyType, artStyle, language, customPrompt, durationRange }) {
   if (!OPENAI_API_KEY) {
     console.warn('[GENERATE_SCRIPT] Missing OPENAI_API_KEY, using fallback narration.');
     return { narration: fallbackNarration({ storyType }) };
@@ -103,10 +96,17 @@ async function callOpenAI({
   const mode       = classifyStoryType(storyType);
   const styleHints = buildStyleHints(mode);
 
-  const minSec = Number(minDurationSec) || 60;
-  const maxSec = Number(maxDurationSec) || 90;
-  const safeMin = Math.min(minSec, maxSec);
-  const safeMax = Math.max(minSec, maxSec);
+  // Map durationRange -> target seconds & words
+  let minSec = 60;
+  let maxSec = 90;
+  if (durationRange === '30-60') {
+    minSec = 30;
+    maxSec = 60;
+  }
+
+  // Simple words-per-second estimate (about 2.5 words/sec = 150 wpm)
+  const minWords = Math.round(minSec * 2.0);  // slightly under so we don’t overshoot
+  const maxWords = Math.round(maxSec * 2.8);  // upper bound
 
   const userTopic =
     mode === 'customPrompt' && customPrompt
@@ -122,7 +122,8 @@ ${styleHints}
 
 - Language: ${language || 'English'}.
 - Art style preference: ${artStyle || 'Realistic'}.
-- Length: The narration should be between ${safeMin} and ${safeMax} seconds when spoken at a natural pace.
+- Length: The narration should be about ${minSec}–${maxSec} seconds when spoken at a natural pace.
+  That is roughly ${minWords}–${maxWords} words.
 
 Do NOT break the script into beats. Just write one continuous narration that can be read as a single voiceover track.
 
@@ -198,21 +199,19 @@ module.exports = async (req, res) => {
         : (req.body || {});
 
     const {
-      storyType      = 'Random AI story',
-      artStyle       = 'Realistic',
-      language       = 'English',
-      customPrompt   = '',
-      minDurationSec = 60,
-      maxDurationSec = 90,
+      storyType     = 'Random AI story',
+      artStyle      = 'Realistic',
+      language      = 'English',
+      customPrompt  = '',
+      durationRange = '60-90',       // <-- NEW: matches what we send from the frontend
     } = body;
 
     console.log('[GENERATE_SCRIPT] INPUT', {
       storyType,
       artStyle,
       language,
+      durationRange,
       hasCustomPrompt: !!customPrompt,
-      minDurationSec,
-      maxDurationSec,
     });
 
     const { narration } = await callOpenAI({
@@ -220,8 +219,7 @@ module.exports = async (req, res) => {
       artStyle,
       language,
       customPrompt,
-      minDurationSec,
-      maxDurationSec,
+      durationRange,
     });
 
     console.log('[GENERATE_SCRIPT] OUTPUT_PREVIEW', {
@@ -232,6 +230,7 @@ module.exports = async (req, res) => {
       storyType,
       artStyle,
       language,
+      durationRange,
       narration,
     });
   } catch (err) {
