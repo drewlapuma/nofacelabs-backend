@@ -1,4 +1,4 @@
-// api/create-video.js  (CommonJS)
+// api/create-video.js  (CommonJS, Node 18)
 const https = require('https');
 
 const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN || '*';
@@ -9,15 +9,17 @@ function setCors(res) {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 }
 
+// Simple HTTPS JSON helper (avoids HTTP/2 weirdness)
 function postJSON(url, headers, bodyObj) {
   return new Promise((resolve, reject) => {
     const { hostname, pathname } = new URL(url);
     const data = JSON.stringify(bodyObj);
+
     const req = https.request(
       {
         hostname,
         path: pathname,
-        method: 'POST', // HTTP/1.1
+        method: 'POST',
         headers: {
           Authorization: headers.Authorization,
           'Content-Type': 'application/json',
@@ -27,7 +29,7 @@ function postJSON(url, headers, bodyObj) {
       (res) => {
         let buf = '';
         res.setEncoding('utf8');
-        res.on('data', (c) => (buf += c));
+        res.on('data', (chunk) => (buf += chunk));
         res.on('end', () => {
           try {
             resolve({ status: res.statusCode, json: JSON.parse(buf || '{}') });
@@ -37,10 +39,24 @@ function postJSON(url, headers, bodyObj) {
         });
       }
     );
+
     req.on('error', reject);
     req.write(data);
     req.end();
   });
+}
+
+// Rough speech timing helper
+function estimateBeatsFromNarration(narration, minBeats, maxBeats) {
+  const text = (narration || '').trim();
+  if (!text) return minBeats;
+
+  const chars = text.length;
+  const charsPerBeat = 180; // ~4–6 seconds spoken
+  let est = Math.round(chars / charsPerBeat);
+  if (!est || !Number.isFinite(est)) est = minBeats;
+
+  return Math.max(minBeats, Math.min(maxBeats, est));
 }
 
 module.exports = async function handler(req, res) {
@@ -56,21 +72,23 @@ module.exports = async function handler(req, res) {
         ? JSON.parse(req.body || '{}')
         : (req.body || {});
 
-    console.log('[CREATE_VIDEO] CLIENT_BODY', body);
     const {
-      storyType   = 'Motivational',
-      artStyle    = 'Scary toon',  // will be overridden by Webflow choice
-      language    = 'English',
-      voice       = 'Adam',
-      aspectRatio = '9:16',
-      perBeatSec  = 10,
-      voice_url   = null,          // if you later pass a TTS URL
+      storyType    = 'Random AI story',
+      artStyle     = 'Realistic',
+      language     = 'English',
+      voice        = 'Adam',
+      aspectRatio  = '9:16',
+      customPrompt = '',
+      // tuning knobs:
+      perBeatSec   = 4,    // ~4 seconds per scene
+      voice_url    = null, // if you eventually plug ElevenLabs in
     } = body;
 
     if (!process.env.CREATOMATE_API_KEY) {
       return res.status(500).json({ error: 'MISSING_CREATOMATE_API_KEY' });
     }
 
+    // Pick template ID by aspect ratio
     const templateMap = {
       '9:16': process.env.CREATO_TEMPLATE_916,
       '1:1' : process.env.CREATO_TEMPLATE_11,
@@ -84,7 +102,7 @@ module.exports = async function handler(req, res) {
         .json({ error: 'NO_TEMPLATE_FOR_ASPECT', aspectRatio });
     }
 
-    // ---- 1) Call /api/generate-script on THIS backend ----
+    // 1) Call /api/generate-script on THIS backend to get narration
     const baseUrl   = `https://${req.headers.host}`;
     const scriptUrl = `${baseUrl}/api/generate-script`;
 
@@ -95,56 +113,66 @@ module.exports = async function handler(req, res) {
         storyType,
         artStyle,
         language,
-        targetBeats: 6, // how many beats you *want* (max)
+        customPrompt,
       }),
     }).then((r) => r.json());
 
     console.log('[CREATE_VIDEO] SCRIPT_RESP preview', {
-      hasBeats: !!scriptResp?.beats?.length,
       hasNarration: !!scriptResp?.narration,
+      storyType,
+      artStyle,
     });
 
-    if (!scriptResp?.beats?.length || !scriptResp?.narration) {
+    const narration = (scriptResp && scriptResp.narration) || '';
+    if (!narration.trim()) {
       console.error('[CREATE_VIDEO] SCRIPT_EMPTY', scriptResp);
-      return res.status(502).json({ error: 'SCRIPT_EMPTY', details: scriptResp });
+      return res
+        .status(502)
+        .json({ error: 'SCRIPT_EMPTY', details: scriptResp });
     }
 
-    // ---- 2) Build modifications USING YOUR ACTUAL SELECTORS ----
-    const maxScenes  = 6;                         // you built 6 beats in the template
-    const beats      = scriptResp.beats.slice(0, maxScenes);
-    const narration  = scriptResp.narration;
+    // 2) Decide how many beats we need based on narration length
+    const MIN_BEATS = 6;
+    const MAX_BEATS = 18; // you can increase this if your template has more Beat slots
+    const beatCount = estimateBeatsFromNarration(
+      narration,
+      MIN_BEATS,
+      MAX_BEATS
+    );
 
-    // Text layer named "Narration" and an audio layer using selector "Voiceover"
+    // 3) Build modifications USING your selectors:
+    //    - Narration (full script)
+    //    - Voiceover (same text, for your TTS layer)
+    //    - Beat1_Image, Beat1_Caption, Beat1_Visible, ... up to beatCount
     const mods = {
       Narration: narration,
-      Voiceover: narration,          // so the Voiceover audio layer can read it
+      Voiceover: narration,
+      // If your template has a dynamic "Voice" field or "Language" text somewhere,
+      // you can also pass those here:
+      VoiceLabel: voice,
+      LanguageLabel: language,
+      StoryTypeLabel: storyType,
       ...(voice_url ? { voice_url } : {}),
     };
 
-    // Beat1_Caption / Beat1_Image / Beat1_Visible etc.
-    beats.forEach((b, i) => {
-      const idx = i + 1;
+    const style = artStyle || 'Realistic';
 
-      // On-screen caption
-      mods[`Beat${idx}_Caption`] = b.caption;
+    for (let i = 1; i <= beatCount; i++) {
+      const sceneTitle = `Scene ${i}`;
+      const imgPrompt = `${style} style illustration of scene ${i} from this story: ${narration}. ${style} style, vertical 9:16, no text overlay, high quality`;
 
-      // Strong prompt for your DALL-E/OpenAI image layer
-      const pieces = [];
-      if (b.imagePrompt) pieces.push(b.imagePrompt);
-      pieces.push(`${artStyle} style illustration`);
-      pieces.push('vertical 9:16, no text overlay, high quality');
+      mods[`Beat${i}_Caption`] = sceneTitle;
+      mods[`Beat${i}_Image`]   = imgPrompt;
+      mods[`Beat${i}_Visible`] = true;
+    }
 
-      mods[`Beat${idx}_Image`]   = pieces.join(', ');
-      mods[`Beat${idx}_Visible`] = true; // if you added a visibility selector
-    });
-
-    // Hide any unused scenes (if template has Beat*_Visible toggles)
-    for (let i = beats.length + 1; i <= maxScenes; i++) {
+    // Hide any extra beats in the template above beatCount (up to MAX_BEATS)
+    for (let i = beatCount + 1; i <= MAX_BEATS; i++) {
       mods[`Beat${i}_Visible`] = false;
     }
 
-    // Duration based on number of beats (~perBeatSec each)
-    const duration = Math.max(5, Math.round(beats.length * perBeatSec));
+    // 4) Estimate video duration (you can tweak this)
+    const duration = Math.max(10, Math.round(beatCount * perBeatSec));
 
     const payload = {
       template_id,
@@ -156,10 +184,10 @@ module.exports = async function handler(req, res) {
     console.log('[CREATE_VIDEO] PAYLOAD_PREVIEW', {
       template_id_preview: template_id.slice(0, 6) + '…',
       duration,
-      beatCount: beats.length,
+      beatCount,
     });
 
-    // ---- 3) Call Creatomate ----
+    // 5) Call Creatomate
     const resp = await postJSON(
       'https://api.creatomate.com/v1/renders',
       { Authorization: `Bearer ${process.env.CREATOMATE_API_KEY}` },
@@ -168,7 +196,7 @@ module.exports = async function handler(req, res) {
 
     console.log('[CREATE_VIDEO] CREATOMATE_RESP_STATUS', resp.status);
 
-    if (resp.status !== 202) {
+    if (resp.status !== 202 && resp.status !== 200) {
       console.error('[CREATOMATE_ERROR]', resp.status, resp.json);
       return res
         .status(resp.status)
