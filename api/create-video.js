@@ -46,7 +46,7 @@ function postJSON(url, headers, bodyObj) {
   });
 }
 
-// Rough speech timing helper
+// Rough speech timing helper → how many beats we need for this narration
 function estimateBeatsFromNarration(narration, minBeats, maxBeats) {
   const text = (narration || '').trim();
   if (!text) return minBeats;
@@ -73,19 +73,32 @@ module.exports = async function handler(req, res) {
         : (req.body || {});
 
     const {
-      storyType    = 'Random AI story',
-      artStyle     = 'Realistic',
-      language     = 'English',
-      voice        = 'Adam',
-      aspectRatio  = '9:16',
-      customPrompt = '',
+      storyType      = 'Random AI story',
+      artStyle       = 'Realistic',
+      language       = 'English',
+      voice          = 'Adam',
+      aspectRatio    = '9:16',
+      customPrompt   = '',
+      durationRange  = '60-90', // "30-60" or "60-90" from your dropdown
       // tuning knobs:
-      perBeatSec   = 4,    // ~4 seconds per scene
-      voice_url    = null, // if you eventually plug ElevenLabs in
+      perBeatSec     = 4,       // ~4 seconds per scene
+      voice_url      = null,    // if you eventually plug ElevenLabs in
     } = body;
 
     if (!process.env.CREATOMATE_API_KEY) {
       return res.status(500).json({ error: 'MISSING_CREATOMATE_API_KEY' });
+    }
+
+    // Map the dropdown choice → min / max duration in seconds
+    let minDurationSec = 60;
+    let maxDurationSec = 90;
+
+    if (durationRange === '30-60') {
+      minDurationSec = 30;
+      maxDurationSec = 60;
+    } else if (durationRange === '60-90') {
+      minDurationSec = 60;
+      maxDurationSec = 90;
     }
 
     // Pick template ID by aspect ratio
@@ -114,6 +127,8 @@ module.exports = async function handler(req, res) {
         artStyle,
         language,
         customPrompt,
+        minDurationSec,
+        maxDurationSec,
       }),
     }).then((r) => r.json());
 
@@ -121,6 +136,8 @@ module.exports = async function handler(req, res) {
       hasNarration: !!scriptResp?.narration,
       storyType,
       artStyle,
+      minDurationSec,
+      maxDurationSec,
     });
 
     const narration = (scriptResp && scriptResp.narration) || '';
@@ -133,7 +150,7 @@ module.exports = async function handler(req, res) {
 
     // 2) Decide how many beats we need based on narration length
     const MIN_BEATS = 6;
-    const MAX_BEATS = 18; // you can increase this if your template has more Beat slots
+    const MAX_BEATS = 18; // increase if your template has more Beat slots
     const beatCount = estimateBeatsFromNarration(
       narration,
       MIN_BEATS,
@@ -147,8 +164,6 @@ module.exports = async function handler(req, res) {
     const mods = {
       Narration: narration,
       Voiceover: narration,
-      // If your template has a dynamic "Voice" field or "Language" text somewhere,
-      // you can also pass those here:
       VoiceLabel: voice,
       LanguageLabel: language,
       StoryTypeLabel: storyType,
@@ -171,8 +186,13 @@ module.exports = async function handler(req, res) {
       mods[`Beat${i}_Visible`] = false;
     }
 
-    // 4) Estimate video duration (you can tweak this)
-    const duration = Math.max(10, Math.round(beatCount * perBeatSec));
+    // 4) Estimate video duration from beatCount, then clamp it to the chosen range
+    let durationEst = Math.round(beatCount * perBeatSec);
+    if (!Number.isFinite(durationEst) || durationEst <= 0) {
+      durationEst = Math.round((minDurationSec + maxDurationSec) / 2);
+    }
+
+    const duration = Math.max(minDurationSec, Math.min(maxDurationSec, durationEst));
 
     const payload = {
       template_id,
