@@ -2,14 +2,19 @@
 const https = require('https');
 
 const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN || '*';
+const IMAGE_PROVIDER = (process.env.IMAGE_PROVIDER || 'dalle').toLowerCase();
+const STABILITY_API_KEY = process.env.STABILITY_API_KEY;
+const STABILITY_IMAGE_ENGINE = process.env.STABILITY_IMAGE_ENGINE || 'sd3'; 
+// ^ adjust to the exact engine/path you want, e.g. 'sd3', 'sd3-turbo', etc.
 
+// ----------------- CORS -----------------
 function setCors(res) {
   res.setHeader('Access-Control-Allow-Origin', ALLOW_ORIGIN);
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 }
 
-// Simple HTTPS JSON helper (avoids HTTP/2 weirdness)
+// ----------------- Simple HTTPS JSON helper (Creatomate) -----------------
 function postJSON(url, headers, bodyObj) {
   return new Promise((resolve, reject) => {
     const { hostname, pathname } = new URL(url);
@@ -46,13 +51,115 @@ function postJSON(url, headers, bodyObj) {
   });
 }
 
-// Rough speech timing helper (words -> seconds)
+// ----------------- Speech timing helper (words -> seconds) -----------------
 function estimateSpeechSeconds(narration) {
   const text  = (narration || '').trim();
   if (!text) return 0;
   const words = (text.match(/\S+/g) || []).length;
   const wordsPerSec = 2.5; // ~150 wpm
   return words / wordsPerSec;
+}
+
+/**
+ * Build a visual prompt for a scene, based on the full narration + artStyle.
+ * This is used for BOTH DALL·E (prompt) and Stability (we feed this into their model).
+ */
+function buildScenePrompt({ narration, artStyle, sceneIndex, aspectRatio }) {
+  const style = artStyle || 'Realistic';
+  const ratioText = aspectRatio === '9:16'
+    ? 'vertical 9:16'
+    : aspectRatio === '1:1'
+    ? 'square 1:1'
+    : 'horizontal 16:9';
+
+  return (
+    `${style} style illustration of scene ${sceneIndex} from this story: ${narration} ` +
+    `${style} style, ${ratioText}, no text overlay, high quality`
+  );
+}
+
+/**
+ * Call Stability's image API for a single prompt.
+ * IMPORTANT: adjust URL/body to exactly match Stability's docs you want to use.
+ * This version assumes a JSON text-to-image endpoint that returns base64 PNG.
+ */
+async function generateStabilityImageDataUrl(prompt, { aspectRatio = '9:16' } = {}) {
+  if (!STABILITY_API_KEY) {
+    throw new Error('STABILITY_API_KEY not set');
+  }
+
+  // Example endpoint - adjust according to Stability docs:
+  // e.g. https://api.stability.ai/v2beta/stable-image/generate/sd3
+  const url = `https://api.stability.ai/v2beta/stable-image/generate/${STABILITY_IMAGE_ENGINE}`;
+
+  const payload = {
+    prompt,
+    aspect_ratio: aspectRatio === '9:16' ? '9:16'
+                 : aspectRatio === '1:1' ? '1:1'
+                 : '16:9',
+    output_format: 'png',
+    // add other params as needed: cfg_scale, seed, style_preset, etc.
+  };
+
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${STABILITY_API_KEY}`,
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+
+  const data = await resp.json().catch(() => ({}));
+
+  if (!resp.ok) {
+    console.error('[STABILITY_ERROR]', resp.status, data);
+    throw new Error(`Stability image error: ${resp.status}`);
+  }
+
+  // ⚠️ Adjust this to match the actual response shape from Stability.
+  // many v2beta endpoints return an array of artifacts with base64 data.
+  const base64 =
+    data?.artifacts?.[0]?.base64 ||
+    data?.image ||
+    null;
+
+  if (!base64) {
+    console.error('[STABILITY_ERROR] No base64 in response', data);
+    throw new Error('Stability image missing base64 data');
+  }
+
+  const dataUrl = `data:image/png;base64,${base64}`;
+  return dataUrl;
+}
+
+/**
+ * Generate one image per beat via Stability and return an array of data URLs.
+ * If something fails, we log and return null for that slot so we can fall back to DALL·E prompts.
+ */
+async function generateStabilityImagesForBeats({ beatCount, narration, artStyle, aspectRatio }) {
+  const urls = [];
+
+  for (let i = 1; i <= beatCount; i++) {
+    const prompt = buildScenePrompt({
+      narration,
+      artStyle,
+      sceneIndex: i,
+      aspectRatio,
+    });
+
+    try {
+      console.log(`[STABILITY] Generating image for Beat ${i}/${beatCount}`);
+      const dataUrl = await generateStabilityImageDataUrl(prompt, { aspectRatio });
+      urls.push(dataUrl);
+    } catch (err) {
+      console.error(`[STABILITY] Beat ${i} failed, will fall back to prompt`, err);
+      urls.push(null); // we'll fall back to DALL·E-style prompt for this one
+    }
+  }
+
+  return urls;
 }
 
 module.exports = async function handler(req, res) {
@@ -117,7 +224,7 @@ module.exports = async function handler(req, res) {
         artStyle,
         language,
         customPrompt,
-        durationRange,  // tell script generator what we want
+        durationRange,
       }),
     }).then((r) => r.json());
 
@@ -145,27 +252,38 @@ module.exports = async function handler(req, res) {
     // gently nudge into the bucket, but NEVER shorter than speechSec + 2
     if (targetSec < minSec) targetSec = minSec;
     if (targetSec > maxSec) {
-      // if narration is a bit longer than the bucket, allow it to stretch
       if (targetSec < maxSec + 10) {
         // okay to overflow a little
       } else {
-        // last resort: just keep it at speechSec + 2 even if it’s over
         targetSec = Math.round(speechSec + 2);
       }
     }
 
     // 3) Decide how many beats based on duration
-    const MIN_BEATS = 8;   // you can tweak this
+    const MIN_BEATS = 8;
     const MAX_BEATS = 24;  // must match how many Beat slots you made in the template
 
     let beatCount = Math.round(targetSec / 3.5); // ~3.5s per scene
     if (!beatCount || !Number.isFinite(beatCount)) beatCount = 10;
     beatCount = Math.max(MIN_BEATS, Math.min(MAX_BEATS, beatCount));
 
-    // 4) Build modifications USING your selectors:
-    //    - Narration (full script)
-    //    - Voiceover (same text, for your TTS layer)
-    //    - Beat1_Image, Beat1_Caption, Beat1_Visible, ... up to beatCount
+    // OPTIONAL: generate Stability images up front if enabled
+    let stabilityImageUrls = [];
+    if (IMAGE_PROVIDER === 'stability') {
+      try {
+        stabilityImageUrls = await generateStabilityImagesForBeats({
+          beatCount,
+          narration,
+          artStyle,
+          aspectRatio,
+        });
+      } catch (err) {
+        console.error('[CREATE_VIDEO] STABILITY_BATCH_FAILED, falling back to DALL·E prompts', err);
+        stabilityImageUrls = [];
+      }
+    }
+
+    // 4) Build Creatomate modifications
     const mods = {
       Narration: narration,
       Voiceover: narration,
@@ -179,12 +297,21 @@ module.exports = async function handler(req, res) {
 
     for (let i = 1; i <= beatCount; i++) {
       const sceneTitle = `Scene ${i}`;
-      const imgPrompt =
-        `${style} style illustration of scene ${i} from this story: ${narration}. `
-        + `${style} style, vertical 9:16, no text overlay, high quality`;
+      const defaultPrompt = buildScenePrompt({
+        narration,
+        artStyle: style,
+        sceneIndex: i,
+        aspectRatio,
+      });
+
+      // If we have a Stability URL for this beat, use it; otherwise use the original DALL·E prompt
+      const imgValue =
+        IMAGE_PROVIDER === 'stability' && stabilityImageUrls[i - 1]
+          ? stabilityImageUrls[i - 1]
+          : defaultPrompt;
 
       mods[`Beat${i}_Caption`] = sceneTitle;
-      mods[`Beat${i}_Image`]   = imgPrompt;
+      mods[`Beat${i}_Image`]   = imgValue;
       mods[`Beat${i}_Visible`] = true;
     }
 
@@ -204,6 +331,7 @@ module.exports = async function handler(req, res) {
       template_id_preview: template_id.slice(0, 6) + '…',
       targetSec,
       beatCount,
+      imageProvider: IMAGE_PROVIDER,
     });
 
     // 5) Call Creatomate
