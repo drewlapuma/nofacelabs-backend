@@ -80,56 +80,54 @@ function buildScenePrompt({ narration, artStyle, sceneIndex, aspectRatio }) {
 
 /**
  * Call Stability's image API for a single prompt.
- * IMPORTANT: adjust URL/body to exactly match Stability's docs you want to use.
- * This version assumes a JSON text-to-image endpoint that returns base64 PNG.
+ * Uses multipart/form-data (required by Stability) and returns a base64 data URL.
  */
 async function generateStabilityImageDataUrl(prompt, { aspectRatio = '9:16' } = {}) {
   if (!STABILITY_API_KEY) {
     throw new Error('STABILITY_API_KEY not set');
   }
 
-  // Example endpoint - adjust according to Stability docs:
+  // Example endpoint - adjust according to the engine you want:
   // e.g. https://api.stability.ai/v2beta/stable-image/generate/sd3
   const url = `https://api.stability.ai/v2beta/stable-image/generate/${STABILITY_IMAGE_ENGINE}`;
 
-  const payload = {
-    prompt,
-    aspect_ratio: aspectRatio === '9:16' ? '9:16'
-                 : aspectRatio === '1:1' ? '1:1'
-                 : '16:9',
-    output_format: 'png',
-    // add other params as needed: cfg_scale, seed, style_preset, etc.
-  };
+  // IMPORTANT: multipart/form-data (FormData), not JSON
+  const form = new FormData();
+  form.append('prompt', prompt);
+  form.append(
+    'aspect_ratio',
+    aspectRatio === '9:16' ? '9:16'
+      : aspectRatio === '1:1' ? '1:1'
+      : '16:9'
+  );
+  form.append('output_format', 'png'); // or 'jpeg'
 
   const resp = await fetch(url, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${STABILITY_API_KEY}`,
-      'Content-Type': 'application/json',
-      Accept: 'application/json',
+      // DO NOT set Content-Type manually; fetch sets multipart boundary
+      Accept: 'image/*',
     },
-    body: JSON.stringify(payload),
+    body: form,
   });
 
-  const data = await resp.json().catch(() => ({}));
-
   if (!resp.ok) {
-    console.error('[STABILITY_ERROR]', resp.status, data);
+    // Errors come back as JSON text
+    const errorText = await resp.text().catch(() => '');
+    let parsed;
+    try {
+      parsed = JSON.parse(errorText);
+    } catch {
+      parsed = { raw: errorText };
+    }
+    console.error('[STABILITY_ERROR]', resp.status, parsed);
     throw new Error(`Stability image error: ${resp.status}`);
   }
 
-  // ⚠️ Adjust this to match the actual response shape from Stability.
-  // many v2beta endpoints return an array of artifacts with base64 data.
-  const base64 =
-    data?.artifacts?.[0]?.base64 ||
-    data?.image ||
-    null;
-
-  if (!base64) {
-    console.error('[STABILITY_ERROR] No base64 in response', data);
-    throw new Error('Stability image missing base64 data');
-  }
-
+  // Success: raw image bytes → base64 → data URL
+  const arrayBuffer = await resp.arrayBuffer();
+  const base64 = Buffer.from(arrayBuffer).toString('base64');
   const dataUrl = `data:image/png;base64,${base64}`;
   return dataUrl;
 }
@@ -304,7 +302,7 @@ module.exports = async function handler(req, res) {
         aspectRatio,
       });
 
-      // If we have a Stability URL for this beat, use it; otherwise use the original DALL·E prompt
+      // If we have a Stability URL for this beat, use it; otherwise use the original DALL·E-style prompt
       const imgValue =
         IMAGE_PROVIDER === 'stability' && stabilityImageUrls[i - 1]
           ? stabilityImageUrls[i - 1]
