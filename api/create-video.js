@@ -219,14 +219,6 @@ module.exports = async function handler(req, res) {
         .json({ error: 'NO_TEMPLATE_FOR_ASPECT', aspectRatio });
     }
 
-    // Map durationRange -> soft bounds in seconds
-    let minSec = 60;
-    let maxSec = 90;
-    if (durationRange === '30-60') {
-      minSec = 30;
-      maxSec = 60;
-    }
-
     // 1) Call /api/generate-script on THIS backend to get narration
     const baseUrl   = `https://${req.headers.host}`;
     const scriptUrl = `${baseUrl}/api/generate-script`;
@@ -261,18 +253,17 @@ module.exports = async function handler(req, res) {
     // 2) Estimate how long the narration actually is
     const speechSec = estimateSpeechSeconds(narration);
 
-    // Target duration: at least narration + 2 seconds, inside the chosen bucket if possible
+    // Target duration: basically script length + small buffer
     let targetSec = Math.round(speechSec + 2);
 
-    // gently nudge into the bucket, but NEVER shorter than speechSec + 2
-    if (targetSec < minSec) targetSec = minSec;
-    if (targetSec > maxSec) {
-      if (targetSec < maxSec + 10) {
-        // okay to overflow a little
-      } else {
-        targetSec = Math.round(speechSec + 2);
-      }
+    // Safety: if something went weird, fall back to something reasonable
+    if (!Number.isFinite(targetSec) || targetSec < 10) {
+      targetSec = 20;
     }
+
+    // Clamp by selected duration bucket so we don't accidentally go huge
+    if (durationRange === '30-60' && targetSec > 60) targetSec = 60;
+    if (durationRange === '60-90' && targetSec > 90) targetSec = 90;
 
     // 3) Decide how many beats based on duration
     const MIN_BEATS = 8;
@@ -338,6 +329,7 @@ module.exports = async function handler(req, res) {
       template_id,
       modifications: mods,
       output_format: 'mp4',
+      duration: targetSec,   // <-- force final video length to match script
     };
 
     console.log('[CREATE_VIDEO] PAYLOAD_PREVIEW', {
