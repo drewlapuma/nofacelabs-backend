@@ -4,7 +4,7 @@ const https = require('https');
 const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN || '*';
 const IMAGE_PROVIDER = (process.env.IMAGE_PROVIDER || 'dalle').toLowerCase();
 const STABILITY_API_KEY = process.env.STABILITY_API_KEY;
-const STABILITY_IMAGE_ENGINE = process.env.STABILITY_IMAGE_ENGINE || 'sd3-medium'; 
+const STABILITY_IMAGE_ENGINE = process.env.STABILITY_IMAGE_ENGINE || 'sd3'; 
 // ^ adjust to the exact engine/path you want, e.g. 'sd3', 'sd3-turbo', etc.
 
 // ----------------- CORS -----------------
