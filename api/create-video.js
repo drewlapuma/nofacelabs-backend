@@ -6,10 +6,8 @@ const IMAGE_PROVIDER = (process.env.IMAGE_PROVIDER || 'dalle').toLowerCase();
 const STABILITY_API_KEY = process.env.STABILITY_API_KEY;
 
 // One of:
-// 'sd3', 'sd3-medium', 'sd3-large', 'sd3-large-turbo',
-// 'sd3.5-large', 'sd3.5-large-turbo',
-// 'stable-image-core', 'stable-image-ultra'
-const STABILITY_IMAGE_MODEL = process.env.STABILITY_IMAGE_MODEL || 'sd3';
+// 'sd3.5-large', 'sd3.5-large-turbo', 'sd3.5-medium', 'sd3.5-flash'
+const STABILITY_IMAGE_MODEL = process.env.STABILITY_IMAGE_MODEL || 'sd3.5-flash';
 
 // ----------------- CORS -----------------
 function setCors(res) {
@@ -84,9 +82,9 @@ function buildScenePrompt({ narration, artStyle, sceneIndex, aspectRatio }) {
 
 /**
  * Call Stability's image API for a single prompt.
- * Uses multipart/form-data (required by Stability) and returns a base64 data URL.
+ * Uses multipart/form-data (required by Stability) and returns a Buffer.
  */
-async function generateStabilityImageDataUrl(prompt, { aspectRatio = '9:16' } = {}) {
+async function generateStabilityImageBuffer(prompt, { aspectRatio = '9:16' } = {}) {
   if (!STABILITY_API_KEY) {
     throw new Error('STABILITY_API_KEY not set');
   }
@@ -105,7 +103,6 @@ async function generateStabilityImageDataUrl(prompt, { aspectRatio = '9:16' } = 
   form.append('output_format', 'png');
   form.append('model', STABILITY_IMAGE_MODEL);
 
-  // For SD3 family, docs show also supporting a "mode" field
   if (STABILITY_IMAGE_MODEL.startsWith('sd3')) {
     form.append('mode', 'text-to-image');
   }
@@ -114,7 +111,6 @@ async function generateStabilityImageDataUrl(prompt, { aspectRatio = '9:16' } = 
     method: 'POST',
     headers: {
       Authorization: `Bearer ${STABILITY_API_KEY}`,
-      // Let fetch set multipart boundary; don't set Content-Type manually
       Accept: 'image/*',
     },
     body: form,
@@ -133,15 +129,27 @@ async function generateStabilityImageDataUrl(prompt, { aspectRatio = '9:16' } = 
   }
 
   const arrayBuffer = await resp.arrayBuffer();
-  const base64 = Buffer.from(arrayBuffer).toString('base64');
-  return `data:image/png;base64,${base64}`;
+  return Buffer.from(arrayBuffer);
 }
 
 /**
- * Generate one image per beat via Stability and return an array of data URLs.
+ * Upload an image buffer to Vercel Blob and return a public URL.
+ */
+async function uploadImageBufferToBlob(buffer, key) {
+  // @vercel/blob is ESM-only, so we use dynamic import
+  const { put } = await import('@vercel/blob');
+  const { url } = await put(key, buffer, {
+    access: 'public',
+    addRandomSuffix: false,
+  });
+  return url;
+}
+
+/**
+ * Generate one image per beat via Stability and return an array of public URLs.
  * If something fails, we log and return null for that slot so we can fall back to DALL·E prompts.
  */
-async function generateStabilityImagesForBeats({ beatCount, narration, artStyle, aspectRatio }) {
+async function generateStabilityImageUrlsForBeats({ beatCount, narration, artStyle, aspectRatio }) {
   const urls = [];
 
   for (let i = 1; i <= beatCount; i++) {
@@ -154,8 +162,12 @@ async function generateStabilityImagesForBeats({ beatCount, narration, artStyle,
 
     try {
       console.log(`[STABILITY] Generating image for Beat ${i}/${beatCount}`);
-      const dataUrl = await generateStabilityImageDataUrl(prompt, { aspectRatio });
-      urls.push(dataUrl);
+      const buffer = await generateStabilityImageBuffer(prompt, { aspectRatio });
+
+      const key = `stability-scenes/${Date.now()}-beat-${i}.png`;
+      const url = await uploadImageBufferToBlob(buffer, key);
+
+      urls.push(url);
     } catch (err) {
       console.error(`[STABILITY] Beat ${i} failed, will fall back to prompt`, err);
       urls.push(null); // we'll fall back to DALL·E-style prompt for this one
@@ -270,11 +282,11 @@ module.exports = async function handler(req, res) {
     if (!beatCount || !Number.isFinite(beatCount)) beatCount = 10;
     beatCount = Math.max(MIN_BEATS, Math.min(MAX_BEATS, beatCount));
 
-    // OPTIONAL: generate Stability images up front if enabled
+    // 4) Generate Stability images up front (if enabled)
     let stabilityImageUrls = [];
     if (IMAGE_PROVIDER === 'stability') {
       try {
-        stabilityImageUrls = await generateStabilityImagesForBeats({
+        stabilityImageUrls = await generateStabilityImageUrlsForBeats({
           beatCount,
           narration,
           artStyle,
@@ -286,7 +298,7 @@ module.exports = async function handler(req, res) {
       }
     }
 
-    // 4) Build Creatomate modifications
+    // 5) Build Creatomate modifications
     const mods = {
       Narration: narration,
       Voiceover: narration,
@@ -307,11 +319,10 @@ module.exports = async function handler(req, res) {
         aspectRatio,
       });
 
-      // If we have a Stability URL for this beat, use it; otherwise use the original DALL·E-style prompt
       const imgValue =
         IMAGE_PROVIDER === 'stability' && stabilityImageUrls[i - 1]
-          ? stabilityImageUrls[i - 1]
-          : defaultPrompt;
+          ? stabilityImageUrls[i - 1]   // URL from Vercel Blob
+          : defaultPrompt;              // Fallback: DALL·E prompt
 
       mods[`Beat${i}_Caption`] = sceneTitle;
       mods[`Beat${i}_Image`]   = imgValue;
@@ -337,7 +348,7 @@ module.exports = async function handler(req, res) {
       imageProvider: IMAGE_PROVIDER,
     });
 
-    // 5) Call Creatomate
+    // 6) Call Creatomate
     const resp = await postJSON(
       'https://api.creatomate.com/v1/renders',
       { Authorization: `Bearer ${process.env.CREATOMATE_API_KEY}` },
