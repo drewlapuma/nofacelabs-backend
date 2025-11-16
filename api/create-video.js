@@ -4,8 +4,12 @@ const https = require('https');
 const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN || '*';
 const IMAGE_PROVIDER = (process.env.IMAGE_PROVIDER || 'dalle').toLowerCase();
 const STABILITY_API_KEY = process.env.STABILITY_API_KEY;
-const STABILITY_IMAGE_ENGINE = process.env.STABILITY_IMAGE_ENGINE || 'sd3'; 
-// ^ adjust to the exact engine/path you want, e.g. 'sd3', 'sd3-turbo', etc.
+
+// One of:
+// 'sd3', 'sd3-medium', 'sd3-large', 'sd3-large-turbo',
+// 'sd3.5-large', 'sd3.5-large-turbo',
+// 'stable-image-core', 'stable-image-ultra'
+const STABILITY_IMAGE_MODEL = process.env.STABILITY_IMAGE_MODEL || 'sd3';
 
 // ----------------- CORS -----------------
 function setCors(res) {
@@ -87,11 +91,9 @@ async function generateStabilityImageDataUrl(prompt, { aspectRatio = '9:16' } = 
     throw new Error('STABILITY_API_KEY not set');
   }
 
-  // Example endpoint - adjust according to the engine you want:
-  // e.g. https://api.stability.ai/v2beta/stable-image/generate/sd3
-  const url = `https://api.stability.ai/v2beta/stable-image/generate/${STABILITY_IMAGE_ENGINE}`;
+  // Endpoint path is always /sd3 – model variant is passed in the form
+  const url = 'https://api.stability.ai/v2beta/stable-image/generate/sd3';
 
-  // IMPORTANT: multipart/form-data (FormData), not JSON
   const form = new FormData();
   form.append('prompt', prompt);
   form.append(
@@ -100,20 +102,25 @@ async function generateStabilityImageDataUrl(prompt, { aspectRatio = '9:16' } = 
       : aspectRatio === '1:1' ? '1:1'
       : '16:9'
   );
-  form.append('output_format', 'png'); // or 'jpeg'
+  form.append('output_format', 'png');
+  form.append('model', STABILITY_IMAGE_MODEL);
+
+  // For SD3 family, docs show also supporting a "mode" field
+  if (STABILITY_IMAGE_MODEL.startsWith('sd3')) {
+    form.append('mode', 'text-to-image');
+  }
 
   const resp = await fetch(url, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${STABILITY_API_KEY}`,
-      // DO NOT set Content-Type manually; fetch sets multipart boundary
+      // Let fetch set multipart boundary; don't set Content-Type manually
       Accept: 'image/*',
     },
     body: form,
   });
 
   if (!resp.ok) {
-    // Errors come back as JSON text
     const errorText = await resp.text().catch(() => '');
     let parsed;
     try {
@@ -125,11 +132,9 @@ async function generateStabilityImageDataUrl(prompt, { aspectRatio = '9:16' } = 
     throw new Error(`Stability image error: ${resp.status}`);
   }
 
-  // Success: raw image bytes → base64 → data URL
   const arrayBuffer = await resp.arrayBuffer();
   const base64 = Buffer.from(arrayBuffer).toString('base64');
-  const dataUrl = `data:image/png;base64,${base64}`;
-  return dataUrl;
+  return `data:image/png;base64,${base64}`;
 }
 
 /**
