@@ -338,7 +338,6 @@ module.exports = async function handler(req, res) {
       template_id,
       modifications: mods,
       output_format: 'mp4',
-      duration: targetSec,
     };
 
     console.log('[CREATE_VIDEO] PAYLOAD_PREVIEW', {
