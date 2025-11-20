@@ -7,7 +7,12 @@ const STABILITY_API_KEY = process.env.STABILITY_API_KEY;
 
 // One of:
 // 'sd3.5-large', 'sd3.5-large-turbo', 'sd3.5-medium', 'sd3.5-flash'
-const STABILITY_IMAGE_MODEL = process.env.STABILITY_IMAGE_MODEL || 'sd3.5-flash';
+const STABILITY_IMAGE_MODEL = process.env.STABILITY_IMAGE_MODEL || 'sd3.5-medium';
+
+// Animation variants that exist in your Creatomate template
+// For each beat you have layers:
+// BeatX_PanRight_Image, BeatX_PanLeft_Image, BeatX_PanUp_Image, BeatX_PanDown_Image, BeatX_Zoom_Image
+const ANIMATION_VARIANTS = ['PanRight', 'PanLeft', 'PanUp', 'PanDown', 'Zoom'];
 
 // ----------------- CORS -----------------
 function setCors(res) {
@@ -55,7 +60,7 @@ function postJSON(url, headers, bodyObj) {
 
 // ----------------- Speech timing helper (words -> seconds) -----------------
 function estimateSpeechSeconds(narration) {
-  const text  = (narration || '').trim();
+  const text = (narration || '').trim();
   if (!text) return 0;
   const words = (text.match(/\S+/g) || []).length;
   const wordsPerSec = 2.5; // ~150 wpm
@@ -68,11 +73,12 @@ function estimateSpeechSeconds(narration) {
  */
 function buildScenePrompt({ narration, artStyle, sceneIndex, aspectRatio }) {
   const style = artStyle || 'Realistic';
-  const ratioText = aspectRatio === '9:16'
-    ? 'vertical 9:16'
-    : aspectRatio === '1:1'
-    ? 'square 1:1'
-    : 'horizontal 16:9';
+  const ratioText =
+    aspectRatio === '9:16'
+      ? 'vertical 9:16'
+      : aspectRatio === '1:1'
+      ? 'square 1:1'
+      : 'horizontal 16:9';
 
   return (
     `${style} style illustration of scene ${sceneIndex} from this story: ${narration} ` +
@@ -96,9 +102,7 @@ async function generateStabilityImageBuffer(prompt, { aspectRatio = '9:16' } = {
   form.append('prompt', prompt);
   form.append(
     'aspect_ratio',
-    aspectRatio === '9:16' ? '9:16'
-      : aspectRatio === '1:1' ? '1:1'
-      : '16:9'
+    aspectRatio === '9:16' ? '9:16' : aspectRatio === '1:1' ? '1:1' : '16:9'
   );
   form.append('output_format', 'png');
   form.append('model', STABILITY_IMAGE_MODEL);
@@ -147,9 +151,14 @@ async function uploadImageBufferToBlob(buffer, key) {
 
 /**
  * Generate one image per beat via Stability and return an array of public URLs.
- * If something fails, we log and return null for that slot so we can fall back to DALL·E prompts.
+ * If something fails, we log and return null for that slot so we can fall back to prompts.
  */
-async function generateStabilityImageUrlsForBeats({ beatCount, narration, artStyle, aspectRatio }) {
+async function generateStabilityImageUrlsForBeats({
+  beatCount,
+  narration,
+  artStyle,
+  aspectRatio,
+}) {
   const urls = [];
 
   for (let i = 1; i <= beatCount; i++) {
@@ -177,6 +186,11 @@ async function generateStabilityImageUrlsForBeats({ beatCount, narration, artSty
   return urls;
 }
 
+function pickRandomVariant() {
+  const idx = Math.floor(Math.random() * ANIMATION_VARIANTS.length);
+  return ANIMATION_VARIANTS[idx];
+}
+
 module.exports = async function handler(req, res) {
   setCors(res);
   if (req.method === 'OPTIONS') return res.status(200).end();
@@ -188,17 +202,17 @@ module.exports = async function handler(req, res) {
     const body =
       typeof req.body === 'string'
         ? JSON.parse(req.body || '{}')
-        : (req.body || {});
+        : req.body || {};
 
     const {
-      storyType     = 'Random AI story',
-      artStyle      = 'Realistic',
-      language      = 'English',
-      voice         = 'Adam',
-      aspectRatio   = '9:16',
-      customPrompt  = '',
-      durationRange = '60-90',   // "30-60" or "60-90"
-      voice_url     = null,      // future: if you plug in ElevenLabs
+      storyType = 'Random AI story',
+      artStyle = 'Realistic',
+      language = 'English',
+      voice = 'Adam',
+      aspectRatio = '9:16',
+      customPrompt = '',
+      durationRange = '60-90', // "30-60" or "60-90"
+      voice_url = null, // future: if you plug in ElevenLabs
     } = body;
 
     if (!process.env.CREATOMATE_API_KEY) {
@@ -208,7 +222,7 @@ module.exports = async function handler(req, res) {
     // Pick template ID by aspect ratio
     const templateMap = {
       '9:16': process.env.CREATO_TEMPLATE_916,
-      '1:1' : process.env.CREATO_TEMPLATE_11,
+      '1:1': process.env.CREATO_TEMPLATE_11,
       '16:9': process.env.CREATO_TEMPLATE_169,
     };
     const template_id = (templateMap[aspectRatio] || '').trim();
@@ -219,8 +233,16 @@ module.exports = async function handler(req, res) {
         .json({ error: 'NO_TEMPLATE_FOR_ASPECT', aspectRatio });
     }
 
+    // Map durationRange -> soft bounds in seconds (for logging / later tuning)
+    let minSec = 60;
+    let maxSec = 90;
+    if (durationRange === '30-60') {
+      minSec = 30;
+      maxSec = 60;
+    }
+
     // 1) Call /api/generate-script on THIS backend to get narration
-    const baseUrl   = `https://${req.headers.host}`;
+    const baseUrl = `https://${req.headers.host}`;
     const scriptUrl = `${baseUrl}/api/generate-script`;
 
     const scriptResp = await fetch(scriptUrl, {
@@ -250,28 +272,24 @@ module.exports = async function handler(req, res) {
         .json({ error: 'SCRIPT_EMPTY', details: scriptResp });
     }
 
-    // 2) Estimate how long the narration actually is
+    // 2) Estimate how long the narration actually is (for logging)
     const speechSec = estimateSpeechSeconds(narration);
 
-    // Target duration: basically script length + small buffer
     let targetSec = Math.round(speechSec + 2);
-
-    // Safety: if something went weird, fall back to something reasonable
-    if (!Number.isFinite(targetSec) || targetSec < 10) {
-      targetSec = 20;
+    if (targetSec < minSec) targetSec = minSec;
+    if (targetSec > maxSec && targetSec < maxSec + 10) {
+      // small overflow ok
+    } else if (targetSec > maxSec + 10) {
+      targetSec = Math.round(speechSec + 2);
     }
 
-    // Clamp by selected duration bucket so we don't accidentally go huge
-    if (durationRange === '30-60' && targetSec > 60) targetSec = 60;
-    if (durationRange === '60-90' && targetSec > 90) targetSec = 90;
-
-    // 3) Decide how many beats based on duration
+    // 3) Decide how many beats we want to *fill*
+    // Your template has 24 beats; we'll always fill all 24 with content.
     const MIN_BEATS = 8;
-    const MAX_BEATS = 24;  // must match how many Beat slots you made in the template
+    const MAX_BEATS = 24;
 
-    let beatCount = Math.round(targetSec / 3.5); // ~3.5s per scene
-    if (!beatCount || !Number.isFinite(beatCount)) beatCount = 10;
-    beatCount = Math.max(MIN_BEATS, Math.min(MAX_BEATS, beatCount));
+    // If you ever want fewer beats, change this — but right now we always use all 24.
+    let beatCount = MAX_BEATS;
 
     // 4) Generate Stability images up front (if enabled)
     let stabilityImageUrls = [];
@@ -284,7 +302,10 @@ module.exports = async function handler(req, res) {
           aspectRatio,
         });
       } catch (err) {
-        console.error('[CREATE_VIDEO] STABILITY_BATCH_FAILED, falling back to DALL·E prompts', err);
+        console.error(
+          '[CREATE_VIDEO] STABILITY_BATCH_FAILED, falling back to prompts',
+          err
+        );
         stabilityImageUrls = [];
       }
     }
@@ -303,33 +324,44 @@ module.exports = async function handler(req, res) {
 
     for (let i = 1; i <= beatCount; i++) {
       const sceneTitle = `Scene ${i}`;
-      const defaultPrompt = buildScenePrompt({
-        narration,
-        artStyle: style,
-        sceneIndex: i,
-        aspectRatio,
-      });
 
-      const imgValue =
+      // Pick the image for this beat:
+      const imageUrl =
         IMAGE_PROVIDER === 'stability' && stabilityImageUrls[i - 1]
-          ? stabilityImageUrls[i - 1]   // URL from Vercel Blob
-          : defaultPrompt;              // Fallback: DALL·E prompt
+          ? stabilityImageUrls[i - 1] // Stability URL from Blob
+          : buildScenePrompt({
+              narration,
+              artStyle: style,
+              sceneIndex: i,
+              aspectRatio,
+            }); // fallback: DALL·E prompt
 
       mods[`Beat${i}_Caption`] = sceneTitle;
-      mods[`Beat${i}_Image`]   = imgValue;
-      mods[`Beat${i}_Visible`] = true;
-    }
 
-    // Hide any extra beats in the template above beatCount
-    for (let i = beatCount + 1; i <= MAX_BEATS; i++) {
-      mods[`Beat${i}_Visible`] = false;
+      // Randomly pick one animation variant for this beat
+      const chosenVariant = pickRandomVariant();
+
+      for (const variant of ANIMATION_VARIANTS) {
+        const imgKey = `Beat${i}_${variant}_Image`;
+
+        // In your Creatomate template:
+        // - There are 5 layers per beat with these names
+        // - Each has its own animation (pan/zoom)
+        // - Only the one that receives a non-null source will actually show
+        if (variant === chosenVariant) {
+          mods[imgKey] = imageUrl;
+        } else {
+          // Clear the image for the non-chosen variants
+          mods[imgKey] = null;
+        }
+      }
     }
 
     const payload = {
       template_id,
       modifications: mods,
       output_format: 'mp4',
-      duration: targetSec,   // <-- force final video length to match script
+      // no duration: we let the template's own timeline determine final length
     };
 
     console.log('[CREATE_VIDEO] PAYLOAD_PREVIEW', {
