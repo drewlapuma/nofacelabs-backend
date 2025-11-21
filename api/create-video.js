@@ -2,16 +2,12 @@
 const https = require('https');
 
 const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN || '*';
-const IMAGE_PROVIDER = (process.env.IMAGE_PROVIDER || 'dalle').toLowerCase();
+const IMAGE_PROVIDER = (process.env.IMAGE_PROVIDER || 'stability').toLowerCase();
 const STABILITY_API_KEY = process.env.STABILITY_API_KEY;
 
 // One of:
 // 'sd3.5-large', 'sd3.5-large-turbo', 'sd3.5-medium', 'sd3.5-flash'
 const STABILITY_IMAGE_MODEL = process.env.STABILITY_IMAGE_MODEL || 'sd3.5-flash';
-
-// Limit how many unique Stability images we generate per video.
-// The rest of the beats will REUSE these images with different camera moves.
-const STABILITY_MAX_IMAGES = Number(process.env.STABILITY_MAX_IMAGES || 8);
 
 // Animation variants that exist in your Creatomate template
 // For each beat you have layers:
@@ -73,22 +69,30 @@ function estimateSpeechSeconds(narration) {
 
 /**
  * Build a visual prompt for a scene, based on the full narration + artStyle.
- * Pushes hard toward 2D cartoon / comic-book style (world.wide.story vibe).
+ * Uses your scary toon TikTok-style spec when artStyle is "Scary toon".
  */
 function buildScenePrompt({ narration, artStyle, sceneIndex, aspectRatio }) {
   const styleRaw = (artStyle || '').toLowerCase();
 
-  // Base cartoon style chunk
-  let styleChunk =
-    '2d digital cartoon illustration, flat shading, bold black outlines, ' +
-    'vibrant colors, simple shapes, clean background, high contrast, ' +
-    'TikTok documentary story style, highly detailed but clearly 2d, no realism';
+  let styleChunk;
 
-  // Slightly darker variant for scary/horror types
-  if (styleRaw.includes('scary') || styleRaw.includes('horror')) {
+  // 🔥 Scary toon style — your exact TikTok cartoon spec
+  if (styleRaw.includes('scary') || styleRaw.includes('toon')) {
     styleChunk =
-      'dark 2d horror cartoon, bold black outlines, eerie lighting, muted colors, ' +
-      'spooky atmosphere, cinematic framing, still family-friendly, no gore, no graphic violence';
+      'Cartoon storytelling illustration in the style of viral TikTok story animations: ' +
+      'clean bold outlines, soft cel-shading, smooth gradients, expressive characters, ' +
+      'light anime influence, high contrast lighting, slightly exaggerated proportions, ' +
+      'cinematic framing, vibrant but not neon colors, simple textured backgrounds, ' +
+      'smooth line art, crisp edges, digital painting, storybook vibe, ' +
+      'no comic panels, no multiple frames, single scene only. ' +
+      'Darker mood with spooky atmosphere, still family-friendly, no gore or graphic violence.';
+  } else {
+    // Generic cartoon / story style for non-scary art styles
+    styleChunk =
+      '2d digital cartoon storytelling illustration, flat colors with soft shading, ' +
+      'clean bold outlines, expressive characters, light anime influence, cinematic framing, ' +
+      'vibrant but not neon colors, simple textured backgrounds, smooth line art, crisp edges, ' +
+      'digital painting, storybook vibe, no comic panels, no multiple frames, single scene only.';
   }
 
   const ratioText =
@@ -103,7 +107,7 @@ Scene ${sceneIndex} from this narrated TikTok story:
 
 "${narration}"
 
-Visual style: ${styleChunk}, ${ratioText}, no text, no subtitles, no UI, no watermarks, single frame key art, extremely clean and polished.
+Visual style: ${styleChunk}, ${ratioText}, no text, no subtitles, no UI, no watermarks, no logos, no borders.
 `.trim();
 }
 
@@ -116,7 +120,6 @@ async function generateStabilityImageBuffer(prompt, { aspectRatio = '9:16' } = {
     throw new Error('STABILITY_API_KEY not set');
   }
 
-  // Endpoint path is always /sd3 – model variant is passed in the form
   const url = 'https://api.stability.ai/v2beta/stable-image/generate/sd3';
 
   const form = new FormData();
@@ -128,9 +131,8 @@ async function generateStabilityImageBuffer(prompt, { aspectRatio = '9:16' } = {
   form.append('output_format', 'png');
   form.append('model', STABILITY_IMAGE_MODEL);
 
-  // Strongly bias toward comic/cartoon style
-  // You can try 'digital-art' or 'anime' if you want to experiment.
-  form.append('style_preset', 'comic-book');
+  // Stylized but not comic-strip; works well with your prompt.
+  form.append('style_preset', 'digital-art');
 
   if (STABILITY_IMAGE_MODEL.startsWith('sd3')) {
     form.append('mode', 'text-to-image');
@@ -165,7 +167,6 @@ async function generateStabilityImageBuffer(prompt, { aspectRatio = '9:16' } = {
  * Upload an image buffer to Vercel Blob and return a public URL.
  */
 async function uploadImageBufferToBlob(buffer, key) {
-  // @vercel/blob is ESM-only, so we use dynamic import
   const { put } = await import('@vercel/blob');
   const { url } = await put(key, buffer, {
     access: 'public',
@@ -175,8 +176,10 @@ async function uploadImageBufferToBlob(buffer, key) {
 }
 
 /**
- * Generate up to STABILITY_MAX_IMAGES images via Stability and return an array of public URLs.
- * We'll reuse these across all beats to save credits.
+ * Generate one Stability image per beat and return an array of URLs.
+ * If a generation fails, reuse the last good URL so we don't get black beats.
+ * After the loop, if Beat 1 is still null but later beats have URLs,
+ * we fill Beat 1 with the first non-null image.
  */
 async function generateStabilityImageUrlsForBeats({
   beatCount,
@@ -185,10 +188,9 @@ async function generateStabilityImageUrlsForBeats({
   aspectRatio,
 }) {
   const urls = [];
+  let lastGoodUrl = null;
 
-  const uniqueCount = Math.min(beatCount, STABILITY_MAX_IMAGES);
-
-  for (let i = 1; i <= uniqueCount; i++) {
+  for (let i = 1; i <= beatCount; i++) {
     const prompt = buildScenePrompt({
       narration,
       artStyle,
@@ -197,16 +199,26 @@ async function generateStabilityImageUrlsForBeats({
     });
 
     try {
-      console.log(`[STABILITY] Generating image ${i}/${uniqueCount}`);
+      console.log(`[STABILITY] Generating image for Beat ${i}/${beatCount}`);
       const buffer = await generateStabilityImageBuffer(prompt, { aspectRatio });
 
-      const key = `stability-scenes/${Date.now()}-img-${i}.png`;
+      const key = `stability-scenes/${Date.now()}-beat-${i}.png`;
       const url = await uploadImageBufferToBlob(buffer, key);
 
       urls.push(url);
+      lastGoodUrl = url;
     } catch (err) {
-      console.error(`[STABILITY] Image ${i} failed, will fall back to prompt`, err);
-      urls.push(null);
+      console.error(`[STABILITY] Beat ${i} failed, reusing last good image if available`, err);
+      urls.push(lastGoodUrl); // may be null initially; we'll patch Beat 1 after
+    }
+  }
+
+  // Safety: if Beat 1 ended up null but we have any non-null later, use the first non-null.
+  if (!urls[0]) {
+    const fallback = urls.find((u) => !!u) || null;
+    if (fallback) {
+      console.warn('[STABILITY] Beat 1 had no image, filling with first non-null image');
+      urls[0] = fallback;
     }
   }
 
@@ -233,13 +245,13 @@ module.exports = async function handler(req, res) {
 
     const {
       storyType = 'Random AI story',
-      artStyle = 'Scary toon',   // your Webflow UI can override this
+      artStyle = 'Scary toon',   // Webflow UI can override this
       language = 'English',
       voice = 'Adam',
       aspectRatio = '9:16',
       customPrompt = '',
       durationRange = '60-90', // "30-60" or "60-90"
-      voice_url = null, // future: if you plug in ElevenLabs
+      voice_url = null,
     } = body;
 
     if (!process.env.CREATOMATE_API_KEY) {
@@ -260,7 +272,7 @@ module.exports = async function handler(req, res) {
         .json({ error: 'NO_TEMPLATE_FOR_ASPECT', aspectRatio });
     }
 
-    // 1) Call /api/generate-script on THIS backend to get narration
+    // 1) Get narration from generate-script
     const baseUrl = `https://${req.headers.host}`;
     const scriptUrl = `${baseUrl}/api/generate-script`;
 
@@ -291,7 +303,7 @@ module.exports = async function handler(req, res) {
         .json({ error: 'SCRIPT_EMPTY', details: scriptResp });
     }
 
-    // 2) Estimate how long the narration actually is (for logging only)
+    // 2) Estimate narration time (for logging only)
     const speechSec = estimateSpeechSeconds(narration);
 
     let targetSec = Math.round(speechSec + 2);
@@ -308,10 +320,10 @@ module.exports = async function handler(req, res) {
       targetSec = Math.round(speechSec + 2);
     }
 
-    // 3) Your template has 24 beats; we'll always fill all 24.
+    // 3) Your template has 24 beats; we fill all 24.
     const beatCount = 24;
 
-    // 4) Generate a limited pool of Stability images up front (if enabled)
+    // 4) Generate Stability images (one per beat) if enabled
     let stabilityImageUrls = [];
     if (IMAGE_PROVIDER === 'stability') {
       try {
@@ -323,7 +335,7 @@ module.exports = async function handler(req, res) {
         });
       } catch (err) {
         console.error(
-          '[CREATE_VIDEO] STABILITY_BATCH_FAILED, falling back to prompts',
+          '[CREATE_VIDEO] STABILITY_BATCH_FAILED, falling back to prompts only',
           err
         );
         stabilityImageUrls = [];
@@ -344,14 +356,14 @@ module.exports = async function handler(req, res) {
 
     for (let i = 1; i <= beatCount; i++) {
       const sceneTitle = `Scene ${i}`;
+      mods[`Beat${i}_Caption`] = sceneTitle;
 
-      let imageUrl;
-      if (IMAGE_PROVIDER === 'stability' && stabilityImageUrls.length > 0) {
-        // Reuse a limited pool of Stability images across beats
-        const idx = (i - 1) % stabilityImageUrls.length;
-        imageUrl = stabilityImageUrls[idx] || null;
-      } else {
-        // Fallback: send a DALL·E-style prompt
+      let imageUrl = null;
+
+      if (IMAGE_PROVIDER === 'stability' && stabilityImageUrls.length >= i) {
+        imageUrl = stabilityImageUrls[i - 1] || null;
+      } else if (IMAGE_PROVIDER === 'dalle') {
+        // If you ever switch back to DALL·E via Creatomate, this will send prompts instead of URLs
         imageUrl = buildScenePrompt({
           narration,
           artStyle: style,
@@ -360,18 +372,11 @@ module.exports = async function handler(req, res) {
         });
       }
 
-      mods[`Beat${i}_Caption`] = sceneTitle;
-
-      // Randomly pick one animation variant for this beat
       const chosenVariant = pickRandomVariant();
 
       for (const variant of ANIMATION_VARIANTS) {
         const imgKey = `Beat${i}_${variant}_Image`;
 
-        // In your Creatomate template:
-        // - There are 5 layers per beat with these names
-        // - Each has its own animation (pan/zoom)
-        // - Only the one that receives a non-null source will actually show
         if (variant === chosenVariant && imageUrl) {
           mods[imgKey] = imageUrl;
         } else {
@@ -384,7 +389,7 @@ module.exports = async function handler(req, res) {
       template_id,
       modifications: mods,
       output_format: 'mp4',
-      // no duration: let template + audio drive actual length
+      // let the template + audio drive final duration
     };
 
     console.log('[CREATE_VIDEO] PAYLOAD_PREVIEW', {
