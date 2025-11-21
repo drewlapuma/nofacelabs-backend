@@ -9,7 +9,12 @@ const STABILITY_API_KEY = process.env.STABILITY_API_KEY;
 // 'sd3.5-large', 'sd3.5-large-turbo', 'sd3.5-medium', 'sd3.5-flash'
 const STABILITY_IMAGE_MODEL = process.env.STABILITY_IMAGE_MODEL || 'sd3.5-flash';
 
-// Animation variants that exist in your Creatomate template
+// Beat / timing settings
+const MIN_BEATS = 8;      // never fewer than this
+const MAX_BEATS = 24;     // must match how many Beat groups your template supports
+const SECONDS_PER_BEAT = 3.5; // approx seconds per scene
+
+// Animation variants in your Creatomate template
 // For each beat you have layers:
 // BeatX_PanRight_Image, BeatX_PanLeft_Image, BeatX_PanUp_Image, BeatX_PanDown_Image, BeatX_Zoom_Image
 const ANIMATION_VARIANTS = ['PanRight', 'PanLeft', 'PanUp', 'PanDown', 'Zoom'];
@@ -176,7 +181,7 @@ async function uploadImageBufferToBlob(buffer, key) {
 }
 
 /**
- * Generate one Stability image per beat and return an array of URLs.
+ * Generate one Stability image per beat (based on dynamic beatCount) and return an array of URLs.
  * If a generation fails, reuse the last good URL so we don't get black beats.
  * After the loop, if Beat 1 is still null but later beats have URLs,
  * we fill Beat 1 with the first non-null image.
@@ -245,13 +250,13 @@ module.exports = async function handler(req, res) {
 
     const {
       storyType = 'Random AI story',
-      artStyle = 'Scary toon',   // Webflow UI can override this
+      artStyle = 'Scary toon',   // Webflow UI can override
       language = 'English',
       voice = 'Adam',
       aspectRatio = '9:16',
       customPrompt = '',
       durationRange = '60-90', // "30-60" or "60-90"
-      voice_url = null,
+      voice_url = null,        // future: ElevenLabs etc.
     } = body;
 
     if (!process.env.CREATOMATE_API_KEY) {
@@ -303,7 +308,7 @@ module.exports = async function handler(req, res) {
         .json({ error: 'SCRIPT_EMPTY', details: scriptResp });
     }
 
-    // 2) Estimate narration time (for logging only)
+    // 2) Estimate narration time
     const speechSec = estimateSpeechSeconds(narration);
 
     let targetSec = Math.round(speechSec + 2);
@@ -320,10 +325,23 @@ module.exports = async function handler(req, res) {
       targetSec = Math.round(speechSec + 2);
     }
 
-    // 3) Your template has 24 beats; we fill all 24.
-    const beatCount = 24;
+    // 3) Dynamically decide how many beats to use, based on targetSec
+    let beatCount = Math.round(targetSec / SECONDS_PER_BEAT);
+    if (!beatCount || !Number.isFinite(beatCount)) {
+      beatCount = MIN_BEATS;
+    }
+    beatCount = Math.max(MIN_BEATS, Math.min(MAX_BEATS, beatCount));
 
-    // 4) Generate Stability images (one per beat) if enabled
+    console.log('[CREATE_VIDEO] BEAT_CONFIG', {
+      speechSec,
+      targetSec,
+      beatCount,
+      MIN_BEATS,
+      MAX_BEATS,
+      SECONDS_PER_BEAT,
+    });
+
+    // 4) Generate Stability images for the beats we are actually using
     let stabilityImageUrls = [];
     if (IMAGE_PROVIDER === 'stability') {
       try {
@@ -354,6 +372,7 @@ module.exports = async function handler(req, res) {
 
     const style = artStyle || 'Scary toon';
 
+    // Fill active beats 1..beatCount
     for (let i = 1; i <= beatCount; i++) {
       const sceneTitle = `Scene ${i}`;
       mods[`Beat${i}_Caption`] = sceneTitle;
@@ -363,7 +382,6 @@ module.exports = async function handler(req, res) {
       if (IMAGE_PROVIDER === 'stability' && stabilityImageUrls.length >= i) {
         imageUrl = stabilityImageUrls[i - 1] || null;
       } else if (IMAGE_PROVIDER === 'dalle') {
-        // If you ever switch back to DALL·E via Creatomate, this will send prompts instead of URLs
         imageUrl = buildScenePrompt({
           narration,
           artStyle: style,
@@ -385,6 +403,16 @@ module.exports = async function handler(req, res) {
       }
     }
 
+    // Explicitly clear any beats above beatCount up to MAX_BEATS,
+    // so unused beats don't accidentally show anything.
+    for (let i = beatCount + 1; i <= MAX_BEATS; i++) {
+      mods[`Beat${i}_Caption`] = '';
+      for (const variant of ANIMATION_VARIANTS) {
+        const imgKey = `Beat${i}_${variant}_Image`;
+        mods[imgKey] = null;
+      }
+    }
+
     const payload = {
       template_id,
       modifications: mods,
@@ -396,6 +424,8 @@ module.exports = async function handler(req, res) {
       template_id_preview: template_id.slice(0, 6) + '…',
       targetSec,
       beatCount,
+      MIN_BEATS,
+      MAX_BEATS,
       imageProvider: IMAGE_PROVIDER,
       stabilityImagesGenerated: stabilityImageUrls.length,
     });
