@@ -7,17 +7,26 @@ const STABILITY_API_KEY = process.env.STABILITY_API_KEY;
 
 // One of:
 // 'sd3.5-large', 'sd3.5-large-turbo', 'sd3.5-medium', 'sd3.5-flash'
-const STABILITY_IMAGE_MODEL = process.env.STABILITY_IMAGE_MODEL || 'sd3.5-large-turbo';
+const STABILITY_IMAGE_MODEL =
+  process.env.STABILITY_IMAGE_MODEL || 'sd3.5-large-turbo';
 
 // Beat / timing settings
-const MIN_BEATS = 8;           // never fewer than this
-const MAX_BEATS = 24;          // must match how many Beat groups your template supports
-const SECONDS_PER_BEAT = 3.5;  // approx seconds per scene
+const MIN_BEATS = 8; // never fewer than this
+const MAX_BEATS = 24; // must match how many Beat groups your template supports
+const SECONDS_PER_BEAT = 3.5; // approx seconds per scene
 
 // Animation variants in your Creatomate template
 // For each beat you have layers:
 // BeatX_PanRight_Image, BeatX_PanLeft_Image, BeatX_PanUp_Image, BeatX_PanDown_Image, BeatX_Zoom_Image
 const ANIMATION_VARIANTS = ['PanRight', 'PanLeft', 'PanUp', 'PanDown', 'Zoom'];
+
+// Negative prompt to avoid random portraits / comic panels / junk
+const STABILITY_NEGATIVE_PROMPT = `
+photorealistic, realistic photo, selfie, glamour shot, portrait of a beautiful girl, generic anime waifu,
+ugly, distorted, deformed, extra limbs, extra fingers, missing limbs, bad anatomy,
+multiple panels, comic panels, comic page, collage, split screen, storyboard,
+text, subtitles, captions, watermark, logo, UI elements, low resolution, blurry, noisy
+`.trim();
 
 // ----------------- CORS -----------------
 function setCors(res) {
@@ -105,30 +114,50 @@ function splitNarrationIntoBeats(narration, beatCount) {
 
 /**
  * Build a visual prompt for a scene, based on the *beat text* + artStyle.
- * Uses your scary toon TikTok-style spec when artStyle is "Scary toon".
+ * Uses your scary toon TikTok-style spec when artStyle is "Scary toon" (or similar).
+ * Also biases toward monsters / unknown when the line looks scary.
  */
 function buildScenePrompt({ beatText, artStyle, sceneIndex, aspectRatio }) {
   const styleRaw = (artStyle || '').toLowerCase();
+  const lowerBeat = (beatText || '').toLowerCase();
+
+  // Heuristic: is this beat talking about something creepy?
+  const isScaryBeat = /monster|creature|shadow|whisper|unknown|fear|scream|screaming|door|window|closet|basement|attic|mirror|doll|figure|eyes|watching|behind you|under the bed/.test(
+    lowerBeat
+  );
+
+  const subjectHint = isScaryBeat
+    ? 'Focus on the eerie presence, shadowy figure, strange environment, or unknown source of fear in this line.'
+    : 'Focus on the main subject or setting described in this line, keep the composition simple and clear.';
 
   let styleChunk;
 
-  // 🔥 Scary toon style — your exact TikTok cartoon spec
+  // 🔥 Scary toon style — your exact TikTok cartoon spec + mood
   if (styleRaw.includes('scary') || styleRaw.includes('toon')) {
-    styleChunk =
-      'Cartoon storytelling illustration in the style of viral TikTok story animations: ' +
-      'clean bold outlines, soft cel-shading, smooth gradients, expressive characters, ' +
-      'light anime influence, high contrast lighting, slightly exaggerated proportions, ' +
-      'cinematic framing, vibrant but not neon colors, simple textured backgrounds, ' +
-      'smooth line art, crisp edges, digital painting, storybook vibe, ' +
-      'no comic panels, no multiple frames, single scene only. ' +
-      'Darker mood with spooky atmosphere, still family-friendly, no gore or graphic violence.';
+    const baseScaryToon = `
+Cartoon storytelling illustration in the style of viral TikTok story animations:
+clean bold outlines, soft cel-shading, smooth gradients, expressive characters,
+light anime influence, high contrast lighting, slightly exaggerated proportions,
+cinematic framing, vibrant but not neon colors, simple textured backgrounds,
+smooth line art, crisp edges, digital painting, storybook vibe,
+no comic panels, no multiple frames, single scene only.
+`.trim();
+
+    const scaryToonMood = `
+Scary toon horror mood, eerie and unsettling but TikTok-safe and PG-13,
+dark shadows, moody lighting, subtle creepiness, focus on the strange or unknown,
+no gore, no graphic violence.
+`.trim();
+
+    styleChunk = `${scaryToonMood}\n\n${baseScaryToon}`;
   } else {
     // Generic cartoon / story style for non-scary art styles
-    styleChunk =
-      '2d digital cartoon storytelling illustration, flat colors with soft shading, ' +
-      'clean bold outlines, expressive characters, light anime influence, cinematic framing, ' +
-      'vibrant but not neon colors, simple textured backgrounds, smooth line art, crisp edges, ' +
-      'digital painting, storybook vibe, no comic panels, no multiple frames, single scene only.';
+    styleChunk = `
+2D digital cartoon storytelling illustration, flat colors with soft shading,
+clean bold outlines, expressive characters, light anime influence, cinematic framing,
+vibrant but not neon colors, simple textured backgrounds, smooth line art, crisp edges,
+digital painting, storybook vibe, no comic panels, no multiple frames, single scene only.
+`.trim();
   }
 
   const ratioText =
@@ -139,12 +168,19 @@ function buildScenePrompt({ beatText, artStyle, sceneIndex, aspectRatio }) {
       : 'horizontal 16:9 composition';
 
   return `
-Scene ${sceneIndex} from this narrated TikTok story.
+Cartoon storytelling frame from a narrated TikTok scary story.
 
-Narration for this scene:
+Story line for this scene:
 "${beatText}"
 
-Visual style: ${styleChunk}, ${ratioText}, no text, no subtitles, no UI, no watermarks, no logos, no borders.
+${subjectHint}
+
+Visual style:
+${styleChunk}
+
+Framing: ${ratioText}, cinematic, centered on the main subject.
+
+Do NOT use comic panels, split screens, multiple scenes, text, subtitles, speech bubbles, UI, watermarks, or logos.
 `.trim();
 }
 
@@ -167,9 +203,10 @@ async function generateStabilityImageBuffer(prompt, { aspectRatio = '9:16' } = {
   );
   form.append('output_format', 'png');
   form.append('model', STABILITY_IMAGE_MODEL);
-
-  // Stylized but not comic-strip; works well with your prompt.
   form.append('style_preset', 'digital-art');
+
+  // 👇 discourage random portraits, panels, etc.
+  form.append('negative_prompt', STABILITY_NEGATIVE_PROMPT);
 
   if (STABILITY_IMAGE_MODEL.startsWith('sd3')) {
     form.append('mode', 'text-to-image');
@@ -214,7 +251,13 @@ async function uploadImageBufferToBlob(buffer, key) {
 
 /**
  * Generate one Stability image per beat (using beatTexts) and return an array of URLs.
- * ❗ On error we now push null (NO reuse), so you'll see blanks instead of repeats.
+ *
+ * ✅ New behavior:
+ *   - Each beat uses its own beatText in the prompt.
+ *   - On error, we reuse the *last good URL* (to avoid long black sections),
+ *     but only if we already have at least one image.
+ *   - After the loop, if Beat 1 is still null but there IS a later good image,
+ *     we patch Beat 1 with the first good image (to fix "black first beat").
  */
 async function generateStabilityImageUrlsForBeats({
   beatCount,
@@ -223,9 +266,14 @@ async function generateStabilityImageUrlsForBeats({
   aspectRatio,
 }) {
   const urls = [];
+  let lastGoodUrl = null;
 
   for (let i = 1; i <= beatCount; i++) {
-    const beatText = beatTexts[i - 1] || beatTexts[beatTexts.length - 1] || '';
+    // Safety: in case beatTexts length is shorter than beatCount
+    const beatText =
+      beatTexts[i - 1] ||
+      beatTexts[(i - 1) % Math.max(1, beatTexts.length)] ||
+      '';
 
     const prompt = buildScenePrompt({
       beatText,
@@ -242,9 +290,29 @@ async function generateStabilityImageUrlsForBeats({
       const url = await uploadImageBufferToBlob(buffer, key);
 
       urls.push(url);
+      lastGoodUrl = url;
     } catch (err) {
-      console.error(`[STABILITY] Beat ${i} failed, leaving this beat without an image`, err);
-      urls.push(null); // No reuse; this beat may be blank if Creatomate has no fallback
+      console.error(
+        `[STABILITY] Beat ${i} failed, reusing last good image if available`,
+        err
+      );
+
+      if (lastGoodUrl) {
+        // reuse last good image to avoid blank beats mid-video
+        urls.push(lastGoodUrl);
+      } else {
+        // If literally nothing has worked yet, this may be null;
+        // we'll patch Beat 1 later if any later beat succeeds.
+        urls.push(null);
+      }
+    }
+  }
+
+  // If Beat 1 is null but we have at least one later good image, patch Beat 1.
+  if (!urls[0]) {
+    const firstGood = urls.find((u) => !!u);
+    if (firstGood) {
+      urls[0] = firstGood;
     }
   }
 
@@ -253,17 +321,17 @@ async function generateStabilityImageUrlsForBeats({
 
 /**
  * Build a sequence of animation variants for all beats
- * so that no two consecutive beats use the same variant.
+ * so that no two consecutive beats use the same variant,
+ * and the order is randomized per video.
  */
 function buildVariantSequence(beatCount) {
   const seq = [];
   let last = null;
 
   for (let i = 0; i < beatCount; i++) {
-    // simple round-robin that avoids repeating the same variant back-to-back
     const available = ANIMATION_VARIANTS.filter((v) => v !== last);
-    const idx = i % available.length;
-    const chosen = available[idx];
+    const chosen =
+      available[Math.floor(Math.random() * available.length)] || available[0];
 
     seq.push(chosen);
     last = chosen;
@@ -287,13 +355,13 @@ module.exports = async function handler(req, res) {
 
     const {
       storyType = 'Random AI story',
-      artStyle = 'Scary toon',   // Webflow UI can override
+      artStyle = 'Scary toon', // Webflow UI can override
       language = 'English',
       voice = 'Adam',
       aspectRatio = '9:16',
       customPrompt = '',
       durationRange = '60-90', // "30-60" or "60-90"
-      voice_url = null,        // future: ElevenLabs etc.
+      voice_url = null, // future: ElevenLabs etc.
     } = body;
 
     if (!process.env.CREATOMATE_API_KEY) {
@@ -419,7 +487,9 @@ module.exports = async function handler(req, res) {
     for (let i = 1; i <= beatCount; i++) {
       const beatText = beatTexts[i - 1] || '';
       const caption =
-        beatText.length > 120 ? beatText.slice(0, 117) + '…' : beatText || `Scene ${i}`;
+        beatText.length > 120
+          ? beatText.slice(0, 117) + '…'
+          : beatText || `Scene ${i}`;
 
       mods[`Beat${i}_Caption`] = caption;
 
@@ -428,6 +498,7 @@ module.exports = async function handler(req, res) {
       if (IMAGE_PROVIDER === 'stability' && stabilityImageUrls.length >= i) {
         imageUrl = stabilityImageUrls[i - 1] || null;
       } else if (IMAGE_PROVIDER === 'dalle') {
+        // For DALL·E we just send the prompt; Creatomate grabs it server-side
         imageUrl = buildScenePrompt({
           beatText,
           artStyle: style,
