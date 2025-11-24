@@ -317,7 +317,7 @@ async function generateStabilityImageBuffer(
   form.append('model', STABILITY_IMAGE_MODEL);
 
   // 🔒 Always use illustrated style for cartoon look
-  form.append('style_preset', 'illustration');
+  form.append('style_preset', 'digital-art');
 
   // Strong negative prompt to avoid random portrait girls, realism, etc.
   const negativePrompt =
