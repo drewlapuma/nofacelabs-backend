@@ -79,13 +79,11 @@ function estimateSpeechSeconds(narration) {
 
 /**
  * Naive fallback splitter if OpenAI beat planning fails.
- * Sentence-based splitter: keeps order, roughly equal sentence groups per beat.
  */
 function naiveSplitIntoBeats(narration, beatCount) {
   const text = (narration || '').trim();
   if (!text || beatCount <= 0) return [];
 
-  // Split into sentences by punctuation.
   let sentences = text
     .split(/(?<=[.!?])\s+/)
     .map((s) => s.trim())
@@ -104,7 +102,6 @@ function naiveSplitIntoBeats(narration, beatCount) {
     chunks.push(group.join(' '));
   }
 
-  // Trim or pad to exactly beatCount
   if (chunks.length > beatCount) {
     chunks.length = beatCount;
   }
@@ -117,27 +114,24 @@ function naiveSplitIntoBeats(narration, beatCount) {
 
 /**
  * Build a visual prompt for a scene, based on the *beat text* + artStyle.
- * Uses a strong scary illustrated style when artStyle is "Scary toon".
  */
 function buildScenePrompt({ beatText, artStyle, sceneIndex, aspectRatio }) {
   const styleRaw = (artStyle || '').toLowerCase();
 
   let styleChunk;
 
-  // Scary illustrated toon style — environment + horror, not pretty portraits
   if (styleRaw.includes('scary') || styleRaw.includes('toon')) {
     styleChunk =
-      '2D illustrated scary toon horror scene, storybook-inspired, clean but soft outlines, ' +
+      '2D scary toon horror illustration, digital-art style, clean but soft outlines, ' +
       'smooth shading, simplified shapes, slightly exaggerated proportions, ' +
       'cinematic framing, dark spooky atmosphere, eerie lighting, deep shadows, ' +
       'focus on the environment and the scary presence (monster, unknown figure, dark doorway, hallway, whispers), ' +
-      'characters should be small, silhouetted, or reacting to the horror, not glamorized, ' +
+      'characters small or silhouetted, reacting to the horror, not glamorized, ' +
       'no realistic photography, no pretty portraits, no slice-of-life scenes, ' +
       'no comic panels, no multiple frames, single full-screen illustration.';
   } else {
-    // Generic illustrated story style for non-scary art styles
     styleChunk =
-      '2D illustrated storybook scene, clean but soft outlines, ' +
+      '2D illustrated story scene, digital-art style, clean outlines, ' +
       'smooth shading, expressive characters, cinematic framing, ' +
       'vibrant but not neon colors, simple textured backgrounds, ' +
       'digital painting, no comic panels, no multiple frames, single full-scene illustration.';
@@ -166,7 +160,6 @@ Visual style: ${styleChunk}, ${ratioText}, no text, no subtitles, no UI, no wate
 
 /**
  * Use OpenAI to turn narration into a visual beat plan.
- * Returns an array of { caption, beat_text } of length beatCount.
  */
 async function buildVisualBeatPlan({ narration, storyType, artStyle, beatCount }) {
   if (!OPENAI_API_KEY) {
@@ -274,7 +267,6 @@ Narration:
       }));
     }
 
-    // Normalize length to exactly beatCount
     while (beats.length < beatCount) {
       beats.push(beats[beats.length - 1]);
     }
@@ -293,8 +285,7 @@ Narration:
 
 /**
  * Call Stability's image API for a single prompt.
- * Uses multipart/form-data (required by Stability) and returns a Buffer.
- * This version always uses style_preset = "illustration" for a cartoon/illustrated look.
+ * Uses style_preset = "digital-art" for cartoon/illustrated look.
  */
 async function generateStabilityImageBuffer(
   prompt,
@@ -316,10 +307,9 @@ async function generateStabilityImageBuffer(
   form.append('output_format', 'png');
   form.append('model', STABILITY_IMAGE_MODEL);
 
-  // 🔒 Always use illustrated style for cartoon look
+  // Cartoon illustration style
   form.append('style_preset', 'digital-art');
 
-  // Strong negative prompt to avoid random portrait girls, realism, etc.
   const negativePrompt =
     'photorealistic, realism, realistic photo, 3d render, selfie, portrait, ' +
     'instagram style, pretty girl, cute anime girl, schoolgirl, influencer, ' +
@@ -427,11 +417,11 @@ async function generateStabilityImageUrlsForBeats({
  * Build a sequence of animation variants for all beats
  * so that no two consecutive beats use the same variant.
  */
-function buildVariantSequence(beatCount) {
+function buildVariantSequence(count) {
   const seq = [];
   let last = null;
 
-  for (let i = 0; i < beatCount; i++) {
+  for (let i = 0; i < count; i++) {
     const available = ANIMATION_VARIANTS.filter((v) => v !== last);
     const idx = i % available.length;
     const chosen = available[idx];
@@ -440,17 +430,6 @@ function buildVariantSequence(beatCount) {
   }
 
   return seq;
-}
-
-/**
- * Fallback URL helper: walk backwards to find a non-null URL,
- * or return the first non-null, or null if none.
- */
-function getFallbackUrlForIndex(idx, urls) {
-  for (let i = idx; i >= 0; i--) {
-    if (urls[i]) return urls[i];
-  }
-  return urls.find((u) => !!u) || null;
 }
 
 module.exports = async function handler(req, res) {
@@ -589,10 +568,10 @@ module.exports = async function handler(req, res) {
       }
     }
 
-    // 6) Build a non-repeating animation sequence for ALL template beats
+    // 6) Build animation sequence, but we’ll only use it up to MAX_BEATS
     const variantSequence = buildVariantSequence(MAX_BEATS);
 
-    // 7) Build Creatomate modifications (fill all beats 1..MAX_BEATS)
+    // 7) Build Creatomate modifications
     const mods = {
       Narration: narration,
       Voiceover: narration,
@@ -605,39 +584,59 @@ module.exports = async function handler(req, res) {
     const style = artStyle || 'Scary toon';
 
     for (let i = 1; i <= MAX_BEATS; i++) {
-      const sourceIdx = Math.min(i - 1, beatCount - 1); // index into beatTexts / stabilityImageUrls
-      const beatText = beatTexts[sourceIdx] || '';
-      const captionRaw = beatCaptions[sourceIdx] || beatText || `Scene ${i}`;
-      const caption =
-        captionRaw.length > 120
-          ? captionRaw.slice(0, 117) + '…'
-          : captionRaw;
+      if (i <= beatCount) {
+        const sourceIdx = i - 1;
+        const beatText = beatTexts[sourceIdx] || '';
+        const captionRaw = beatCaptions[sourceIdx] || beatText || `Scene ${i}`;
+        const caption =
+          captionRaw.length > 120
+            ? captionRaw.slice(0, 117) + '…'
+            : captionRaw;
 
-      mods[`Beat${i}_Caption`] = caption;
+        mods[`Beat${i}_Caption`] = caption;
 
-      let imageUrl = null;
+        let imageUrl = null;
 
-      if (IMAGE_PROVIDER === 'stability' && stabilityImageUrls.length > 0) {
-        const rawUrl = stabilityImageUrls[sourceIdx] || null;
-        imageUrl = rawUrl || getFallbackUrlForIndex(sourceIdx, stabilityImageUrls);
-      } else if (IMAGE_PROVIDER === 'dalle') {
-        // If you ever wire DALL·E, pass prompt instead of URL here.
-        imageUrl = buildScenePrompt({
-          beatText,
-          artStyle: style,
-          sceneIndex: i,
-          aspectRatio,
-        });
-      }
+        if (IMAGE_PROVIDER === 'stability' && stabilityImageUrls.length > 0) {
+          imageUrl = stabilityImageUrls[sourceIdx] || null;
+        } else if (IMAGE_PROVIDER === 'dalle') {
+          imageUrl = buildScenePrompt({
+            beatText,
+            artStyle: style,
+            sceneIndex: i,
+            aspectRatio,
+          });
+        }
 
-      const chosenVariant = variantSequence[i - 1];
+        const chosenVariant = variantSequence[i - 1];
 
-      for (const variant of ANIMATION_VARIANTS) {
-        const imgKey = `Beat${i}_${variant}_Image`;
+        for (const variant of ANIMATION_VARIANTS) {
+          const imgKey = `Beat${i}_${variant}_Image`;
 
-        if (variant === chosenVariant && imageUrl) {
-          mods[imgKey] = imageUrl;
-        } else {
+          if (variant === chosenVariant && imageUrl) {
+            mods[imgKey] = imageUrl;
+          } else {
+            mods[imgKey] = null;
+          }
+        }
+
+        // Extra debug for Beat 1
+        if (i === 1) {
+          console.log('[DEBUG_BEAT1]', {
+            chosenVariant,
+            imageUrl,
+            keysSet: ANIMATION_VARIANTS.map((v) => ({
+              key: `Beat1_${v}_Image`,
+              value:
+                variant === chosenVariant && imageUrl ? '[URL]' : 'null',
+            })),
+          });
+        }
+      } else {
+        // i > beatCount -> explicitly clear everything for this beat
+        mods[`Beat${i}_Caption`] = '';
+        for (const variant of ANIMATION_VARIANTS) {
+          const imgKey = `Beat${i}_${variant}_Image`;
           mods[imgKey] = null;
         }
       }
@@ -647,7 +646,6 @@ module.exports = async function handler(req, res) {
       template_id,
       modifications: mods,
       output_format: 'mp4',
-      // let the template + audio drive final duration
     };
 
     console.log('[CREATE_VIDEO] PAYLOAD_PREVIEW', {
