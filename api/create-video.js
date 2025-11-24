@@ -5,10 +5,13 @@ const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN || '*';
 const IMAGE_PROVIDER = (process.env.IMAGE_PROVIDER || 'stability').toLowerCase();
 const STABILITY_API_KEY = process.env.STABILITY_API_KEY;
 
-// One of:
-// 'sd3.5-large', 'sd3.5-large-turbo', 'sd3.5-medium', 'sd3.5-flash'
+// Stability model: 'sd3.5-large', 'sd3.5-large-turbo', 'sd3.5-medium', 'sd3.5-flash'
 const STABILITY_IMAGE_MODEL =
   process.env.STABILITY_IMAGE_MODEL || 'sd3.5-large-turbo';
+
+// OpenAI for visual beat planning
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4.1-mini';
 
 // Beat / timing settings
 const MIN_BEATS = 8; // never fewer than this
@@ -74,10 +77,10 @@ function estimateSpeechSeconds(narration) {
 }
 
 /**
- * Split narration into `beatCount` chunks so each beat has its own text.
+ * Fallback splitter if OpenAI beat planning fails.
  * Sentence-based splitter: keeps order, roughly equal sentence groups per beat.
  */
-function splitNarrationIntoBeats(narration, beatCount) {
+function naiveSplitIntoBeats(narration, beatCount) {
   const text = (narration || '').trim();
   if (!text || beatCount <= 0) return [];
 
@@ -120,23 +123,22 @@ function buildScenePrompt({ beatText, artStyle, sceneIndex, aspectRatio }) {
 
   let styleChunk;
 
-  // 🔥 Scary toon style — your exact TikTok cartoon spec
+  // 🔥 Scary toon style — very explicit cartoon horror
   if (styleRaw.includes('scary') || styleRaw.includes('toon')) {
     styleChunk =
-      'Cartoon storytelling illustration in the style of viral TikTok story animations: ' +
-      'clean bold outlines, soft cel-shading, smooth gradients, expressive characters, ' +
-      'light anime influence, high contrast lighting, slightly exaggerated proportions, ' +
-      'cinematic framing, vibrant but not neon colors, simple textured backgrounds, ' +
-      'smooth line art, crisp edges, digital painting, storybook vibe, ' +
-      'no comic panels, no multiple frames, single scene only. ' +
-      'Darker mood with spooky atmosphere, still family-friendly, no gore or graphic violence.';
+      'SCARY TOON TikTok story illustration, 2D digital cartoon, clean bold outlines, ' +
+      'big expressive eyes, soft cel-shading, smooth gradients, slightly exaggerated proportions, ' +
+      'cinematic framing, dark spooky atmosphere, eerie lighting, scary but still PG-13, ' +
+      'focus on the monster, unknown presence, shadows or whispers described in the text, ' +
+      'no realistic photography, no pretty Instagram-style portraits, no slice-of-life scenes, ' +
+      'no comic panels, no multiple frames, single full-screen scene only.';
   } else {
     // Generic cartoon / story style for non-scary art styles
     styleChunk =
-      '2d digital cartoon storytelling illustration, flat colors with soft shading, ' +
+      '2D digital cartoon storytelling illustration, flat colors with soft shading, ' +
       'clean bold outlines, expressive characters, light anime influence, cinematic framing, ' +
       'vibrant but not neon colors, simple textured backgrounds, smooth line art, crisp edges, ' +
-      'digital painting, storybook vibe, no comic panels, no multiple frames, single scene only.';
+      'digital painting, storybook vibe, no comic panels, no multiple frames, single full-screen scene only.';
   }
 
   const ratioText =
@@ -147,13 +149,138 @@ function buildScenePrompt({ beatText, artStyle, sceneIndex, aspectRatio }) {
       : 'horizontal 16:9 composition';
 
   return `
-Scene ${sceneIndex} from this narrated TikTok story.
+Scene ${sceneIndex} from a narrated TikTok horror story.
 
-Narration for this scene:
+Narration for this scene (illustrate THIS exact moment, not a generic character):
 "${beatText}"
 
 Visual style: ${styleChunk}, ${ratioText}, no text, no subtitles, no UI, no watermarks, no logos, no borders.
 `.trim();
+}
+
+/**
+ * Use OpenAI to turn narration into a visual beat plan.
+ * Returns an array of { caption, beat_text } of length beatCount.
+ */
+async function buildVisualBeatPlan({ narration, storyType, artStyle, beatCount }) {
+  if (!OPENAI_API_KEY) {
+    console.warn('[BEAT_PLAN] No OPENAI_API_KEY; falling back to naive split.');
+    const chunks = naiveSplitIntoBeats(narration, beatCount);
+    return chunks.map((t) => ({
+      caption: t,
+      beat_text: t,
+    }));
+  }
+
+  const prompt = `
+You are creating a visual shot list for a TikTok-style scary story video.
+
+I will give you the full voiceover narration for the video.
+Your job is to break it into ${beatCount} consecutive visual beats (scenes) that match
+what is happening in the story at each moment.
+
+Rules:
+- Preserve the chronological order of the story.
+- Each beat should describe exactly what the viewer SEES on screen at that moment.
+- Focus on environments, actions, poses, and scary details (shadows, doors, hallways, unknown presence, etc.).
+- Avoid generic "girl standing" or "pretty anime girl" descriptions.
+- If characters are needed, describe them in relation to the scary event (e.g., "a kid frozen in bed as shadows gather in the corner").
+- Keep each beat short (1–3 sentences max).
+- These beats will be used to generate images, not text overlays.
+
+Return ONLY valid JSON in this exact format:
+
+{
+  "beats": [
+    {
+      "caption": "Very short caption for this moment (can be the same as beat_text or a summary).",
+      "beat_text": "One or two sentences describing what should be shown on screen."
+    }
+  ]
+}
+
+Make sure there are EXACTLY ${beatCount} beats.
+
+Narration:
+"""${narration}"""
+`.trim();
+
+  try {
+    const resp = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: OPENAI_MODEL,
+        messages: [
+          {
+            role: 'system',
+            content:
+              'You are a JSON-only API. Always return strictly valid JSON with no extra text.',
+          },
+          {
+            role: 'user',
+            content: prompt,
+          },
+        ],
+        temperature: 0.7,
+      }),
+    });
+
+    const data = await resp.json().catch(() => ({}));
+
+    if (!resp.ok) {
+      console.error('[BEAT_PLAN] OpenAI error', resp.status, data);
+      const chunks = naiveSplitIntoBeats(narration, beatCount);
+      return chunks.map((t) => ({
+        caption: t,
+        beat_text: t,
+      }));
+    }
+
+    const raw = data?.choices?.[0]?.message?.content?.trim();
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (e) {
+      console.error('[BEAT_PLAN] JSON parse failed, raw content:', raw);
+      const chunks = naiveSplitIntoBeats(narration, beatCount);
+      return chunks.map((t) => ({
+        caption: t,
+        beat_text: t,
+      }));
+    }
+
+    let beats = Array.isArray(parsed?.beats) ? parsed.beats : [];
+    beats = beats.filter(
+      (b) => b && typeof b.beat_text === 'string' && b.beat_text.trim()
+    );
+
+    if (beats.length === 0) {
+      const chunks = naiveSplitIntoBeats(narration, beatCount);
+      return chunks.map((t) => ({
+        caption: t,
+        beat_text: t,
+      }));
+    }
+
+    // Normalize length to exactly beatCount
+    while (beats.length < beatCount) {
+      beats.push(beats[beats.length - 1]);
+    }
+    if (beats.length > beatCount) beats.length = beatCount;
+
+    return beats;
+  } catch (err) {
+    console.error('[BEAT_PLAN] Exception', err);
+    const chunks = naiveSplitIntoBeats(narration, beatCount);
+    return chunks.map((t) => ({
+      caption: t,
+      beat_text: t,
+    }));
+  }
 }
 
 /**
@@ -182,10 +309,7 @@ async function generateStabilityImageBuffer(
 
   const styleRaw = (artStyle || '').toLowerCase();
 
-  // Default style
   let stylePreset = 'digital-art';
-
-  // For Scary Toon we want very cartoony / anime-ish
   if (styleRaw.includes('scary') || styleRaw.includes('toon')) {
     stylePreset = 'anime';
   }
@@ -243,7 +367,6 @@ async function uploadImageBufferToBlob(buffer, key) {
 
 /**
  * Generate one Stability image per beat (using beatTexts) and return an array of URLs.
- * Push null on error, and fallback Beat 1 if needed.
  */
 async function generateStabilityImageUrlsForBeats({
   beatCount,
@@ -255,7 +378,6 @@ async function generateStabilityImageUrlsForBeats({
 
   for (let i = 1; i <= beatCount; i++) {
     const beatText = beatTexts[i - 1] || beatTexts[beatTexts.length - 1] || '';
-
     const prompt = buildScenePrompt({
       beatText,
       artStyle,
@@ -309,7 +431,6 @@ function buildVariantSequence(beatCount) {
     const available = ANIMATION_VARIANTS.filter((v) => v !== last);
     const idx = i % available.length;
     const chosen = available[idx];
-
     seq.push(chosen);
     last = chosen;
   }
@@ -434,8 +555,16 @@ module.exports = async function handler(req, res) {
       SECONDS_PER_BEAT,
     });
 
-    // 4) Build beatTexts based on narration and beatCount
-    const beatTexts = splitNarrationIntoBeats(narration, beatCount);
+    // 4) Build visual beat plan using OpenAI (or naive fallback)
+    const beatPlan = await buildVisualBeatPlan({
+      narration,
+      storyType,
+      artStyle,
+      beatCount,
+    });
+
+    const beatTexts = beatPlan.map((b) => b.beat_text || '');
+    const beatCaptions = beatPlan.map((b) => b.caption || '');
 
     // 5) Generate Stability images for the beats we are actually using
     let stabilityImageUrls = [];
@@ -474,10 +603,11 @@ module.exports = async function handler(req, res) {
     for (let i = 1; i <= MAX_BEATS; i++) {
       const sourceIdx = Math.min(i - 1, beatCount - 1); // index into beatTexts / stabilityImageUrls
       const beatText = beatTexts[sourceIdx] || '';
+      const captionRaw = beatCaptions[sourceIdx] || beatText || `Scene ${i}`;
       const caption =
-        beatText.length > 120
-          ? beatText.slice(0, 117) + '…'
-          : beatText || `Scene ${i}`;
+        captionRaw.length > 120
+          ? captionRaw.slice(0, 117) + '…'
+          : captionRaw;
 
       mods[`Beat${i}_Caption`] = caption;
 
