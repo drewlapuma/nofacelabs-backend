@@ -14,13 +14,14 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4.1-mini';
 
 // Beat / timing settings
-const MIN_BEATS = 8; // never fewer than this
-const MAX_BEATS = 24; // must match how many Beat groups your template supports
-const SECONDS_PER_BEAT = 3.5; // approx seconds per scene
+const MIN_BEATS = 8;            // never fewer than this
+const MAX_BEATS = 24;           // must match how many Beat groups your template supports
+const SECONDS_PER_BEAT = 3.5;   // approx seconds per scene
 
 // Animation variants in your Creatomate template
 // For each beat you have layers:
-// BeatX_PanRight_Image, BeatX_PanLeft_Image, BeatX_PanUp_Image, BeatX_PanDown_Image, BeatX_Zoom_Image
+// BeatX_PanRight_Image, BeatX_PanLeft_Image, BeatX_PanUp_Image,
+// BeatX_PanDown_Image, BeatX_Zoom_Image
 const ANIMATION_VARIANTS = ['PanRight', 'PanLeft', 'PanUp', 'PanDown', 'Zoom'];
 
 // ----------------- CORS -----------------
@@ -77,7 +78,7 @@ function estimateSpeechSeconds(narration) {
 }
 
 /**
- * Fallback splitter if OpenAI beat planning fails.
+ * Naive fallback splitter if OpenAI beat planning fails.
  * Sentence-based splitter: keeps order, roughly equal sentence groups per beat.
  */
 function naiveSplitIntoBeats(narration, beatCount) {
@@ -116,29 +117,30 @@ function naiveSplitIntoBeats(narration, beatCount) {
 
 /**
  * Build a visual prompt for a scene, based on the *beat text* + artStyle.
- * Uses your scary toon TikTok-style spec when artStyle is "Scary toon".
+ * Uses a strong scary illustrated style when artStyle is "Scary toon".
  */
 function buildScenePrompt({ beatText, artStyle, sceneIndex, aspectRatio }) {
   const styleRaw = (artStyle || '').toLowerCase();
 
   let styleChunk;
 
-  // 🔥 Scary toon style — very explicit cartoon horror
+  // Scary illustrated toon style — environment + horror, not pretty portraits
   if (styleRaw.includes('scary') || styleRaw.includes('toon')) {
     styleChunk =
-      'SCARY TOON TikTok story illustration, 2D digital cartoon, clean bold outlines, ' +
-      'big expressive eyes, soft cel-shading, smooth gradients, slightly exaggerated proportions, ' +
-      'cinematic framing, dark spooky atmosphere, eerie lighting, scary but still PG-13, ' +
-      'focus on the monster, unknown presence, shadows or whispers described in the text, ' +
-      'no realistic photography, no pretty Instagram-style portraits, no slice-of-life scenes, ' +
-      'no comic panels, no multiple frames, single full-screen scene only.';
+      '2D illustrated scary toon horror scene, storybook-inspired, clean but soft outlines, ' +
+      'smooth shading, simplified shapes, slightly exaggerated proportions, ' +
+      'cinematic framing, dark spooky atmosphere, eerie lighting, deep shadows, ' +
+      'focus on the environment and the scary presence (monster, unknown figure, dark doorway, hallway, whispers), ' +
+      'characters should be small, silhouetted, or reacting to the horror, not glamorized, ' +
+      'no realistic photography, no pretty portraits, no slice-of-life scenes, ' +
+      'no comic panels, no multiple frames, single full-screen illustration.';
   } else {
-    // Generic cartoon / story style for non-scary art styles
+    // Generic illustrated story style for non-scary art styles
     styleChunk =
-      '2D digital cartoon storytelling illustration, flat colors with soft shading, ' +
-      'clean bold outlines, expressive characters, light anime influence, cinematic framing, ' +
-      'vibrant but not neon colors, simple textured backgrounds, smooth line art, crisp edges, ' +
-      'digital painting, storybook vibe, no comic panels, no multiple frames, single full-screen scene only.';
+      '2D illustrated storybook scene, clean but soft outlines, ' +
+      'smooth shading, expressive characters, cinematic framing, ' +
+      'vibrant but not neon colors, simple textured backgrounds, ' +
+      'digital painting, no comic panels, no multiple frames, single full-scene illustration.';
   }
 
   const ratioText =
@@ -151,7 +153,11 @@ function buildScenePrompt({ beatText, artStyle, sceneIndex, aspectRatio }) {
   return `
 Scene ${sceneIndex} from a narrated TikTok horror story.
 
-Narration for this scene (illustrate THIS exact moment, not a generic character):
+IMPORTANT: Show exactly what this moment of the story describes.
+Focus on the room, environment, and the creepy element (shadows, open door, hallway, monster, unknown presence).
+Only include a person if they are clearly reacting to the horror (small, not a glamour shot).
+
+Narration for this scene:
 "${beatText}"
 
 Visual style: ${styleChunk}, ${ratioText}, no text, no subtitles, no UI, no watermarks, no logos, no borders.
@@ -173,27 +179,29 @@ async function buildVisualBeatPlan({ narration, storyType, artStyle, beatCount }
   }
 
   const prompt = `
-You are creating a visual shot list for a TikTok-style scary story video.
+You create shot lists (visual beats) for scary TikTok story videos.
 
-I will give you the full voiceover narration for the video.
-Your job is to break it into ${beatCount} consecutive visual beats (scenes) that match
+I will give you the full voiceover narration.
+Your job is to break it into ${beatCount} consecutive visual beats that match
 what is happening in the story at each moment.
 
 Rules:
 - Preserve the chronological order of the story.
-- Each beat should describe exactly what the viewer SEES on screen at that moment.
-- Focus on environments, actions, poses, and scary details (shadows, doors, hallways, unknown presence, etc.).
-- Avoid generic "girl standing" or "pretty anime girl" descriptions.
-- If characters are needed, describe them in relation to the scary event (e.g., "a kid frozen in bed as shadows gather in the corner").
-- Keep each beat short (1–3 sentences max).
-- These beats will be used to generate images, not text overlays.
+- Each beat describes exactly what the viewer SEES on screen at that moment.
+- Focus on environment and horror elements: rooms, hallways, doors, windows, shadows,
+  unknown figures, monsters, strange objects, etc.
+- Avoid generic "girl standing in bedroom" or "pretty anime girl" framing.
+- If a person is needed, treat them as small, secondary silhouettes reacting to the horror,
+  not the main subject.
+- 1–2 sentences per beat is enough.
+- These are for image generation, NOT subtitles.
 
 Return ONLY valid JSON in this exact format:
 
 {
   "beats": [
     {
-      "caption": "Very short caption for this moment (can be the same as beat_text or a summary).",
+      "caption": "Very short caption for this moment.",
       "beat_text": "One or two sentences describing what should be shown on screen."
     }
   ]
@@ -225,7 +233,7 @@ Narration:
             content: prompt,
           },
         ],
-        temperature: 0.7,
+        temperature: 0.6,
       }),
     });
 
@@ -286,6 +294,7 @@ Narration:
 /**
  * Call Stability's image API for a single prompt.
  * Uses multipart/form-data (required by Stability) and returns a Buffer.
+ * This version always uses style_preset = "illustration" for a cartoon/illustrated look.
  */
 async function generateStabilityImageBuffer(
   prompt,
@@ -307,20 +316,15 @@ async function generateStabilityImageBuffer(
   form.append('output_format', 'png');
   form.append('model', STABILITY_IMAGE_MODEL);
 
-  const styleRaw = (artStyle || '').toLowerCase();
-
-  let stylePreset = 'digital-art';
-  if (styleRaw.includes('scary') || styleRaw.includes('toon')) {
-    stylePreset = 'anime';
-  }
-
-  form.append('style_preset', stylePreset);
+  // 🔒 Always use illustrated style for cartoon look
+  form.append('style_preset', 'illustration');
 
   // Strong negative prompt to avoid random portrait girls, realism, etc.
   const negativePrompt =
-    'photorealistic, realistic photo, 3d render, collage, comic panels, text, subtitles, ' +
-    'watermark, logo, UI, selfie, close-up portrait, schoolgirl, generic cute anime girl, ' +
-    'crowd, multiple frames';
+    'photorealistic, realism, realistic photo, 3d render, selfie, portrait, ' +
+    'instagram style, pretty girl, cute anime girl, schoolgirl, influencer, ' +
+    'fashion pose, glamour shot, close-up face, beauty shot, model, ' +
+    'comic panels, manga panels, text, subtitles, watermark, logo, UI elements';
 
   form.append('negative_prompt', negativePrompt);
 
@@ -470,7 +474,7 @@ module.exports = async function handler(req, res) {
       aspectRatio = '9:16',
       customPrompt = '',
       durationRange = '60-90', // "30-60" or "60-90"
-      voice_url = null, // future: ElevenLabs etc.
+      voice_url = null,        // future: ElevenLabs etc.
     } = body;
 
     if (!process.env.CREATOMATE_API_KEY) {
@@ -555,7 +559,7 @@ module.exports = async function handler(req, res) {
       SECONDS_PER_BEAT,
     });
 
-    // 4) Build visual beat plan using OpenAI (or naive fallback)
+    // 4) Build visual beat plan (OpenAI or naive fallback)
     const beatPlan = await buildVisualBeatPlan({
       narration,
       storyType,
