@@ -10,9 +10,9 @@ const STABILITY_API_KEY = process.env.STABILITY_API_KEY;
 const STABILITY_IMAGE_MODEL = process.env.STABILITY_IMAGE_MODEL || 'sd3.5-flash';
 
 // Beat / timing settings
-const MIN_BEATS = 8;      // never fewer than this
-const MAX_BEATS = 24;     // must match how many Beat groups your template supports
-const SECONDS_PER_BEAT = 3.5; // approx seconds per scene
+const MIN_BEATS = 8;           // never fewer than this
+const MAX_BEATS = 24;          // must match how many Beat groups your template supports
+const SECONDS_PER_BEAT = 3.5;  // approx seconds per scene
 
 // Animation variants in your Creatomate template
 // For each beat you have layers:
@@ -73,10 +73,41 @@ function estimateSpeechSeconds(narration) {
 }
 
 /**
- * Build a visual prompt for a scene, based on the full narration + artStyle.
+ * Split narration into `beatCount` chunks so each beat has its own text.
+ * Simple word-based splitter: keeps order, roughly equal lengths.
+ */
+function splitNarrationIntoBeats(narration, beatCount) {
+  const text = (narration || '').trim();
+  if (!text || beatCount <= 0) return [];
+
+  const words = text.split(/\s+/);
+  const totalWords = words.length;
+  const chunkSize = Math.max(1, Math.ceil(totalWords / beatCount));
+
+  const beats = [];
+  for (let i = 0; i < totalWords; i += chunkSize) {
+    const chunkWords = words.slice(i, i + chunkSize);
+    beats.push(chunkWords.join(' '));
+  }
+
+  // If we ended up with more chunks than beats (rounding), trim
+  if (beats.length > beatCount) {
+    beats.length = beatCount;
+  }
+
+  // If fewer (weird edge cases), pad last one
+  while (beats.length < beatCount) {
+    beats.push(beats[beats.length - 1] || text);
+  }
+
+  return beats;
+}
+
+/**
+ * Build a visual prompt for a scene, based on the *beat text* + artStyle.
  * Uses your scary toon TikTok-style spec when artStyle is "Scary toon".
  */
-function buildScenePrompt({ narration, artStyle, sceneIndex, aspectRatio }) {
+function buildScenePrompt({ beatText, artStyle, sceneIndex, aspectRatio }) {
   const styleRaw = (artStyle || '').toLowerCase();
 
   let styleChunk;
@@ -108,9 +139,10 @@ function buildScenePrompt({ narration, artStyle, sceneIndex, aspectRatio }) {
       : 'horizontal 16:9 composition';
 
   return `
-Scene ${sceneIndex} from this narrated TikTok story:
+Scene ${sceneIndex} from this narrated TikTok story.
 
-"${narration}"
+Narration for this scene:
+"${beatText}"
 
 Visual style: ${styleChunk}, ${ratioText}, no text, no subtitles, no UI, no watermarks, no logos, no borders.
 `.trim();
@@ -181,14 +213,14 @@ async function uploadImageBufferToBlob(buffer, key) {
 }
 
 /**
- * Generate one Stability image per beat (based on dynamic beatCount) and return an array of URLs.
+ * Generate one Stability image per beat (using beatTexts) and return an array of URLs.
  * If a generation fails, reuse the last good URL so we don't get black beats.
  * After the loop, if Beat 1 is still null but later beats have URLs,
  * we fill Beat 1 with the first non-null image.
  */
 async function generateStabilityImageUrlsForBeats({
   beatCount,
-  narration,
+  beatTexts,
   artStyle,
   aspectRatio,
 }) {
@@ -196,8 +228,10 @@ async function generateStabilityImageUrlsForBeats({
   let lastGoodUrl = null;
 
   for (let i = 1; i <= beatCount; i++) {
+    const beatText = beatTexts[i - 1] || beatTexts[beatTexts.length - 1] || '';
+
     const prompt = buildScenePrompt({
-      narration,
+      beatText,
       artStyle,
       sceneIndex: i,
       aspectRatio,
@@ -341,13 +375,16 @@ module.exports = async function handler(req, res) {
       SECONDS_PER_BEAT,
     });
 
-    // 4) Generate Stability images for the beats we are actually using
+    // 4) Build beatTexts based on narration and beatCount
+    const beatTexts = splitNarrationIntoBeats(narration, beatCount);
+
+    // 5) Generate Stability images for the beats we are actually using
     let stabilityImageUrls = [];
     if (IMAGE_PROVIDER === 'stability') {
       try {
         stabilityImageUrls = await generateStabilityImageUrlsForBeats({
           beatCount,
-          narration,
+          beatTexts,
           artStyle,
           aspectRatio,
         });
@@ -360,7 +397,7 @@ module.exports = async function handler(req, res) {
       }
     }
 
-    // 5) Build Creatomate modifications
+    // 6) Build Creatomate modifications
     const mods = {
       Narration: narration,
       Voiceover: narration,
@@ -374,8 +411,12 @@ module.exports = async function handler(req, res) {
 
     // Fill active beats 1..beatCount
     for (let i = 1; i <= beatCount; i++) {
-      const sceneTitle = `Scene ${i}`;
-      mods[`Beat${i}_Caption`] = sceneTitle;
+      const beatText = beatTexts[i - 1] || '';
+      // Use beatText (truncated) as caption
+      const caption =
+        beatText.length > 120 ? beatText.slice(0, 117) + '…' : beatText || `Scene ${i}`;
+
+      mods[`Beat${i}_Caption`] = caption;
 
       let imageUrl = null;
 
@@ -383,7 +424,7 @@ module.exports = async function handler(req, res) {
         imageUrl = stabilityImageUrls[i - 1] || null;
       } else if (IMAGE_PROVIDER === 'dalle') {
         imageUrl = buildScenePrompt({
-          narration,
+          beatText,
           artStyle: style,
           sceneIndex: i,
           aspectRatio,
@@ -430,7 +471,7 @@ module.exports = async function handler(req, res) {
       stabilityImagesGenerated: stabilityImageUrls.length,
     });
 
-    // 6) Call Creatomate
+    // 7) Call Creatomate
     const resp = await postJSON(
       'https://api.creatomate.com/v1/renders',
       { Authorization: `Bearer ${process.env.CREATOMATE_API_KEY}` },
