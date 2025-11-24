@@ -74,77 +74,41 @@ function estimateSpeechSeconds(narration) {
 }
 
 /**
- * Sentence-aware splitter:
- * 1) Break narration into sentences (. ! ?)
- * 2) Group sentences into beatCount chunks
+ * Split narration into `beatCount` chunks so each beat has its own text.
+ * Sentence-based splitter: keeps order, roughly equal sentence groups per beat.
  */
-function splitNarrationIntoBeatsSmart(narration, beatCount) {
+function splitNarrationIntoBeats(narration, beatCount) {
   const text = (narration || '').trim();
   if (!text || beatCount <= 0) return [];
 
-  // Rough sentence split
-  const rawSentences = text
-    .split(/([\.!?])/)
-    .reduce((acc, part, idx, arr) => {
-      if (idx % 2 === 0) {
-        const sentence = (part + (arr[idx + 1] || '')).trim();
-        if (sentence) acc.push(sentence);
-      }
-      return acc;
-    }, []);
+  // Split into sentences by punctuation.
+  let sentences = text
+    .split(/(?<=[.!?])\s+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
 
-  if (rawSentences.length === 0) {
-    // fallback to the old word-based splitter
-    const words = text.split(/\s+/);
-    const totalWords = words.length;
-    const chunkSize = Math.max(1, Math.ceil(totalWords / beatCount));
-    const beats = [];
-    for (let i = 0; i < totalWords; i += chunkSize) {
-      const chunkWords = words.slice(i, i + chunkSize);
-      beats.push(chunkWords.join(' '));
-    }
-    if (beats.length > beatCount) beats.length = beatCount;
-    while (beats.length < beatCount) {
-      beats.push(beats[beats.length - 1] || text);
-    }
-    return beats;
+  if (sentences.length === 0) {
+    sentences = [text];
   }
 
-  // Group sentences into beatCount buckets with roughly equal total length
-  const totalChars = rawSentences.reduce((sum, s) => sum + s.length, 0);
-  const targetCharsPerBeat = totalChars / beatCount;
-  const beats = [];
+  const chunks = [];
+  const totalSentences = sentences.length;
+  const sentencesPerChunk = Math.max(1, Math.ceil(totalSentences / beatCount));
 
-  let currentBeat = '';
-  let currentChars = 0;
-  let currentIndex = 0;
-
-  for (const sentence of rawSentences) {
-    if (
-      currentBeat &&
-      currentChars + sentence.length > targetCharsPerBeat &&
-      beats.length < beatCount - 1
-    ) {
-      beats.push(currentBeat.trim());
-      currentBeat = '';
-      currentChars = 0;
-    }
-    currentBeat += (currentBeat ? ' ' : '') + sentence;
-    currentChars += sentence.length;
-    currentIndex++;
+  for (let i = 0; i < totalSentences; i += sentencesPerChunk) {
+    const group = sentences.slice(i, i + sentencesPerChunk);
+    chunks.push(group.join(' '));
   }
 
-  if (currentBeat) beats.push(currentBeat.trim());
-
-  // Adjust size
-  if (beats.length > beatCount) {
-    beats.length = beatCount;
+  // Trim or pad to exactly beatCount
+  if (chunks.length > beatCount) {
+    chunks.length = beatCount;
   }
-  while (beats.length < beatCount) {
-    beats.push(beats[beats.length - 1] || text);
+  while (chunks.length < beatCount) {
+    chunks.push(chunks[chunks.length - 1] || text);
   }
 
-  return beats;
+  return chunks;
 }
 
 /**
@@ -156,22 +120,23 @@ function buildScenePrompt({ beatText, artStyle, sceneIndex, aspectRatio }) {
 
   let styleChunk;
 
-  // 🔥 SCARY TOON style – very explicit cartoon horror
+  // 🔥 Scary toon style — your exact TikTok cartoon spec
   if (styleRaw.includes('scary') || styleRaw.includes('toon')) {
     styleChunk =
-      'SCARY TOON TikTok story illustration, 2D digital cartoon, clean bold outlines, ' +
-      'big expressive eyes, soft cel-shading, smooth gradients, slightly exaggerated proportions, ' +
-      'cinematic framing, dark spooky atmosphere, eerie lighting, scary but still PG-13, ' +
-      'focus on the monster, unknown presence, shadows or whispers described in the text, ' +
-      'no realistic photography, no pretty Instagram-style portraits, no slice-of-life scenes, ' +
-      'no comic panels, no multiple frames, single full-screen scene only.';
+      'Cartoon storytelling illustration in the style of viral TikTok story animations: ' +
+      'clean bold outlines, soft cel-shading, smooth gradients, expressive characters, ' +
+      'light anime influence, high contrast lighting, slightly exaggerated proportions, ' +
+      'cinematic framing, vibrant but not neon colors, simple textured backgrounds, ' +
+      'smooth line art, crisp edges, digital painting, storybook vibe, ' +
+      'no comic panels, no multiple frames, single scene only. ' +
+      'Darker mood with spooky atmosphere, still family-friendly, no gore or graphic violence.';
   } else {
     // Generic cartoon / story style for non-scary art styles
     styleChunk =
-      '2D digital cartoon storytelling illustration, flat colors with soft shading, ' +
+      '2d digital cartoon storytelling illustration, flat colors with soft shading, ' +
       'clean bold outlines, expressive characters, light anime influence, cinematic framing, ' +
       'vibrant but not neon colors, simple textured backgrounds, smooth line art, crisp edges, ' +
-      'digital painting, storybook vibe, no comic panels, no multiple frames, single full-screen scene only.';
+      'digital painting, storybook vibe, no comic panels, no multiple frames, single scene only.';
   }
 
   const ratioText =
@@ -182,9 +147,9 @@ function buildScenePrompt({ beatText, artStyle, sceneIndex, aspectRatio }) {
       : 'horizontal 16:9 composition';
 
   return `
-Scene ${sceneIndex} from a narrated TikTok horror story.
+Scene ${sceneIndex} from this narrated TikTok story.
 
-Narration for this scene (illustrate THIS exact moment, not a generic character):
+Narration for this scene:
 "${beatText}"
 
 Visual style: ${styleChunk}, ${ratioText}, no text, no subtitles, no UI, no watermarks, no logos, no borders.
@@ -195,7 +160,10 @@ Visual style: ${styleChunk}, ${ratioText}, no text, no subtitles, no UI, no wate
  * Call Stability's image API for a single prompt.
  * Uses multipart/form-data (required by Stability) and returns a Buffer.
  */
-async function generateStabilityImageBuffer(prompt, { aspectRatio = '9:16' } = {}) {
+async function generateStabilityImageBuffer(
+  prompt,
+  { aspectRatio = '9:16', artStyle = '' } = {}
+) {
   if (!STABILITY_API_KEY) {
     throw new Error('STABILITY_API_KEY not set');
   }
@@ -204,6 +172,7 @@ async function generateStabilityImageBuffer(prompt, { aspectRatio = '9:16' } = {
 
   const form = new FormData();
   form.append('prompt', prompt);
+
   form.append(
     'aspect_ratio',
     aspectRatio === '9:16' ? '9:16' : aspectRatio === '1:1' ? '1:1' : '16:9'
@@ -211,12 +180,25 @@ async function generateStabilityImageBuffer(prompt, { aspectRatio = '9:16' } = {
   form.append('output_format', 'png');
   form.append('model', STABILITY_IMAGE_MODEL);
 
-  // 🤖 Push toward anime / toon, away from generic pretty portraits
-  form.append('style_preset', 'anime');
-  form.append(
-    'negative_prompt',
-    'photorealistic, realistic photo, real person, instagram selfie, glamour portrait, fashion model, multiple panels, comic strip, text, subtitles'
-  );
+  const styleRaw = (artStyle || '').toLowerCase();
+
+  // Default style
+  let stylePreset = 'digital-art';
+
+  // For Scary Toon we want very cartoony / anime-ish
+  if (styleRaw.includes('scary') || styleRaw.includes('toon')) {
+    stylePreset = 'anime';
+  }
+
+  form.append('style_preset', stylePreset);
+
+  // Strong negative prompt to avoid random portrait girls, realism, etc.
+  const negativePrompt =
+    'photorealistic, realistic photo, 3d render, collage, comic panels, text, subtitles, ' +
+    'watermark, logo, UI, selfie, close-up portrait, schoolgirl, generic cute anime girl, ' +
+    'crowd, multiple frames';
+
+  form.append('negative_prompt', negativePrompt);
 
   if (STABILITY_IMAGE_MODEL.startsWith('sd3')) {
     form.append('mode', 'text-to-image');
@@ -261,8 +243,7 @@ async function uploadImageBufferToBlob(buffer, key) {
 
 /**
  * Generate one Stability image per beat (using beatTexts) and return an array of URLs.
- * - Retries once on failure
- * - Never leaves Beat 1 null if any later beat succeeded
+ * Push null on error, and fallback Beat 1 if needed.
  */
 async function generateStabilityImageUrlsForBeats({
   beatCount,
@@ -284,33 +265,32 @@ async function generateStabilityImageUrlsForBeats({
 
     try {
       console.log(`[STABILITY] Generating image for Beat ${i}/${beatCount}`);
-      const buffer = await generateStabilityImageBuffer(prompt, { aspectRatio });
+      const buffer = await generateStabilityImageBuffer(prompt, {
+        aspectRatio,
+        artStyle,
+      });
+
       const key = `stability-scenes/${Date.now()}-beat-${i}.png`;
       const url = await uploadImageBufferToBlob(buffer, key);
+
       urls.push(url);
     } catch (err) {
-      console.error(`[STABILITY] Beat ${i} failed (first try)`, err);
-
-      // One quick retry
-      try {
-        console.log(`[STABILITY] Retrying Beat ${i}/${beatCount}`);
-        const buffer = await generateStabilityImageBuffer(prompt, { aspectRatio });
-        const key = `stability-scenes/${Date.now()}-beat-${i}-retry.png`;
-        const url = await uploadImageBufferToBlob(buffer, key);
-        urls.push(url);
-      } catch (err2) {
-        console.error(`[STABILITY] Beat ${i} failed again, leaving null`, err2);
-        urls.push(null);
-      }
+      console.error(
+        `[STABILITY] Beat ${i} failed, leaving this beat without an image`,
+        err
+      );
+      urls.push(null);
     }
   }
 
-  // Special case: never allow Beat 1 to be null if any later beat succeeded
+  // If Beat 1 is null but later beats have images, reuse one
   if (!urls[0]) {
-    const firstNonNull = urls.find((u) => !!u);
-    if (firstNonNull) {
-      console.warn('[STABILITY] Beat 1 was null, reusing first non-null image for Beat 1');
-      urls[0] = firstNonNull;
+    const fallback = urls.find((u) => !!u);
+    if (fallback) {
+      console.warn(
+        '[STABILITY] Beat 1 had no image, reusing a later beat as fallback.'
+      );
+      urls[0] = fallback;
     }
   }
 
@@ -329,11 +309,23 @@ function buildVariantSequence(beatCount) {
     const available = ANIMATION_VARIANTS.filter((v) => v !== last);
     const idx = i % available.length;
     const chosen = available[idx];
+
     seq.push(chosen);
     last = chosen;
   }
 
   return seq;
+}
+
+/**
+ * Fallback URL helper: walk backwards to find a non-null URL,
+ * or return the first non-null, or null if none.
+ */
+function getFallbackUrlForIndex(idx, urls) {
+  for (let i = idx; i >= 0; i--) {
+    if (urls[i]) return urls[i];
+  }
+  return urls.find((u) => !!u) || null;
 }
 
 module.exports = async function handler(req, res) {
@@ -426,7 +418,7 @@ module.exports = async function handler(req, res) {
       targetSec = Math.round(speechSec + 2);
     }
 
-    // 3) Dynamically decide how many beats to use, based on targetSec
+    // 3) Dynamically decide how many *unique* beats to use, based on targetSec
     let beatCount = Math.round(targetSec / SECONDS_PER_BEAT);
     if (!beatCount || !Number.isFinite(beatCount)) {
       beatCount = MIN_BEATS;
@@ -442,8 +434,8 @@ module.exports = async function handler(req, res) {
       SECONDS_PER_BEAT,
     });
 
-    // 4) Build beatTexts based on narration and beatCount (sentence-aware)
-    const beatTexts = splitNarrationIntoBeatsSmart(narration, beatCount);
+    // 4) Build beatTexts based on narration and beatCount
+    const beatTexts = splitNarrationIntoBeats(narration, beatCount);
 
     // 5) Generate Stability images for the beats we are actually using
     let stabilityImageUrls = [];
@@ -464,29 +456,10 @@ module.exports = async function handler(req, res) {
       }
     }
 
-    // Optional: fallback for any nulls using nearest non-null neighbor
-    // (prevents black frames at the cost of occasional repeats)
-    const urls = [...stabilityImageUrls];
-    const firstNonNullIndex = urls.findIndex((u) => !!u);
-    const lastNonNullIndex = urls.length - 1 - [...urls].reverse().findIndex((u) => !!u);
-    if (firstNonNullIndex !== -1 && lastNonNullIndex !== -1) {
-      for (let i = 0; i < urls.length; i++) {
-        if (!urls[i]) {
-          // choose closer neighbor
-          const distToLeft = i - firstNonNullIndex;
-          const distToRight = lastNonNullIndex - i;
-          urls[i] =
-            distToLeft <= distToRight
-              ? urls[firstNonNullIndex]
-              : urls[lastNonNullIndex];
-        }
-      }
-    }
+    // 6) Build a non-repeating animation sequence for ALL template beats
+    const variantSequence = buildVariantSequence(MAX_BEATS);
 
-    // 6) Build a non-repeating animation sequence (no same variant twice in a row)
-    const variantSequence = buildVariantSequence(beatCount);
-
-    // 7) Build Creatomate modifications
+    // 7) Build Creatomate modifications (fill all beats 1..MAX_BEATS)
     const mods = {
       Narration: narration,
       Voiceover: narration,
@@ -498,20 +471,23 @@ module.exports = async function handler(req, res) {
 
     const style = artStyle || 'Scary toon';
 
-    // Fill active beats 1..beatCount
-    for (let i = 1; i <= beatCount; i++) {
-      const beatText = beatTexts[i - 1] || '';
+    for (let i = 1; i <= MAX_BEATS; i++) {
+      const sourceIdx = Math.min(i - 1, beatCount - 1); // index into beatTexts / stabilityImageUrls
+      const beatText = beatTexts[sourceIdx] || '';
       const caption =
-        beatText.length > 120 ? beatText.slice(0, 117) + '…' : beatText || `Scene ${i}`;
+        beatText.length > 120
+          ? beatText.slice(0, 117) + '…'
+          : beatText || `Scene ${i}`;
 
       mods[`Beat${i}_Caption`] = caption;
-      mods[`Beat${i}_Visible`] = true; // for when you wire Scene visibility
 
       let imageUrl = null;
 
-      if (IMAGE_PROVIDER === 'stability' && urls.length >= i) {
-        imageUrl = urls[i - 1] || null;
+      if (IMAGE_PROVIDER === 'stability' && stabilityImageUrls.length > 0) {
+        const rawUrl = stabilityImageUrls[sourceIdx] || null;
+        imageUrl = rawUrl || getFallbackUrlForIndex(sourceIdx, stabilityImageUrls);
       } else if (IMAGE_PROVIDER === 'dalle') {
+        // If you ever wire DALL·E, pass prompt instead of URL here.
         imageUrl = buildScenePrompt({
           beatText,
           artStyle: style,
@@ -530,17 +506,6 @@ module.exports = async function handler(req, res) {
         } else {
           mods[imgKey] = null;
         }
-      }
-    }
-
-    // Explicitly clear any beats above beatCount up to MAX_BEATS,
-    // and mark them invisible for the template.
-    for (let i = beatCount + 1; i <= MAX_BEATS; i++) {
-      mods[`Beat${i}_Caption`] = '';
-      mods[`Beat${i}_Visible`] = false;
-      for (const variant of ANIMATION_VARIANTS) {
-        const imgKey = `Beat${i}_${variant}_Image`;
-        mods[imgKey] = null;
       }
     }
 
