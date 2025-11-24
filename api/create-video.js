@@ -214,9 +214,7 @@ async function uploadImageBufferToBlob(buffer, key) {
 
 /**
  * Generate one Stability image per beat (using beatTexts) and return an array of URLs.
- * If a generation fails, reuse the last good URL so we don't get black beats.
- * After the loop, if Beat 1 is still null but later beats have URLs,
- * we fill Beat 1 with the first non-null image.
+ * ❗ On error we now push null (NO reuse), so you'll see blanks instead of repeats.
  */
 async function generateStabilityImageUrlsForBeats({
   beatCount,
@@ -225,7 +223,6 @@ async function generateStabilityImageUrlsForBeats({
   aspectRatio,
 }) {
   const urls = [];
-  let lastGoodUrl = null;
 
   for (let i = 1; i <= beatCount; i++) {
     const beatText = beatTexts[i - 1] || beatTexts[beatTexts.length - 1] || '';
@@ -245,28 +242,34 @@ async function generateStabilityImageUrlsForBeats({
       const url = await uploadImageBufferToBlob(buffer, key);
 
       urls.push(url);
-      lastGoodUrl = url;
     } catch (err) {
-      console.error(`[STABILITY] Beat ${i} failed, reusing last good image if available`, err);
-      urls.push(lastGoodUrl); // may be null initially; we'll patch Beat 1 after
-    }
-  }
-
-  // Safety: if Beat 1 ended up null but we have any non-null later, use the first non-null.
-  if (!urls[0]) {
-    const fallback = urls.find((u) => !!u) || null;
-    if (fallback) {
-      console.warn('[STABILITY] Beat 1 had no image, filling with first non-null image');
-      urls[0] = fallback;
+      console.error(`[STABILITY] Beat ${i} failed, leaving this beat without an image`, err);
+      urls.push(null); // No reuse; this beat may be blank if Creatomate has no fallback
     }
   }
 
   return urls;
 }
 
-function pickRandomVariant() {
-  const idx = Math.floor(Math.random() * ANIMATION_VARIANTS.length);
-  return ANIMATION_VARIANTS[idx];
+/**
+ * Build a sequence of animation variants for all beats
+ * so that no two consecutive beats use the same variant.
+ */
+function buildVariantSequence(beatCount) {
+  const seq = [];
+  let last = null;
+
+  for (let i = 0; i < beatCount; i++) {
+    // simple round-robin that avoids repeating the same variant back-to-back
+    const available = ANIMATION_VARIANTS.filter((v) => v !== last);
+    const idx = i % available.length;
+    const chosen = available[idx];
+
+    seq.push(chosen);
+    last = chosen;
+  }
+
+  return seq;
 }
 
 module.exports = async function handler(req, res) {
@@ -397,7 +400,10 @@ module.exports = async function handler(req, res) {
       }
     }
 
-    // 6) Build Creatomate modifications
+    // 6) Build a non-repeating animation sequence (no same variant twice in a row)
+    const variantSequence = buildVariantSequence(beatCount);
+
+    // 7) Build Creatomate modifications
     const mods = {
       Narration: narration,
       Voiceover: narration,
@@ -412,7 +418,6 @@ module.exports = async function handler(req, res) {
     // Fill active beats 1..beatCount
     for (let i = 1; i <= beatCount; i++) {
       const beatText = beatTexts[i - 1] || '';
-      // Use beatText (truncated) as caption
       const caption =
         beatText.length > 120 ? beatText.slice(0, 117) + '…' : beatText || `Scene ${i}`;
 
@@ -431,7 +436,7 @@ module.exports = async function handler(req, res) {
         });
       }
 
-      const chosenVariant = pickRandomVariant();
+      const chosenVariant = variantSequence[i - 1];
 
       for (const variant of ANIMATION_VARIANTS) {
         const imgKey = `Beat${i}_${variant}_Image`;
@@ -471,7 +476,7 @@ module.exports = async function handler(req, res) {
       stabilityImagesGenerated: stabilityImageUrls.length,
     });
 
-    // 7) Call Creatomate
+    // 8) Call Creatomate
     const resp = await postJSON(
       'https://api.creatomate.com/v1/renders',
       { Authorization: `Bearer ${process.env.CREATOMATE_API_KEY}` },
