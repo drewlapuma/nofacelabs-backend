@@ -627,8 +627,7 @@ module.exports = async function handler(req, res) {
             imageUrl,
             keysSet: ANIMATION_VARIANTS.map((v) => ({
               key: `Beat1_${v}_Image`,
-              value:
-                variant === chosenVariant && imageUrl ? '[URL]' : 'null',
+              value: v === chosenVariant && imageUrl ? '[URL]' : 'null',
             })),
           });
         }
