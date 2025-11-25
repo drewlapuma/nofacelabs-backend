@@ -14,7 +14,7 @@ function setCors(res) {
 function classifyStoryType(storyTypeRaw) {
   const s = String(storyTypeRaw || '').toLowerCase();
 
-  if (s.includes('scary'))        return 'scary';
+  if (s.includes('scary') || s.includes('horror')) return 'scary';
   if (s.includes('urban'))        return 'urbanLegend';
   if (s.includes('bedtime'))      return 'bedtime';
   if (s.includes('what if'))      return 'whatIf';
@@ -28,75 +28,74 @@ function classifyStoryType(storyTypeRaw) {
   return 'generic';
 }
 
-/* --------- Style hints for the model --------- */
+/* --------- Style hints --------- */
 function buildStyleHints(mode) {
   switch (mode) {
     case 'scary':
-      return 'Write a creepy but TikTok-safe horror story with suspense and a twist. No gore or graphic violence.';
+      return `
+Write a creepy but TikTok-safe horror narration.   
+Focus on atmosphere, tension, shadows, whispers, eerie environments, unknown presence.  
+Never focus on attractive people, selfies, portraits, or detailed faces.  
+Keep the visuals environmental and mysterious.  
+      `.trim();
+
     case 'urbanLegend':
-      return 'Write it like a spooky urban legend people tell each other, with a mysterious or ambiguous ending.';
+      return `Write it like a spooky urban legend with a mysterious ending.`;
+
     case 'bedtime':
-      return 'Write a calm, cozy, gentle bedtime story with a soft, reassuring ending. No horror or intense danger.';
+      return `Write a gentle, peaceful bedtime story.`;
+
     case 'whatIf':
-      return 'Write a speculative “what if” scenario that explores interesting possibilities in a fun, imaginative way.';
+      return `Write a speculative "what if" scenario that is fun and imaginative.`;
+
     case 'history':
-      return 'Write an interesting, easy-to-follow narrative about real or highly plausible historical events. Focus on a single theme or event.';
+      return `Write an engaging historical narration focused on one event.`;
+
     case 'funFacts':
-      return 'Write a fun narration that flows as a story but delivers multiple surprising and interesting facts around a single topic.';
+      return `Write a fun narration delivering surprising facts as a flowing story.`;
+
     case 'philosophy':
-      return 'Write a reflective, thought-provoking short story that explores a philosophical idea in a concrete, relatable way.';
+      return `Write a reflective story that explores one philosophical idea.`;
+
     case 'motivational':
-      return 'Write an inspiring story about struggle, growth, and eventual success, with a clear motivational takeaway.';
+      return `Write an inspiring, uplifting story with a motivational takeaway.`;
+
     case 'random':
-      return 'Write any creative, surprising short story with a strong hook and satisfying ending.';
+      return `Write a surprising but coherent creative short story.`;
+
     case 'customPrompt':
-      return 'Follow the user’s custom prompt strictly and turn it into a short, coherent narrative.';
+      return `Follow the user's custom prompt strictly.`;
+
     default:
-      return 'Write a short, engaging narrative that is easy to follow and works well as a vertical video voiceover.';
+      return `Write a simple, engaging narration for a vertical TikTok-style video.`;
   }
 }
 
 /* --------- Fallback if OpenAI fails --------- */
 function fallbackNarration({ storyType }) {
   const mode = classifyStoryType(storyType);
-
-  if (mode === 'scary') {
-    return 'A short scary story about something strange that happens one night.';
-  }
-  if (mode === 'bedtime') {
-    return 'A calm bedtime story where everything ends peacefully.';
-  }
-  if (mode === 'history') {
-    return 'A short narration about an interesting moment in history.';
-  }
-  if (mode === 'funFacts') {
-    return 'A narration that shares several fun facts in a story-like way.';
-  }
-  if (mode === 'urbanLegend') {
-    return 'A spooky urban legend told as if it really happened in a small town.';
-  }
-  if (mode === 'philosophy') {
-    return 'A reflective story that explores a big life question through a simple event.';
-  }
-  if (mode === 'motivational') {
-    return 'A short motivational-style story about someone overcoming a challenge.';
-  }
-
-  // generic / random
-  return 'A short, engaging story that works well as a vertical video voiceover.';
+  if (mode === 'scary') return 'A short eerie story about something strange happening one night.';
+  if (mode === 'bedtime') return 'A calm bedtime story with a peaceful ending.';
+  if (mode === 'history') return 'A short narration about an interesting historical moment.';
+  if (mode === 'funFacts') return 'A narration delivering several fun facts.';
+  if (mode === 'urbanLegend') return 'A spooky urban legend told as if it really happened.';
+  if (mode === 'motivational') return 'A short motivational story.';
+  return 'A short vertical-video narration.';
 }
 
-/* --------- Call OpenAI: narration ONLY --------- */
+/* --------- Call OpenAI for narration --------- */
 async function callOpenAI({ storyType, artStyle, language, customPrompt, durationRange }) {
   if (!OPENAI_API_KEY) {
-    console.warn('[GENERATE_SCRIPT] Missing OPENAI_API_KEY, using fallback narration.');
+    console.warn('[GENERATE_SCRIPT] No OPENAI_API_KEY – using fallback.');
     return { narration: fallbackNarration({ storyType }) };
   }
+
+  console.log('[GENERATE_SCRIPT] Using OpenAI:', true);
 
   const mode       = classifyStoryType(storyType);
   const styleHints = buildStyleHints(mode);
 
-  // Map durationRange -> target seconds & words
+  // Duration → word count
   let minSec = 60;
   let maxSec = 90;
   if (durationRange === '30-60') {
@@ -104,36 +103,41 @@ async function callOpenAI({ storyType, artStyle, language, customPrompt, duratio
     maxSec = 60;
   }
 
-  // Simple words-per-second estimate (about 2.5 words/sec = 150 wpm)
-  const minWords = Math.round(minSec * 2.0);  // slightly under so we don’t overshoot
-  const maxWords = Math.round(maxSec * 2.8);  // upper bound
+  // TikTok narration: ~2.4 words/sec → ~145 wpm
+  const minWords = Math.round(minSec * 2.0);
+  const maxWords = Math.round(maxSec * 2.6);
 
-  const userTopic =
+  const topic =
     mode === 'customPrompt' && customPrompt
-      ? `Base the story on this user prompt:\n"${customPrompt}"`
+      ? `Base the story STRICTLY on this:\n"${customPrompt}"`
       : storyType
       ? `Story type: ${storyType}`
-      : 'Story type: Random AI story';
+      : 'Story type: Random AI Story';
 
   const prompt = `
-You write short scripts for vertical videos (TikTok / Reels / Shorts).
+You write narrations for vertical TikTok-style animated stories.
 
 ${styleHints}
 
-- Language: ${language || 'English'}.
-- Art style preference: ${artStyle || 'Realistic'}.
-- Length: The narration should be about ${minSec}–${maxSec} seconds when spoken at a natural pace.
-  That is roughly ${minWords}–${maxWords} words.
+- Language: ${language || 'English'}
+- Art style preference: ${artStyle || 'Scary toon'}
+- Length target: ${minSec}-${maxSec} seconds when spoken aloud  
+  (~${minWords}-${maxWords} words)
 
-Do NOT break the script into beats. Just write one continuous narration that can be read as a single voiceover track.
+Rules:
+- Return ONLY valid JSON.
+- The narration must be one continuous paragraph.
+- NO scene numbers. NO beats. NO headings. NO bullet points.
+- Strong visual imagery so each part naturally produces an image.
+- Safe for TikTok.
 
-Return ONLY valid JSON in this exact shape:
+Return EXACTLY this JSON shape:
 
 {
-  "narration": "full voiceover text for the whole video"
+  "narration": "full text here"
 }
 
-${userTopic}
+${topic}
   `.trim();
 
   const resp = await fetch('https://api.openai.com/v1/chat/completions', {
@@ -145,15 +149,8 @@ ${userTopic}
     body: JSON.stringify({
       model: OPENAI_MODEL,
       messages: [
-        {
-          role: 'system',
-          content:
-            'You are a JSON-only API. Always return strictly valid JSON with no extra text.',
-        },
-        {
-          role: 'user',
-          content: prompt,
-        },
+        { role: 'system', content: 'You are a JSON-only API. Always return valid JSON.' },
+        { role: 'user', content: prompt },
       ],
       temperature: 0.9,
     }),
@@ -166,44 +163,42 @@ ${userTopic}
     return { narration: fallbackNarration({ storyType }) };
   }
 
-  const raw = data?.choices?.[0]?.message?.content?.trim();
+  const raw = data?.choices?.[0]?.message?.content?.trim() || '';
+
   let parsed;
   try {
     parsed = JSON.parse(raw);
   } catch (e) {
-    console.error('[GENERATE_SCRIPT] JSON parse failed, raw content:', raw);
+    console.error('[GENERATE_SCRIPT] JSON parse failed:', raw);
     return { narration: fallbackNarration({ storyType }) };
   }
 
-  if (!parsed || typeof parsed.narration !== 'string' || !parsed.narration.trim()) {
-    console.error('[GENERATE_SCRIPT] Parsed JSON missing narration:', parsed);
+  if (!parsed?.narration || !parsed.narration.trim()) {
+    console.error('[GENERATE_SCRIPT] Parsed JSON missing narration');
     return { narration: fallbackNarration({ storyType }) };
   }
 
   return { narration: parsed.narration.trim() };
 }
 
-/* --------- HTTP handler --------- */
+/* --------- HTTP Handler --------- */
 module.exports = async (req, res) => {
   setCors(res);
 
   if (req.method === 'OPTIONS') return res.status(200).end();
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'METHOD_NOT_ALLOWED' });
-  }
+  if (req.method !== 'POST')   return res.status(405).json({ error: 'METHOD_NOT_ALLOWED' });
 
   try {
-    const body =
-      typeof req.body === 'string'
-        ? JSON.parse(req.body || '{}')
-        : (req.body || {});
+    const body = typeof req.body === 'string'
+      ? JSON.parse(req.body || '{}')
+      : (req.body || {});
 
     const {
       storyType     = 'Random AI story',
-      artStyle      = 'Realistic',
+      artStyle      = 'Scary toon',
       language      = 'English',
       customPrompt  = '',
-      durationRange = '60-90',       // <-- NEW: matches what we send from the frontend
+      durationRange = '60-90',
     } = body;
 
     console.log('[GENERATE_SCRIPT] INPUT', {
@@ -211,7 +206,8 @@ module.exports = async (req, res) => {
       artStyle,
       language,
       durationRange,
-      hasCustomPrompt: !!customPrompt,
+      customPrompt: customPrompt?.slice?.(0, 60) || '',
+      hasOpenAIKey: !!OPENAI_API_KEY,
     });
 
     const { narration } = await callOpenAI({
@@ -220,10 +216,6 @@ module.exports = async (req, res) => {
       language,
       customPrompt,
       durationRange,
-    });
-
-    console.log('[GENERATE_SCRIPT] OUTPUT_PREVIEW', {
-      narrationLen: (narration || '').length,
     });
 
     return res.status(200).json({
