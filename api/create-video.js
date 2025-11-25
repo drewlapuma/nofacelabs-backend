@@ -16,7 +16,7 @@ const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4.1-mini';
 // Beat / timing settings
 const MIN_BEATS = 8;            // never fewer than this
 const MAX_BEATS = 24;           // must match how many Beat groups your template supports
-const SECONDS_PER_BEAT = 3.5;   // approx seconds per scene
+const SECONDS_PER_BEAT = 2.5;   // approx seconds per scene
 
 // Animation variants in your Creatomate template
 // For each beat you have layers:
