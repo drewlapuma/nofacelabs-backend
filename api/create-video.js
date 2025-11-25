@@ -608,7 +608,9 @@ module.exports = async function handler(req, res) {
         for (const variant of ANIMATION_VARIANTS) {
           const imgKey = `Beat${i}_${variant}_Image`;
 
-          if (variant === chosenVariant && imageUrl) {
+          // ✅ Always keep PanLeft filled as a safety net,
+          // and also fill the chosen variant.
+          if ((variant === chosenVariant || variant === 'PanLeft') && imageUrl) {
             mods[imgKey] = imageUrl;
           } else {
             mods[imgKey] = null;
@@ -618,10 +620,13 @@ module.exports = async function handler(req, res) {
         if (i === 1) {
           console.log('[DEBUG_BEAT1]', {
             chosenVariant,
-            imageUrl,
+            imageUrlPresent: !!imageUrl,
             keysSet: ANIMATION_VARIANTS.map((v) => ({
               key: `Beat1_${v}_Image`,
-              value: v === chosenVariant && imageUrl ? '[URL]' : 'null',
+              value:
+                (v === chosenVariant || v === 'PanLeft') && imageUrl
+                  ? '[URL]'
+                  : 'null',
             })),
           });
         }
