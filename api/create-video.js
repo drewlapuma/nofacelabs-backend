@@ -604,13 +604,12 @@ module.exports = async function handler(req, res) {
         }
 
         const chosenVariant = variantSequence[idx];
-        
+
+        // For this beat, only the chosenVariant gets the image; all others null
         for (const variant of ANIMATION_VARIANTS) {
           const imgKey = `Beat${i}_${variant}_Image`;
 
-          // ✅ Always keep PanLeft filled as a safety net,
-          // and also fill the chosen variant.
-          if ((variant === chosenVariant || variant === 'PanLeft') && imageUrl) {
+          if (variant === chosenVariant && imageUrl) {
             mods[imgKey] = imageUrl;
           } else {
             mods[imgKey] = null;
@@ -624,7 +623,7 @@ module.exports = async function handler(req, res) {
             keysSet: ANIMATION_VARIANTS.map((v) => ({
               key: `Beat1_${v}_Image`,
               value:
-                (v === chosenVariant || v === 'PanLeft') && imageUrl
+                v === chosenVariant && imageUrl
                   ? '[URL]'
                   : 'null',
             })),
