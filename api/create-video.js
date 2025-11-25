@@ -604,12 +604,6 @@ module.exports = async function handler(req, res) {
         }
 
         const chosenVariant = variantSequence[idx];
-
-// 🔴 DEBUG: force a known test image on ALL Beat 1 variants
-    if (i === 1) {
-      imageUrl = 'https://fastly.picsum.photos/id/58/1080/1920.jpg?hmac=8J4PIXvrOV0f9b4pTovFKCer4tWyjZelIbWe415oOMk';
-      console.log('[DEBUG_BEAT1_FORCE]', { imageUrl });
-    }
         
         for (const variant of ANIMATION_VARIANTS) {
           const imgKey = `Beat${i}_${variant}_Image`;
