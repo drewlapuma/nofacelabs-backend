@@ -160,6 +160,7 @@ Visual style: ${styleChunk}, ${ratioText}, no text, no subtitles, no UI, no wate
 
 /**
  * Use OpenAI to turn narration into a visual beat plan.
+ * This version strips ```json fences and forces pure JSON.
  */
 async function buildVisualBeatPlan({ narration, storyType, artStyle, beatCount }) {
   if (!OPENAI_API_KEY) {
@@ -172,30 +173,26 @@ async function buildVisualBeatPlan({ narration, storyType, artStyle, beatCount }
   }
 
   const prompt = `
-You create shot lists (visual beats) for scary TikTok story videos.
+You produce ONLY JSON. 
+NEVER wrap your output in backticks or markdown code fences.
 
-I will give you the full voiceover narration.
-Your job is to break it into ${beatCount} consecutive visual beats that match
-what is happening in the story at each moment.
-
-Rules:
+Task:
+- Break the narration into EXACTLY ${beatCount} visual beats.
+- Each beat describes what the viewer SEES on screen at that moment in a scary TikTok story.
 - Preserve the chronological order of the story.
-- Each beat describes exactly what the viewer SEES on screen at that moment.
-- Focus on environment and horror elements: rooms, hallways, doors, windows, shadows,
-  unknown figures, monsters, strange objects, etc.
+- Focus on environment and horror elements: rooms, hallways, doors, windows, shadows, unknown figures, monsters, strange objects, etc.
 - Avoid generic "girl standing in bedroom" or "pretty anime girl" framing.
-- If a person is needed, treat them as small, secondary silhouettes reacting to the horror,
-  not the main subject.
+- If a person is needed, treat them as small, secondary silhouettes reacting to the horror, not the main subject.
 - 1–2 sentences per beat is enough.
 - These are for image generation, NOT subtitles.
 
-Return ONLY valid JSON in this exact format:
+Return this JSON format ONLY (no extra fields):
 
 {
   "beats": [
     {
-      "caption": "Very short caption for this moment.",
-      "beat_text": "One or two sentences describing what should be shown on screen."
+      "caption": "very short caption for this moment",
+      "beat_text": "1-2 sentences describing what should be shown on screen"
     }
   ]
 }
@@ -219,7 +216,7 @@ Narration:
           {
             role: 'system',
             content:
-              'You are a JSON-only API. Always return strictly valid JSON with no extra text.',
+              'You are a JSON-only API. Never return backticks or markdown. Output JSON only.',
           },
           {
             role: 'user',
@@ -241,17 +238,18 @@ Narration:
       }));
     }
 
-    const raw = data?.choices?.[0]?.message?.content?.trim();
+    let raw = data?.choices?.[0]?.message?.content?.trim() || '';
+
+    // 🔧 Strip markdown code fences if OpenAI still adds them
+    raw = raw.replace(/```json/gi, '').replace(/```/g, '').trim();
+
     let parsed;
     try {
       parsed = JSON.parse(raw);
     } catch (e) {
-      console.error('[BEAT_PLAN] JSON parse failed, raw content:', raw);
+      console.error('[BEAT_PLAN] parse failed, raw:', raw);
       const chunks = naiveSplitIntoBeats(narration, beatCount);
-      return chunks.map((t) => ({
-        caption: t,
-        beat_text: t,
-      }));
+      return chunks.map((t) => ({ caption: t, beat_text: t }));
     }
 
     let beats = Array.isArray(parsed?.beats) ? parsed.beats : [];
@@ -276,10 +274,7 @@ Narration:
   } catch (err) {
     console.error('[BEAT_PLAN] Exception', err);
     const chunks = naiveSplitIntoBeats(narration, beatCount);
-    return chunks.map((t) => ({
-      caption: t,
-      beat_text: t,
-    }));
+    return chunks.map((t) => ({ caption: t, beat_text: t }));
   }
 }
 
