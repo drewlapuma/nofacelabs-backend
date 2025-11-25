@@ -408,25 +408,6 @@ async function generateStabilityImageUrlsForBeats({
   return urls;
 }
 
-/**
- * Build a sequence of animation variants for all beats
- * so that no two consecutive beats use the same variant.
- */
-function buildVariantSequence(count) {
-  const seq = [];
-  let last = null;
-
-  for (let i = 0; i < count; i++) {
-    const available = ANIMATION_VARIANTS.filter((v) => v !== last);
-    const idx = i % available.length;
-    const chosen = available[idx];
-    seq.push(chosen);
-    last = chosen;
-  }
-
-  return seq;
-}
-
 module.exports = async function handler(req, res) {
   setCors(res);
   if (req.method === 'OPTIONS') return res.status(200).end();
@@ -563,10 +544,7 @@ module.exports = async function handler(req, res) {
       }
     }
 
-    // 6) Build animation sequence, but we’ll only use it up to MAX_BEATS
-    const variantSequence = buildVariantSequence(MAX_BEATS);
-
-    // 7) Build Creatomate modifications
+    // 6) Build Creatomate modifications
     const mods = {
       Narration: narration,
       Voiceover: narration,
@@ -580,9 +558,9 @@ module.exports = async function handler(req, res) {
 
     for (let i = 1; i <= MAX_BEATS; i++) {
       if (i <= beatCount) {
-        const sourceIdx = i - 1;
-        const beatText = beatTexts[sourceIdx] || '';
-        const captionRaw = beatCaptions[sourceIdx] || beatText || `Scene ${i}`;
+        const idx = i - 1;
+        const beatText = beatTexts[idx] || '';
+        const captionRaw = beatCaptions[idx] || beatText || `Scene ${i}`;
         const caption =
           captionRaw.length > 120
             ? captionRaw.slice(0, 117) + '…'
@@ -593,7 +571,7 @@ module.exports = async function handler(req, res) {
         let imageUrl = null;
 
         if (IMAGE_PROVIDER === 'stability' && stabilityImageUrls.length > 0) {
-          imageUrl = stabilityImageUrls[sourceIdx] || null;
+          imageUrl = stabilityImageUrls[idx] || null;
         } else if (IMAGE_PROVIDER === 'dalle') {
           imageUrl = buildScenePrompt({
             beatText,
@@ -603,26 +581,19 @@ module.exports = async function handler(req, res) {
           });
         }
 
-        const chosenVariant = variantSequence[i - 1];
-
+        // ✅ SIMPLIFIED: assign the same image URL to *all* animation variants for this beat,
+        // so whichever group is visible in the template will show the image.
         for (const variant of ANIMATION_VARIANTS) {
           const imgKey = `Beat${i}_${variant}_Image`;
-
-          if (variant === chosenVariant && imageUrl) {
-            mods[imgKey] = imageUrl;
-          } else {
-            mods[imgKey] = null;
-          }
+          mods[imgKey] = imageUrl || null;
         }
 
-        // Extra debug for Beat 1
         if (i === 1) {
           console.log('[DEBUG_BEAT1]', {
-            chosenVariant,
             imageUrl,
             keysSet: ANIMATION_VARIANTS.map((v) => ({
               key: `Beat1_${v}_Image`,
-              value: v === chosenVariant && imageUrl ? '[URL]' : 'null',
+              value: imageUrl ? '[URL]' : 'null',
             })),
           });
         }
@@ -652,7 +623,7 @@ module.exports = async function handler(req, res) {
       stabilityImagesGenerated: stabilityImageUrls.length,
     });
 
-    // 8) Call Creatomate
+    // 7) Call Creatomate
     const resp = await postJSON(
       'https://api.creatomate.com/v1/renders',
       { Authorization: `Bearer ${process.env.CREATOMATE_API_KEY}` },
