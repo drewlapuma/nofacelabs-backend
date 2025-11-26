@@ -7,7 +7,7 @@ const STABILITY_API_KEY = process.env.STABILITY_API_KEY;
 
 // Stability model: 'sd3.5-large', 'sd3.5-large-turbo', 'sd3.5-medium', 'sd3.5-flash'
 const STABILITY_IMAGE_MODEL =
-  process.env.STABILITY_IMAGE_MODEL || 'sd3.5-large-turbo';
+  process.env.STABILITY_IMAGE_MODEL || 'sd3.5-medium';
 
 // OpenAI for visual beat planning
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
