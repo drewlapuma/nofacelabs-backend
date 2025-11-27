@@ -374,6 +374,11 @@ async function generateStabilityImageUrlsForBeats({
       aspectRatio,
     });
 
+ // 👇 NEW: log exactly what we send to Stability for this beat
+    console.log(`[PROMPT_BEAT_${i}]`, prompt);
+
+    try {
+    
     try {
       console.log(`[STABILITY] Generating image for Beat ${i}/${beatCount}`);
       const buffer = await generateStabilityImageBuffer(prompt, {
