@@ -243,7 +243,7 @@ async function generateStabilityImageUrlsForBeats({
     });
 
     // 🔍 Log exactly what we send to Stability for this beat
-    console.log(`[PROMPT_BEAT_${i}]`, prompt);
+console.log(`\n================ PROMPT_BEAT_${i} ================\n${prompt}\n=================================================\n`);
 
     try {
       console.log(`[STABILITY] Generating image for Beat ${i}/${beatCount}`);
