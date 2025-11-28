@@ -4,6 +4,7 @@ const https = require('https');
 const ALLOW_ORIGIN          = process.env.ALLOW_ORIGIN || '*';
 const IMAGE_PROVIDER        = (process.env.IMAGE_PROVIDER || 'stability').toLowerCase();
 const STABILITY_API_KEY     = process.env.STABILITY_API_KEY;
+// One of: 'sd3.5-large', 'sd3.5-large-turbo', 'sd3.5-medium', 'sd3.5-flash'
 const STABILITY_IMAGE_MODEL = process.env.STABILITY_IMAGE_MODEL || 'sd3.5-large-turbo';
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
@@ -12,7 +13,7 @@ const OPENAI_MODEL   = process.env.OPENAI_MODEL || 'gpt-4.1-mini';
 // Beat / timing settings
 const MIN_BEATS        = 8;   // never fewer than this
 const MAX_BEATS        = 24;  // must match your template
-const SECONDS_PER_BEAT = 3;   // 🔔 match your Creatomate beat length
+const SECONDS_PER_BEAT = 3;   // match your Creatomate beat length
 
 // Animation variants in your Creatomate template
 // Beat1_PanRight_Image, Beat1_PanLeft_Image, Beat1_PanUp_Image, Beat1_PanDown_Image, Beat1_Zoom_Image
@@ -351,12 +352,25 @@ Rules:
     return null;
   }
 
-  const raw = data?.choices?.[0]?.message?.content?.trim();
+  let raw = data?.choices?.[0]?.message?.content?.trim();
+  if (!raw) {
+    console.error('[PLAN_BEATS] Empty content from OpenAI');
+    return null;
+  }
+
+  // Strip ```json ... ``` or ``` ... ``` fences if present
+  if (raw.startsWith('```')) {
+    raw = raw
+      .replace(/^```[a-zA-Z]*\s*/, '') // remove ``` or ```json + newline
+      .replace(/```$/, '')             // remove trailing ```
+      .trim();
+  }
+
   let parsed;
   try {
     parsed = JSON.parse(raw);
   } catch (e) {
-    console.error('[PLAN_BEATS] JSON parse failed, raw content:', raw);
+    console.error('[PLAN_BEATS] JSON parse failed after fence-strip, raw content:', raw);
     return null;
   }
 
