@@ -35,7 +35,6 @@ function buildStyleHints(mode) {
       // 🔥 Updated: make stories *visual* and scene-based
       return [
         'Write a creepy but TikTok-safe horror story with suspense and a twist.',
-        'No gore or graphic violence.',
         'Tell the story as a sequence of very visual moments the viewer could actually see.',
         'In almost every sentence, describe concrete things in the scene: environment, lighting, objects, shadows, silhouettes, motion.',
         'Avoid vague lines like "it felt scary" unless they are attached to a clear visual detail.',
