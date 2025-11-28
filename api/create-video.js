@@ -5,7 +5,7 @@ const ALLOW_ORIGIN          = process.env.ALLOW_ORIGIN || '*';
 const IMAGE_PROVIDER        = (process.env.IMAGE_PROVIDER || 'stability').toLowerCase();
 const STABILITY_API_KEY     = process.env.STABILITY_API_KEY;
 // One of: 'sd3.5-large', 'sd3.5-large-turbo', 'sd3.5-medium', 'sd3.5-flash'
-const STABILITY_IMAGE_MODEL = process.env.STABILITY_IMAGE_MODEL || 'sd3.5-large-turbo';
+const STABILITY_IMAGE_MODEL = process.env.STABILITY_IMAGE_MODEL || 'sd3.5-medium';
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL   = process.env.OPENAI_MODEL || 'gpt-4.1-mini';
