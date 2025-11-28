@@ -1,16 +1,18 @@
 // api/create-video.js  (CommonJS, Node 18)
 const https = require('https');
 
-const ALLOW_ORIGIN       = process.env.ALLOW_ORIGIN || '*';
-const IMAGE_PROVIDER     = (process.env.IMAGE_PROVIDER || 'stability').toLowerCase();
-const STABILITY_API_KEY  = process.env.STABILITY_API_KEY;
-// One of: 'sd3.5-large', 'sd3.5-large-turbo', 'sd3.5-medium', 'sd3.5-flash'
+const ALLOW_ORIGIN        = process.env.ALLOW_ORIGIN || '*';
+const IMAGE_PROVIDER      = (process.env.IMAGE_PROVIDER || 'stability').toLowerCase();
+const STABILITY_API_KEY   = process.env.STABILITY_API_KEY;
 const STABILITY_IMAGE_MODEL = process.env.STABILITY_IMAGE_MODEL || 'sd3.5-large-turbo';
+
+const OPENAI_API_KEY      = process.env.OPENAI_API_KEY;
+const OPENAI_MODEL        = process.env.OPENAI_MODEL || 'gpt-4.1-mini';
 
 // Beat / timing settings
 const MIN_BEATS        = 8;    // never fewer than this
 const MAX_BEATS        = 24;   // must match how many Beat groups your template supports
-const SECONDS_PER_BEAT = 2.5;  // 👈 match your Creatomate beat length
+const SECONDS_PER_BEAT = 2.5;  // match your Creatomate beat length
 
 // Animation variants in your Creatomate template
 // For each beat you have layers like:
@@ -63,7 +65,7 @@ function postJSON(url, headers, bodyObj) {
 
 // ----------------- Speech timing helper (words -> seconds) -----------------
 function estimateSpeechSeconds(narration) {
-  const text  = (narration || '').trim();
+  const text = (narration || '').trim();
   if (!text) return 0;
   const words = (text.match(/\S+/g) || []).length;
   const wordsPerSec = 2.5; // ~150 wpm
@@ -71,29 +73,34 @@ function estimateSpeechSeconds(narration) {
 }
 
 /**
- * Simple word-based splitter: split narration into `beatCount` chunks,
- * roughly equal word counts, in order.
+ * Fallback: split narration into beats by sentences if beat planner fails.
  */
 function splitNarrationIntoBeats(narration, beatCount) {
   const text = (narration || '').trim();
   if (!text || beatCount <= 0) return [];
 
-  const words = text.split(/\s+/);
-  const totalWords = words.length;
-  const chunkSize = Math.max(1, Math.ceil(totalWords / beatCount));
+  // 1) Rough sentence split
+  const rawSentences = text
+    .split(/(?<=[.!?])\s+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
 
-  const beats = [];
-  for (let i = 0; i < totalWords; i += chunkSize) {
-    const chunkWords = words.slice(i, i + chunkSize);
-    beats.push(chunkWords.join(' '));
+  if (rawSentences.length === 0) {
+    return [text];
   }
 
-  // Trim extra chunks if any
+  const total = rawSentences.length;
+  const perBeat = Math.max(1, Math.round(total / beatCount));
+
+  const beats = [];
+  for (let i = 0; i < total; i += perBeat) {
+    const chunk = rawSentences.slice(i, i + perBeat).join(' ');
+    beats.push(chunk);
+  }
+
   if (beats.length > beatCount) {
     beats.length = beatCount;
   }
-
-  // Pad if fewer (edge cases)
   while (beats.length < beatCount) {
     beats.push(beats[beats.length - 1] || text);
   }
@@ -102,33 +109,33 @@ function splitNarrationIntoBeats(narration, beatCount) {
 }
 
 /**
- * Build a visual prompt for a scene, based on the *beat text* + artStyle.
- * Uses your scary-toon TikTok-style spec when artStyle includes "scary" or "toon".
+ * Build a visual prompt for Stability based on a *visual description* + artStyle.
+ * NOTE: beatText here is assumed to ALREADY be a visual description (from the beat planner).
  */
 function buildScenePrompt({ beatText, artStyle, sceneIndex, aspectRatio }) {
   const styleRaw = (artStyle || '').toLowerCase();
+  const cleanedBeat = (beatText || '').replace(/\s+/g, ' ').trim();
 
   let styleChunk;
 
   // Scary toon style
   if (styleRaw.includes('scary') || styleRaw.includes('toon')) {
     styleChunk =
-      'Cartoon storytelling illustration in the style of viral TikTok story animations: ' +
-      'clean bold outlines, soft cel-shading, smooth gradients, expressive characters, ' +
+      'Cartoon storytelling illustration in the style of viral TikTok horror story animations: ' +
+      'clean bold outlines, soft cel-shading, smooth gradients, expressive silhouettes, ' +
       'light anime influence, high contrast lighting, slightly exaggerated proportions, ' +
-      'cinematic framing, vibrant but not neon colors, simple textured backgrounds, ' +
-      'smooth line art, crisp edges, digital painting, storybook vibe, ' +
-      'no comic panels, no multiple frames, single scene only. ' +
-      'Darker mood with spooky atmosphere, still family-friendly, no gore or graphic violence, ' +
-      'no photorealistic faces, no pretty girls, no selfies, no portraits.';
+      'cinematic framing, moody colors, simple textured backgrounds, smooth line art, crisp edges, ' +
+      'digital painting, storybook vibe, single frame only, no comic panels, no multiple frames. ' +
+      'Spooky atmosphere, eerie lighting, family-friendly, no gore or graphic violence, ' +
+      'no photorealistic faces, no pretty girls, no selfies, no close-up portraits.';
   } else {
     // Generic cartoon / story style
     styleChunk =
       '2d digital cartoon storytelling illustration, flat colors with soft shading, ' +
-      'clean bold outlines, expressive characters, light anime influence, cinematic framing, ' +
+      'clean bold outlines, expressive characters, cinematic framing, ' +
       'vibrant but not neon colors, simple textured backgrounds, smooth line art, crisp edges, ' +
-      'digital painting, storybook vibe, no comic panels, no multiple frames, single scene only, ' +
-      'no selfies or fashion shots.';
+      'digital painting, storybook vibe, single frame only, no comic panels, no multiple frames, ' +
+      'no selfies or glamour portraits.';
   }
 
   const ratioText =
@@ -139,12 +146,12 @@ function buildScenePrompt({ beatText, artStyle, sceneIndex, aspectRatio }) {
       : 'horizontal 16:9 composition';
 
   return `
-Scene ${sceneIndex} from a narrated TikTok horror story.
+Highly detailed single-frame illustration for scene ${sceneIndex} of a narrated TikTok story.
 
-Narration for this scene:
-"${beatText}"
+Scene to visualize (concrete visual description, not just text):
+${cleanedBeat}
 
-Visual style: ${styleChunk}, ${ratioText}, no text, no subtitles, no user interface, no watermarks, no logos, no borders.
+Visual style: ${styleChunk}, ${ratioText}, no on-screen text, no subtitles, no UI, no watermarks, no logos, no borders.
 `.trim();
 }
 
@@ -152,7 +159,10 @@ Visual style: ${styleChunk}, ${ratioText}, no text, no subtitles, no user interf
  * Call Stability's image API for a single prompt.
  * Uses multipart/form-data (required by Stability) and returns a Buffer.
  */
-async function generateStabilityImageBuffer(prompt, { aspectRatio = '9:16', artStyle = 'Scary toon' } = {}) {
+async function generateStabilityImageBuffer(
+  prompt,
+  { aspectRatio = '9:16' } = {}
+) {
   if (!STABILITY_API_KEY) {
     throw new Error('STABILITY_API_KEY not set');
   }
@@ -169,7 +179,7 @@ async function generateStabilityImageBuffer(prompt, { aspectRatio = '9:16', artS
   form.append('model', STABILITY_IMAGE_MODEL);
   form.append('style_preset', 'digital-art');
 
-  // Aggressive negative prompt to avoid random girls, portraits, etc.
+  // Strong negative prompt to avoid pretty girls / selfies / random portraits
   const negativePrompt =
     'photorealistic, realistic photography, selfie, portrait, close-up face, pretty girl, attractive woman, ' +
     'fashion, glamour, makeup, lipstick, beauty shot, instagram style, tiktok influencer, ' +
@@ -220,37 +230,33 @@ async function uploadImageBufferToBlob(buffer, key) {
 }
 
 /**
- * Generate one Stability image per beat (using beatTexts) and return an array of URLs.
- * Logs the exact prompt used for each beat.
+ * Generate one Stability image per beat and return an array of URLs.
+ * beatVisuals: array of visual descriptions (from beat planner).
  */
 async function generateStabilityImageUrlsForBeats({
   beatCount,
-  beatTexts,
+  beatVisuals,
   artStyle,
   aspectRatio,
 }) {
   const urls = [];
 
   for (let i = 1; i <= beatCount; i++) {
-    const beatText =
-      beatTexts[i - 1] || beatTexts[beatTexts.length - 1] || '';
-
+    const visual = beatVisuals[i - 1] || beatVisuals[beatVisuals.length - 1] || '';
     const prompt = buildScenePrompt({
-      beatText,
+      beatText: visual,
       artStyle,
       sceneIndex: i,
       aspectRatio,
     });
 
-    // 🔍 Log exactly what we send to Stability for this beat
-    console.log(`[PROMPT_BEAT_${i}]`, prompt);
+    console.log(
+      `\n================ PROMPT_BEAT_${i} ================\n${prompt}\n=================================================\n`
+    );
 
     try {
       console.log(`[STABILITY] Generating image for Beat ${i}/${beatCount}`);
-      const buffer = await generateStabilityImageBuffer(prompt, {
-        aspectRatio,
-        artStyle,
-      });
+      const buffer = await generateStabilityImageBuffer(prompt, { aspectRatio });
 
       const key = `stability-scenes/${Date.now()}-beat-${i}.png`;
       const url = await uploadImageBufferToBlob(buffer, key);
@@ -261,13 +267,121 @@ async function generateStabilityImageUrlsForBeats({
         `[STABILITY] Beat ${i} failed, leaving this beat without an image`,
         err
       );
-      urls.push(null); // this beat will have no image if Creatomate has no fallback
+      urls.push(null);
     }
   }
 
   return urls;
 }
 
+/**
+ * OpenAI beat planner:
+ * Takes full narration and returns beats with:
+ * - caption: short title for UI / caption layer
+ * - beat_text: the narration fragment associated with this beat
+ * - visual_description: concrete visual scene to draw
+ */
+async function planBeatsWithOpenAI({
+  narration,
+  storyType,
+  artStyle,
+  language,
+  minBeats,
+  maxBeats,
+}) {
+  if (!OPENAI_API_KEY) {
+    console.warn('[PLAN_BEATS] Missing OPENAI_API_KEY, falling back to naive splitting.');
+    return null;
+  }
+
+  const trimmedNarration = (narration || '').trim();
+
+  const prompt = `
+You are planning scenes for a vertical TikTok story video.
+
+The full narration (voiceover) is:
+
+"${trimmedNarration}"
+
+Your job:
+
+1. Break this narration into a sequence of ${minBeats}–${maxBeats} story beats.
+2. Each beat should represent a *visual moment* that could be illustrated as a single frame.
+3. For each beat, return:
+   - "caption": a short, catchy label (max ~8 words) describing the moment.
+   - "beat_text": the exact or lightly edited narration fragment for this moment (what is being *said* around this time).
+   - "visual_description": a concrete, literal description of what should appear in the illustration:
+       - Describe environment, lighting, important objects, and any characters.
+       - Avoid metaphors and abstract feelings; only describe what can actually be drawn.
+       - If a human character is present, DO NOT describe them as attractive, pretty, glamorous, or fashionable.
+       - Prefer silhouettes or small figures over close-up faces.
+
+Rules:
+- Stay faithful to the narration order.
+- Do NOT invent new plot events that contradict the narration.
+- Each "visual_description" must be a clear single scene, not multiple panels or a comic strip.
+- Return ONLY valid JSON with this shape:
+
+{
+  "beats": [
+    {
+      "caption": "short label here",
+      "beat_text": "narration fragment here",
+      "visual_description": "clear visual scene description here"
+    }
+  ]
+}
+`.trim();
+
+  const resp = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: OPENAI_MODEL,
+      messages: [
+        {
+          role: 'system',
+          content:
+            'You are a JSON-only API. Always return strictly valid JSON matching the requested schema. No extra commentary.',
+        },
+        {
+          role: 'user',
+          content: prompt,
+        },
+      ],
+      temperature: 0.7,
+    }),
+  });
+
+  const data = await resp.json().catch(() => ({}));
+
+  if (!resp.ok) {
+    console.error('[PLAN_BEATS] OpenAI error', resp.status, data);
+    return null;
+  }
+
+  const raw = data?.choices?.[0]?.message?.content?.trim();
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    console.error('[PLAN_BEATS] JSON parse failed, raw content:', raw);
+    return null;
+  }
+
+  if (!parsed || !Array.isArray(parsed.beats) || parsed.beats.length === 0) {
+    console.error('[PLAN_BEATS] Parsed JSON missing beats:', parsed);
+    return null;
+  }
+
+  console.log('[PLAN_BEATS] Got beats:', parsed.beats.length);
+  return parsed;
+}
+
+// ----------------- HTTP handler -----------------
 module.exports = async function handler(req, res) {
   setCors(res);
   if (req.method === 'OPTIONS') return res.status(200).end();
@@ -279,7 +393,7 @@ module.exports = async function handler(req, res) {
     const body =
       typeof req.body === 'string'
         ? JSON.parse(req.body || '{}')
-        : (req.body || {});
+        : req.body || {};
 
     const {
       storyType     = 'Random AI story',
@@ -341,7 +455,7 @@ module.exports = async function handler(req, res) {
         .json({ error: 'SCRIPT_EMPTY', details: scriptResp });
     }
 
-    // 2) Estimate narration time
+    // 2) Estimate narration time -> target length
     const speechSec = estimateSpeechSeconds(narration);
 
     let targetSec = Math.round(speechSec + 2);
@@ -358,12 +472,63 @@ module.exports = async function handler(req, res) {
       targetSec = Math.round(speechSec + 2);
     }
 
-    // 3) Dynamically decide how many beats to use, based on targetSec
-    let beatCount = Math.round(targetSec / SECONDS_PER_BEAT);
-    if (!beatCount || !Number.isFinite(beatCount)) {
-      beatCount = MIN_BEATS;
+    // 3) Initial beatCount from timing (used if planner fails)
+    let beatCountFromTiming = Math.round(targetSec / SECONDS_PER_BEAT);
+    if (!beatCountFromTiming || !Number.isFinite(beatCountFromTiming)) {
+      beatCountFromTiming = MIN_BEATS;
     }
-    beatCount = Math.max(MIN_BEATS, Math.min(MAX_BEATS, beatCount));
+    beatCountFromTiming = Math.max(
+      MIN_BEATS,
+      Math.min(MAX_BEATS, beatCountFromTiming)
+    );
+
+    // 4) Ask OpenAI to plan beats (Option B)
+    let beats = null;
+    try {
+      const planned = await planBeatsWithOpenAI({
+        narration,
+        storyType,
+        artStyle,
+        language,
+        minBeats: MIN_BEATS,
+        maxBeats: MAX_BEATS,
+      });
+      if (planned && Array.isArray(planned.beats) && planned.beats.length > 0) {
+        beats = planned.beats;
+      }
+    } catch (e) {
+      console.error('[CREATE_VIDEO] BEAT_PLANNER_FAILED', e);
+    }
+
+    let beatCount;
+    let captionTexts = [];
+    let visualDescriptions = [];
+
+    if (beats) {
+      // Use planner beats directly
+      beatCount = beats.length;
+      if (beatCount < MIN_BEATS) beatCount = MIN_BEATS;
+      if (beatCount > MAX_BEATS) beatCount = MAX_BEATS;
+
+      const trimmedBeats = beats.slice(0, beatCount);
+
+      captionTexts = trimmedBeats.map((b, idx) => {
+        const c = (b.caption || b.beat_text || `Scene ${idx + 1}`).trim();
+        return c;
+      });
+
+      visualDescriptions = trimmedBeats.map((b) => {
+        const v =
+          (b.visual_description || b.beat_text || '').trim();
+        return v;
+      });
+    } else {
+      // Fallback: sentence-based splitting
+      beatCount = beatCountFromTiming;
+      const fallback = splitNarrationIntoBeats(narration, beatCount);
+      captionTexts = fallback;
+      visualDescriptions = fallback;
+    }
 
     console.log('[CREATE_VIDEO] BEAT_CONFIG', {
       speechSec,
@@ -372,18 +537,16 @@ module.exports = async function handler(req, res) {
       MIN_BEATS,
       MAX_BEATS,
       SECONDS_PER_BEAT,
+      usedPlanner: !!beats,
     });
 
-    // 4) Build beatTexts based on narration and beatCount
-    const beatTexts = splitNarrationIntoBeats(narration, beatCount);
-
-    // 5) Generate Stability images for the beats we are actually using
+    // 5) Generate Stability images for these beats (visualDescriptions)
     let stabilityImageUrls = [];
     if (IMAGE_PROVIDER === 'stability') {
       try {
         stabilityImageUrls = await generateStabilityImageUrlsForBeats({
           beatCount,
-          beatTexts,
+          beatVisuals: visualDescriptions,
           artStyle,
           aspectRatio,
         });
@@ -408,11 +571,12 @@ module.exports = async function handler(req, res) {
 
     const style = artStyle || 'Scary toon';
 
-    // Fill active beats 1..beatCount
     for (let i = 1; i <= beatCount; i++) {
-      const beatText = beatTexts[i - 1] || '';
+      const rawCaption = captionTexts[i - 1] || `Scene ${i}`;
       const caption =
-        beatText.length > 120 ? beatText.slice(0, 117) + '…' : beatText || `Scene ${i}`;
+        rawCaption.length > 120
+          ? rawCaption.slice(0, 117) + '…'
+          : rawCaption;
 
       mods[`Beat${i}_Caption`] = caption;
 
@@ -421,16 +585,16 @@ module.exports = async function handler(req, res) {
       if (IMAGE_PROVIDER === 'stability' && stabilityImageUrls.length >= i) {
         imageValue = stabilityImageUrls[i - 1] || null;
       } else if (IMAGE_PROVIDER === 'dalle') {
+        const visual = visualDescriptions[i - 1] || '';
         imageValue = buildScenePrompt({
-          beatText,
+          beatText: visual,
           artStyle: style,
           sceneIndex: i,
           aspectRatio,
         });
       }
 
-      // To avoid any black frames due to missing variant layers,
-      // we set the SAME image URL on all animation variants for this beat.
+      // Set same image on all animation variants for this beat to avoid blank variants
       for (const variant of ANIMATION_VARIANTS) {
         const imgKey = `Beat${i}_${variant}_Image`;
         mods[imgKey] = imageValue || '';
