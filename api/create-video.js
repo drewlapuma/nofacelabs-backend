@@ -12,7 +12,7 @@ const STABILITY_IMAGE_MODEL =
 // Beat / timing settings
 const MIN_BEATS = 8;          // never fewer than this
 const MAX_BEATS = 24;         // must match how many Beat groups your template supports
-const SECONDS_PER_BEAT = 3.5; // approx seconds per scene
+const SECONDS_PER_BEAT = 3; // approx seconds per scene
 
 // Animation variants in your Creatomate template
 // For each beat you have layers:
@@ -498,7 +498,6 @@ module.exports = async function handler(req, res) {
       if (IMAGE_PROVIDER === 'stability' && stabilityImageUrls.length >= i) {
         imageUrl = stabilityImageUrls[i - 1] || null;
       } else if (IMAGE_PROVIDER === 'dalle') {
-        // If you ever switch to DALL·E, we build a prompt on the fly
         const visualDescription = visualDescriptions[i - 1] || '';
         const prompt = buildScenePrompt({
           beatText,
@@ -507,7 +506,7 @@ module.exports = async function handler(req, res) {
           sceneIndex: i,
           aspectRatio,
         });
-        imageUrl = prompt; // you’d map this differently in a DALL·E flow
+        imageUrl = prompt; // placeholder if you switch to DALL·E later
       }
 
       const chosenVariant = variantSequence[i - 1];
@@ -537,7 +536,6 @@ module.exports = async function handler(req, res) {
       template_id,
       modifications: mods,
       output_format: 'mp4',
-      // let the template + audio drive final duration
     };
 
     console.log('[CREATE_VIDEO] PAYLOAD_PREVIEW', {
@@ -553,8 +551,7 @@ module.exports = async function handler(req, res) {
     // 9) Call Creatomate
     const resp = await postJSON(
       'https://api.creatomate.com/v1/renders',
-      { Authorization: `Bearer ${process.env.C
-REATOMATE_API_KEY}` },
+      { Authorization: `Bearer ${process.env.CREATOMATE_API_KEY}` },
       payload
     );
 
