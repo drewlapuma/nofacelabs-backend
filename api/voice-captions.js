@@ -15,6 +15,24 @@ function setCors(res) {
 }
 
 /**
+ * Normalize language names like "English" → ISO-639-1 code like "en"
+ */
+function normalizeLanguageToIso(langRaw) {
+  if (!langRaw) return 'en';
+  const s = String(langRaw).trim().toLowerCase();
+
+  if (s === 'en' || s.startsWith('english'))  return 'en';
+  if (s === 'es' || s.startsWith('spanish'))  return 'es';
+  if (s === 'fr' || s.startsWith('french'))   return 'fr';
+  if (s === 'de' || s.startsWith('german'))   return 'de';
+  if (s === 'pt' || s.startsWith('portuguese')) return 'pt';
+  if (s === 'it' || s.startsWith('italian'))  return 'it';
+
+  // Fallback: default to English
+  return 'en';
+}
+
+/**
  * Generate TTS audio from narration using OpenAI and return a Buffer.
  */
 async function generateTtsAudioBuffer(narration, language) {
@@ -27,6 +45,9 @@ async function generateTtsAudioBuffer(narration, language) {
     throw new Error('No narration text provided for TTS');
   }
 
+  // We don't strictly need language here, but it's fine to normalize it anyway
+  const langCode = normalizeLanguageToIso(language);
+
   // OpenAI TTS endpoint: /v1/audio/speech
   const resp = await fetch('https://api.openai.com/v1/audio/speech', {
     method: 'POST',
@@ -38,7 +59,8 @@ async function generateTtsAudioBuffer(narration, language) {
       model: TTS_MODEL,
       voice: TTS_VOICE,
       input: text,
-      // Optional: language, format, etc. You can add as needed.
+      // If you ever want to pass language explicitly, use langCode
+      // language: langCode,
     }),
   });
 
@@ -76,6 +98,9 @@ async function buildCaptionsFromAudio(audioBuffer, language) {
     throw new Error('Missing OPENAI_API_KEY');
   }
 
+  // 🔑 Normalize to ISO-639-1 (fixes the "Invalid language 'english'" error)
+  const langCode = normalizeLanguageToIso(language);
+
   // Create a FormData with the audio file
   const form = new FormData();
   // Whisper likes a File/Blob; Node 18 has Blob/File via undici
@@ -83,8 +108,9 @@ async function buildCaptionsFromAudio(audioBuffer, language) {
   form.append('file', audioBlob, 'voiceover.mp3');
   form.append('model', STT_MODEL);
   form.append('response_format', 'verbose_json');
-  if (language) {
-    form.append('language', language);
+
+  if (langCode) {
+    form.append('language', langCode);
   }
 
   const resp = await fetch('https://api.openai.com/v1/audio/transcriptions', {
@@ -108,11 +134,13 @@ async function buildCaptionsFromAudio(audioBuffer, language) {
   }
 
   // Map Whisper segments → caption chunks
-  const captions = data.segments.map((seg) => ({
-    start: typeof seg.start === 'number' ? seg.start : 0,
-    end:   typeof seg.end === 'number'   ? seg.end   : 0,
-    text:  (seg.text || '').trim(),
-  })).filter(c => c.text);
+  const captions = data.segments
+    .map((seg) => ({
+      start: typeof seg.start === 'number' ? seg.start : 0,
+      end:   typeof seg.end === 'number'   ? seg.end   : 0,
+      text:  (seg.text || '').trim(),
+    }))
+    .filter((c) => c.text);
 
   return captions;
 }
@@ -135,7 +163,8 @@ module.exports = async (req, res) => {
         : (req.body || {});
 
     const narration = (body.narration || '').trim();
-    const language  = (body.language || 'en').trim();
+    const rawLanguage = (body.language || 'en').trim();
+    const language = normalizeLanguageToIso(rawLanguage);
 
     if (!narration) {
       return res.status(400).json({ error: 'MISSING_NARRATION' });
@@ -143,7 +172,8 @@ module.exports = async (req, res) => {
 
     console.log('[VOICE_CAPTIONS] INPUT', {
       narrationLen: narration.length,
-      language,
+      rawLanguage,
+      languageIso: language,
     });
 
     // 1) TTS → audio buffer
@@ -165,6 +195,7 @@ module.exports = async (req, res) => {
       ok: true,
       voiceUrl,
       captions,
+      language,     // ISO code actually used
     });
   } catch (err) {
     console.error('[VOICE_CAPTIONS] SERVER_ERROR', err);
