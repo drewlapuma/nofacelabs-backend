@@ -151,6 +151,7 @@ Visual style: ${styleChunk}, ${ratioText}, no text, no subtitles, no user interf
 
 /**
  * Call Stability's image API for a single prompt.
+ * Mirrors the curl call that returned Status 200.
  * Uses multipart/form-data (required by Stability) and returns a Buffer.
  */
 async function generateStabilityImageBuffer(prompt, { aspectRatio = '9:16' } = {}) {
@@ -158,20 +159,21 @@ async function generateStabilityImageBuffer(prompt, { aspectRatio = '9:16' } = {
     throw new Error('STABILITY_API_KEY not set');
   }
 
+  // Endpoint path is always /sd3; model variant is passed in the form
   const url = 'https://api.stability.ai/v2beta/stable-image/generate/sd3';
 
   const form = new FormData();
+  form.append('model', STABILITY_IMAGE_MODEL || 'sd3.5-medium');
   form.append('prompt', prompt);
   form.append(
     'aspect_ratio',
-    aspectRatio === '9:16' ? '9:16' : aspectRatio === '1:1' ? '1:1' : '16:9'
+    aspectRatio === '9:16' ? '9:16'
+      : aspectRatio === '1:1' ? '1:1'
+      : '16:9'
   );
   form.append('output_format', 'png');
-  form.append('model', STABILITY_IMAGE_MODEL);
 
-  // Stylized but not comic-strip; works well with your prompt.
-  form.append('style_preset', 'digital-art');
-
+  // If you're using an sd3.x model, Stability likes this for text→image
   if (STABILITY_IMAGE_MODEL.startsWith('sd3')) {
     form.append('mode', 'text-to-image');
   }
@@ -233,6 +235,10 @@ async function generateStabilityImageUrlsForBeats({
       sceneIndex: i,
       aspectRatio,
     });
+
+    console.log('================ PROMPT_BEAT_' + i + ' ================');
+    console.log(prompt);
+    console.log('=================================================');
 
     try {
       console.log(`[STABILITY] Generating image for Beat ${i}/${beatCount}`);
@@ -452,7 +458,6 @@ module.exports = async function handler(req, res) {
       if (captions.length) {
         // JSON form for your captions layer
         mods.Captions_JSON = JSON.stringify(captions);
-        // If you ever want SRT too, we can add a captionsToSrt() helper and Captions_SRT here
       }
     }
 
