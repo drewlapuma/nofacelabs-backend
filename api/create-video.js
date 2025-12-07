@@ -457,7 +457,7 @@ module.exports = async function handler(req, res) {
 
       if (captions.length) {
         // JSON form for your captions layer
-        mods.Captions_JSON = JSON.stringify(captions);
+        mods.['Captions_JSON.text'] = JSON.stringify(captions);
       }
     }
 
