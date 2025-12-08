@@ -1,18 +1,18 @@
 // api/create-video.js  (CommonJS, Node 18)
 const https = require('https');
 
-const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN || '*';
-const IMAGE_PROVIDER = (process.env.IMAGE_PROVIDER || 'stability').toLowerCase();
+const ALLOW_ORIGIN      = process.env.ALLOW_ORIGIN || '*';
+const IMAGE_PROVIDER    = (process.env.IMAGE_PROVIDER || 'stability').toLowerCase();
 const STABILITY_API_KEY = process.env.STABILITY_API_KEY;
 
 // One of:
 // 'sd3.5-large', 'sd3.5-large-turbo', 'sd3.5-medium', 'sd3.5-flash'
-const STABILITY_IMAGE_MODEL = process.env.STABILITY_IMAGE_MODEL || 'sd3.5-large-turbo';
+const STABILITY_IMAGE_MODEL = process.env.STABILITY_IMAGE_MODEL || 'sd3.5-medium';
 
 // Beat / timing settings
-const MIN_BEATS = 8;           // never fewer than this
-const MAX_BEATS = 24;          // must match how many Beat groups your template supports
-const SECONDS_PER_BEAT = 3.0;  // approx seconds per scene (you set beats to 3s in Creatomate)
+const MIN_BEATS        = 8;      // never fewer than this
+const MAX_BEATS        = 24;     // must match how many Beat groups your template supports
+const SECONDS_PER_BEAT = 3.0;    // approx seconds per scene (your beats are 3s in Creatomate)
 
 // Animation variants in your Creatomate template
 // For each beat you have layers:
@@ -80,9 +80,9 @@ function splitNarrationIntoBeats(narration, beatCount) {
   const text = (narration || '').trim();
   if (!text || beatCount <= 0) return [];
 
-  const words = text.split(/\s+/);
+  const words      = text.split(/\s+/);
   const totalWords = words.length;
-  const chunkSize = Math.max(1, Math.ceil(totalWords / beatCount));
+  const chunkSize  = Math.max(1, Math.ceil(totalWords / beatCount));
 
   const beats = [];
   for (let i = 0; i < totalWords; i += chunkSize) {
@@ -227,7 +227,7 @@ async function generateStabilityImageUrlsForBeats({
 
   for (let i = 1; i <= beatCount; i++) {
     const beatText = beatTexts[i - 1] || beatTexts[beatTexts.length - 1] || '';
-    const prompt = buildScenePrompt({
+    const prompt   = buildScenePrompt({
       beatText,
       artStyle,
       sceneIndex: i,
@@ -243,7 +243,10 @@ async function generateStabilityImageUrlsForBeats({
 
       urls.push(url);
     } catch (err) {
-      console.error(`[STABILITY] Beat ${i} failed, leaving this beat without an image`, err);
+      console.error(
+        `[STABILITY] Beat ${i} failed, leaving this beat without an image`,
+        err
+      );
       urls.push(null); // This beat may show nothing if Creatomate has no fallback
     }
   }
@@ -256,42 +259,20 @@ async function generateStabilityImageUrlsForBeats({
  * so that no two consecutive beats use the same variant.
  */
 function buildVariantSequence(beatCount) {
-  const seq = [];
-  let last = null;
+  const seq  = [];
+  let last   = null;
 
   for (let i = 0; i < beatCount; i++) {
     // simple round-robin that avoids repeating the same variant back-to-back
     const available = ANIMATION_VARIANTS.filter((v) => v !== last);
-    const idx = i % available.length;
-    const chosen = available[idx];
+    const idx       = i % available.length;
+    const chosen    = available[idx];
 
     seq.push(chosen);
     last = chosen;
   }
 
   return seq;
-}
-
-/**
- * Call our /api/voice-captions route to get voiceUrl + captions.
- */
-async function getVoiceAndCaptions(baseUrl, narration, language) {
-  const resp = await fetch(`${baseUrl}/api/voice-captions`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ narration, language }),
-  });
-
-  const data = await resp.json().catch(() => ({}));
-  if (!resp.ok || !data.ok) {
-    console.error('[CREATE_VIDEO] voice-captions failed', resp.status, data);
-    throw new Error('VOICE_CAPTIONS_FAILED');
-  }
-
-  const voiceUrl = data.voiceUrl;
-  const captions = Array.isArray(data.captions) ? data.captions : [];
-
-  return { voiceUrl, captions };
 }
 
 // ----------------- MAIN HANDLER -----------------
@@ -309,14 +290,13 @@ module.exports = async function handler(req, res) {
         : req.body || {};
 
     const {
-      storyType = 'Random AI story',
-      artStyle = 'Scary toon',   // Webflow UI can override
-      language = 'English',
-      voice = 'Adam',
-      aspectRatio = '9:16',
-      customPrompt = '',
-      durationRange = '60-90', // "30-60" or "60-90"
-      voice_url = null,        // legacy / manual override if you ever use it
+      storyType     = 'Random AI story',
+      artStyle      = 'Scary toon',   // Webflow UI can override
+      language      = 'English',
+      voice         = 'Adam',
+      aspectRatio   = '9:16',
+      customPrompt  = '',
+      durationRange = '60-90',        // "30-60" or "60-90"
     } = body;
 
     if (!process.env.CREATOMATE_API_KEY) {
@@ -326,7 +306,7 @@ module.exports = async function handler(req, res) {
     // Pick template ID by aspect ratio
     const templateMap = {
       '9:16': process.env.CREATO_TEMPLATE_916,
-      '1:1': process.env.CREATO_TEMPLATE_11,
+      '1:1' : process.env.CREATO_TEMPLATE_11,
       '16:9': process.env.CREATO_TEMPLATE_169,
     };
     const template_id = (templateMap[aspectRatio] || '').trim();
@@ -338,7 +318,7 @@ module.exports = async function handler(req, res) {
     }
 
     // 1) Get narration from generate-script
-    const baseUrl = `https://${req.headers.host}`;
+    const baseUrl   = `https://${req.headers.host}`;
     const scriptUrl = `${baseUrl}/api/generate-script`;
 
     const scriptResp = await fetch(scriptUrl, {
@@ -368,23 +348,12 @@ module.exports = async function handler(req, res) {
         .json({ error: 'SCRIPT_EMPTY', details: scriptResp });
     }
 
-    // 2) Generate voice + precise captions (TTS + STT via our own endpoint)
-    let voiceUrl = null;
-    let captions = [];
-    try {
-      const vc = await getVoiceAndCaptions(baseUrl, narration, language);
-      voiceUrl = vc.voiceUrl;
-      captions = vc.captions || [];
-    } catch (e) {
-      console.error('[CREATE_VIDEO] getVoiceAndCaptions failed, continuing without captions', e);
-    }
-
-    // 3) Estimate narration time & decide beats
+    // 2) Estimate narration time & decide beats
     const speechSec = estimateSpeechSeconds(narration);
 
     let targetSec = Math.round(speechSec + 2);
-    let minSec = 60;
-    let maxSec = 90;
+    let minSec    = 60;
+    let maxSec    = 90;
     if (durationRange === '30-60') {
       minSec = 30;
       maxSec = 60;
@@ -411,10 +380,10 @@ module.exports = async function handler(req, res) {
       SECONDS_PER_BEAT,
     });
 
-    // 4) Build beatTexts based on narration and beatCount
+    // 3) Build beatTexts based on narration and beatCount
     const beatTexts = splitNarrationIntoBeats(narration, beatCount);
 
-    // 5) Generate Stability images for the beats we are actually using
+    // 4) Generate Stability images for the beats we are actually using
     let stabilityImageUrls = [];
     if (IMAGE_PROVIDER === 'stability') {
       try {
@@ -433,39 +402,26 @@ module.exports = async function handler(req, res) {
       }
     }
 
-    // 6) Build a non-repeating animation sequence (no same variant twice in a row)
+    // 5) Build a non-repeating animation sequence (no same variant twice in a row)
     const variantSequence = buildVariantSequence(beatCount);
 
-    // 7) Build Creatomate modifications
+    // 6) Build Creatomate modifications
     const mods = {
-      Narration: narration,      // still useful for labels / debugging
-      Voiceover: narration,      // optional — your template can ignore this now
+      Narration: narration,   // used by your existing TTS layer in Creatomate
+      Voiceover: narration,   // you can bind this wherever you like
       VoiceLabel: voice,
       LanguageLabel: language,
       StoryTypeLabel: storyType,
     };
-
-    // Prefer generated voice + captions
-    if (voiceUrl) {
-      mods.VoiceUrl = voiceUrl; // 🔑 dynamic key in your audio layer
-
-      if (captions.length) {
-        // JSON form for your captions layer
-        mods.Captions_JSON = JSON.stringify(captions);
-        // If you ever want SRT too, we can add a captionsToSrt() helper and Captions_SRT here
-      }
-    }
-
-    // Legacy manual override if you ever supply a voice_url directly
-    if (voice_url) {
-      mods.voice_url = voice_url;
-    }
 
     const style = artStyle || 'Scary toon';
 
     // Fill active beats 1..beatCount
     for (let i = 1; i <= beatCount; i++) {
       const beatText = beatTexts[i - 1] || '';
+      // Caption = the actual text chunk for this beat
+      mods[`Beat${i}_Caption`] = beatText;
+
       let imageUrl = null;
 
       if (IMAGE_PROVIDER === 'stability' && stabilityImageUrls.length >= i) {
@@ -497,6 +453,7 @@ module.exports = async function handler(req, res) {
     // Explicitly clear any beats above beatCount up to MAX_BEATS,
     // so unused beats don't accidentally show anything.
     for (let i = beatCount + 1; i <= MAX_BEATS; i++) {
+      mods[`Beat${i}_Caption`] = '';
       for (const variant of ANIMATION_VARIANTS) {
         const imgKey = `Beat${i}_${variant}_Image`;
         mods[imgKey] = null;
@@ -518,11 +475,9 @@ module.exports = async function handler(req, res) {
       MAX_BEATS,
       imageProvider: IMAGE_PROVIDER,
       stabilityImagesGenerated: stabilityImageUrls.length,
-      hasVoiceUrl: !!mods.VoiceUrl,
-      hasCaptionsJson: !!mods.Captions_JSON,
     });
 
-    // 8) Call Creatomate
+    // 7) Call Creatomate
     const resp = await postJSON(
       'https://api.creatomate.com/v1/renders',
       { Authorization: `Bearer ${process.env.CREATOMATE_API_KEY}` },
