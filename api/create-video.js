@@ -381,6 +381,7 @@ module.exports = async function handler(req, res) {
     try {
       captions = await getCaptionsOnly(baseUrl, narration, language);
       console.log('[CREATE_VIDEO] CAPTIONS_COUNT', captions.length);
+      console.log('[CREATE_VIDEO] CAPTIONS_SAMPLE', captions.slice(0, 3));
     } catch (e) {
       console.error(
         '[CREATE_VIDEO] getCaptionsOnly failed, continuing without captions',
@@ -456,18 +457,20 @@ module.exports = async function handler(req, res) {
       StoryTypeLabel: storyType,
     };
 
-    // 🔑 Hook up the JSON captions for your Captions_JSON.text layer
-    // The layer is bound to Captions_JSON.text, so we must send a STRING.
+    // 🔑 Hook up the JSON captions for your Captions_JSON / Captions_JSON.text layer
+    // We send to BOTH keys so whichever you wired will get it.
     if (captions.length) {
-      mods['Captions_JSON.text'] = JSON.stringify(captions);
+      const capStr = JSON.stringify(captions);
+      mods.Captions_JSON = capStr;
+      mods['Captions_JSON.text'] = capStr;
     } else {
-      // still give it a valid string so Creatomate doesn't complain
+      mods.Captions_JSON = '[]';
       mods['Captions_JSON.text'] = '[]';
     }
 
     const style = artStyle || 'Scary toon';
 
-    // Fill active beats 1..beatCount (caption-per-beat + image animations)
+    // Fill active beats 1..beatCount (beat captions + image animations)
     for (let i = 1; i <= beatCount; i++) {
       const beatText = beatTexts[i - 1] || '';
 
