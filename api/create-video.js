@@ -7,12 +7,13 @@ const STABILITY_API_KEY = process.env.STABILITY_API_KEY;
 
 // One of:
 // 'sd3.5-large', 'sd3.5-large-turbo', 'sd3.5-medium', 'sd3.5-flash'
-const STABILITY_IMAGE_MODEL = process.env.STABILITY_IMAGE_MODEL || 'sd3.5-medium';
+const STABILITY_IMAGE_MODEL =
+  process.env.STABILITY_IMAGE_MODEL || 'sd3.5-medium';
 
 // Beat / timing settings
-const MIN_BEATS = 8;           // never fewer than this
-const MAX_BEATS = 24;          // must match how many Beat groups your template supports
-const SECONDS_PER_BEAT = 3.0;  // approx seconds per scene (you set beats to 3s in Creatomate)
+const MIN_BEATS = 8; // never fewer than this
+const MAX_BEATS = 24; // must match how many Beat groups your template supports
+const SECONDS_PER_BEAT = 3.0; // approx seconds per scene (you set beats to 3s in Creatomate)
 
 // Animation variants in your Creatomate template
 // For each beat you have layers:
@@ -151,29 +152,30 @@ Visual style: ${styleChunk}, ${ratioText}, no text, no subtitles, no user interf
 
 /**
  * Call Stability's image API for a single prompt.
- * Mirrors the curl call that returned Status 200.
  * Uses multipart/form-data (required by Stability) and returns a Buffer.
  */
-async function generateStabilityImageBuffer(prompt, { aspectRatio = '9:16' } = {}) {
+async function generateStabilityImageBuffer(
+  prompt,
+  { aspectRatio = '9:16' } = {}
+) {
   if (!STABILITY_API_KEY) {
     throw new Error('STABILITY_API_KEY not set');
   }
 
-  // Endpoint path is always /sd3; model variant is passed in the form
   const url = 'https://api.stability.ai/v2beta/stable-image/generate/sd3';
 
   const form = new FormData();
-  form.append('model', STABILITY_IMAGE_MODEL || 'sd3.5-medium');
   form.append('prompt', prompt);
   form.append(
     'aspect_ratio',
-    aspectRatio === '9:16' ? '9:16'
-      : aspectRatio === '1:1' ? '1:1'
-      : '16:9'
+    aspectRatio === '9:16' ? '9:16' : aspectRatio === '1:1' ? '1:1' : '16:9'
   );
   form.append('output_format', 'png');
+  form.append('model', STABILITY_IMAGE_MODEL);
 
-  // If you're using an sd3.x model, Stability likes this for text→image
+  // Stylized but not comic-strip; works well with your prompt.
+  form.append('style_preset', 'digital-art');
+
   if (STABILITY_IMAGE_MODEL.startsWith('sd3')) {
     form.append('mode', 'text-to-image');
   }
@@ -236,20 +238,21 @@ async function generateStabilityImageUrlsForBeats({
       aspectRatio,
     });
 
-    console.log('================ PROMPT_BEAT_' + i + ' ================');
-    console.log(prompt);
-    console.log('=================================================');
-
     try {
       console.log(`[STABILITY] Generating image for Beat ${i}/${beatCount}`);
-      const buffer = await generateStabilityImageBuffer(prompt, { aspectRatio });
+      const buffer = await generateStabilityImageBuffer(prompt, {
+        aspectRatio,
+      });
 
       const key = `stability-scenes/${Date.now()}-beat-${i}.png`;
       const url = await uploadImageBufferToBlob(buffer, key);
 
       urls.push(url);
     } catch (err) {
-      console.error(`[STABILITY] Beat ${i} failed, leaving this beat without an image`, err);
+      console.error(
+        `[STABILITY] Beat ${i} failed, leaving this beat without an image`,
+        err
+      );
       urls.push(null); // This beat may show nothing if Creatomate has no fallback
     }
   }
@@ -316,13 +319,13 @@ module.exports = async function handler(req, res) {
 
     const {
       storyType = 'Random AI story',
-      artStyle = 'Scary toon',   // Webflow UI can override
+      artStyle = 'Scary toon', // Webflow UI can override
       language = 'English',
       voice = 'Adam',
       aspectRatio = '9:16',
       customPrompt = '',
       durationRange = '60-90', // "30-60" or "60-90"
-      voice_url = null,        // legacy / manual override if you ever use it
+      voice_url = null, // legacy / manual override if you ever use it
     } = body;
 
     if (!process.env.CREATOMATE_API_KEY) {
@@ -382,7 +385,10 @@ module.exports = async function handler(req, res) {
       voiceUrl = vc.voiceUrl;
       captions = vc.captions || [];
     } catch (e) {
-      console.error('[CREATE_VIDEO] getVoiceAndCaptions failed, continuing without captions', e);
+      console.error(
+        '[CREATE_VIDEO] getVoiceAndCaptions failed, continuing without captions',
+        e
+      );
     }
 
     // 3) Estimate narration time & decide beats
@@ -444,8 +450,8 @@ module.exports = async function handler(req, res) {
 
     // 7) Build Creatomate modifications
     const mods = {
-      Narration: narration,      // still useful for labels / debugging
-      Voiceover: narration,      // optional — your template can ignore this now
+      Narration: narration, // still useful for labels / debugging
+      Voiceover: narration, // optional — your template can ignore this now
       VoiceLabel: voice,
       LanguageLabel: language,
       StoryTypeLabel: storyType,
@@ -456,8 +462,13 @@ module.exports = async function handler(req, res) {
       mods.VoiceUrl = voiceUrl; // 🔑 dynamic key in your audio layer
 
       if (captions.length) {
-        // JSON form for your captions layer
-        mods['Captions_JSON.text'] = JSON.stringify(captions);
+        const captionsJson = JSON.stringify(captions);
+        // bind this to the Text -> Dynamic key "Captions_JSON.text"
+        mods['Captions_JSON.text'] = captionsJson;
+        console.log('[CREATE_VIDEO] CAPTIONS_DEBUG', {
+          type: typeof captionsJson,
+          length: captionsJson.length,
+        });
       }
     }
 
@@ -524,7 +535,7 @@ module.exports = async function handler(req, res) {
       imageProvider: IMAGE_PROVIDER,
       stabilityImagesGenerated: stabilityImageUrls.length,
       hasVoiceUrl: !!mods.VoiceUrl,
-      hasCaptionsJson: !!mods.Captions_JSON,
+      hasCaptionsJson: !!mods['Captions_JSON.text'],
     });
 
     // 8) Call Creatomate
