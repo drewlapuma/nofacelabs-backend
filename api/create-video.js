@@ -1,18 +1,18 @@
 // api/create-video.js  (CommonJS, Node 18)
 const https = require('https');
 
-const ALLOW_ORIGIN   = process.env.ALLOW_ORIGIN || '*';
-const IMAGE_PROVIDER = (process.env.IMAGE_PROVIDER || 'stability').toLowerCase();
-const STABILITY_API_KEY = process.env.STABILITY_API_KEY;
+const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN || '*';
+const IMAGE_PROVIDER = (process.env.IMAGE_PROVIDER || 'krea').toLowerCase();
 
-// One of:
-// 'sd3.5-large', 'sd3.5-large-turbo', 'sd3.5-medium', 'sd3.5-flash'
-const STABILITY_IMAGE_MODEL = process.env.STABILITY_IMAGE_MODEL || 'sd3.5-medium';
+// Krea config
+const KREA_API_KEY = process.env.KREA_API_KEY;
+const KREA_API_URL =
+  process.env.KREA_API_URL || 'https://api.krea.ai/v1/images'; // <-- adjust to real endpoint if different
 
 // Beat / timing settings
-const MIN_BEATS        = 8;    // never fewer than this
-const MAX_BEATS        = 24;   // must match how many Beat groups your template supports
-const SECONDS_PER_BEAT = 3.0;  // approx seconds per scene (you set beats to 3s in Creatomate)
+const MIN_BEATS = 8;           // never fewer than this
+const MAX_BEATS = 24;          // must match how many Beat groups your template supports
+const SECONDS_PER_BEAT = 3.0;  // approx seconds per scene (your beats are 3s in Creatomate)
 
 // Animation variants in your Creatomate template
 // For each beat you have layers:
@@ -85,7 +85,7 @@ function splitNarrationIntoBeats(narration, beatCount) {
   const chunkSize = Math.max(1, Math.ceil(totalWords / beatCount));
 
   const beats = [];
-  for (let i = 0; i < totalWords; i += chunkSize; i += chunkSize) {
+  for (let i = 0; i < totalWords; i += chunkSize) {
     const chunkWords = words.slice(i, i + chunkSize);
     beats.push(chunkWords.join(' '));
   }
@@ -95,7 +95,7 @@ function splitNarrationIntoBeats(narration, beatCount) {
     beats.length = beatCount;
   }
 
-  // If fewer (edge cases), pad last one
+  // If fewer (weird edge cases), pad last one
   while (beats.length < beatCount) {
     beats.push(beats[beats.length - 1] || text);
   }
@@ -112,7 +112,7 @@ function buildScenePrompt({ beatText, artStyle, sceneIndex, aspectRatio }) {
 
   let styleChunk;
 
-  // 🔥 Scary toon style — TikTok cartoon spec
+  // 🔥 Scary toon style — your TikTok cartoon spec
   if (styleRaw.includes('scary') || styleRaw.includes('toon')) {
     styleChunk =
       'Cartoon storytelling illustration in the style of viral TikTok horror story animations: ' +
@@ -150,72 +150,66 @@ Visual style: ${styleChunk}, ${ratioText}, no text, no subtitles, no user interf
 }
 
 /**
- * Call Stability's image API for a single prompt.
- * Uses multipart/form-data (required by Stability) and returns a Buffer.
+ * Call Krea's image API for a single prompt and return an image URL.
+ * NOTE: You MUST adjust the payload + response-parsing to match Krea's official docs.
  */
-async function generateStabilityImageBuffer(prompt, { aspectRatio = '9:16' } = {}) {
-  if (!STABILITY_API_KEY) {
-    throw new Error('STABILITY_API_KEY not set');
+async function generateKreaImageUrl(prompt, { aspectRatio = '9:16' } = {}) {
+  if (!KREA_API_KEY) {
+    throw new Error('KREA_API_KEY not set');
   }
 
-  const url = 'https://api.stability.ai/v2beta/stable-image/generate/sd3';
+  // 🔁 Adjust this payload to match Krea's API
+  const payload = {
+    prompt,
+    aspect_ratio:
+      aspectRatio === '9:16'
+        ? '9:16'
+        : aspectRatio === '1:1'
+        ? '1:1'
+        : '16:9',
+    // You can add model/style here if Krea supports it, e.g.:
+    // model: process.env.KREA_MODEL || 'sdxl',
+    // style: 'cartoon' // example
+  };
 
-  const form = new FormData();
-  form.append('prompt', prompt);
-  form.append(
-    'aspect_ratio',
-    aspectRatio === '9:16' ? '9:16' : aspectRatio === '1:1' ? '1:1' : '16:9'
-  );
-  form.append('output_format', 'png');
-  form.append('model', STABILITY_IMAGE_MODEL);
-  form.append('style_preset', 'digital-art');
-
-  if (STABILITY_IMAGE_MODEL.startsWith('sd3')) {
-    form.append('mode', 'text-to-image');
-  }
-
-  const resp = await fetch(url, {
+  const resp = await fetch(KREA_API_URL, {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${STABILITY_API_KEY}`,
-      Accept: 'image/*',
+      Authorization: `Bearer ${KREA_API_KEY}`,
+      'Content-Type': 'application/json',
     },
-    body: form,
+    body: JSON.stringify(payload),
   });
+
+  const data = await resp.json().catch(() => ({}));
 
   if (!resp.ok) {
-    const errorText = await resp.text().catch(() => '');
-    let parsed;
-    try {
-      parsed = JSON.parse(errorText);
-    } catch {
-      parsed = { raw: errorText };
-    }
-    console.error('[STABILITY_ERROR]', resp.status, parsed);
-    throw new Error(`Stability image error: ${resp.status}`);
+    console.error('[KREA_ERROR]', resp.status, data);
+    throw new Error(`Krea image error: ${resp.status}`);
   }
 
-  const arrayBuffer = await resp.arrayBuffer();
-  return Buffer.from(arrayBuffer);
-}
+  // 🔁 You MUST adapt this bit to the exact shape of Krea’s response.
+  // I’m being defensive and checking a few common patterns:
+  const url =
+    data?.images?.[0]?.url ||
+    data?.data?.[0]?.url ||
+    data?.output?.[0]?.image_url ||
+    data?.image_url ||
+    null;
 
-/**
- * Upload an image buffer to Vercel Blob and return a public URL.
- */
-async function uploadImageBufferToBlob(buffer, key) {
-  const { put } = await import('@vercel/blob');
-  const { url } = await put(key, buffer, {
-    access: 'public',
-    addRandomSuffix: false,
-  });
+  if (!url) {
+    console.error('[KREA_ERROR] No image URL in response', data);
+    throw new Error('Krea image missing URL');
+  }
+
   return url;
 }
 
 /**
- * Generate one Stability image per beat (using beatTexts) and return an array of URLs.
+ * Generate one Krea image per beat (using beatTexts) and return an array of URLs.
  * On error we push null for that beat (no reuse).
  */
-async function generateStabilityImageUrlsForBeats({
+async function generateKreaImageUrlsForBeats({
   beatCount,
   beatTexts,
   artStyle,
@@ -224,7 +218,8 @@ async function generateStabilityImageUrlsForBeats({
   const urls = [];
 
   for (let i = 1; i <= beatCount; i++) {
-    const beatText = beatTexts[i - 1] || beatTexts[beatTexts.length - 1] || '';
+    const beatText =
+      beatTexts[i - 1] || beatTexts[beatTexts.length - 1] || '';
     const prompt = buildScenePrompt({
       beatText,
       artStyle,
@@ -232,20 +227,20 @@ async function generateStabilityImageUrlsForBeats({
       aspectRatio,
     });
 
+    console.log('================ PROMPT_BEAT_%d ================', i);
+    console.log(prompt);
+    console.log('=================================================');
+
     try {
-      console.log(`[STABILITY] Generating image for Beat ${i}/${beatCount}`);
-      const buffer = await generateStabilityImageBuffer(prompt, { aspectRatio });
-
-      const key = `stability-scenes/${Date.now()}-beat-${i}.png`;
-      const url = await uploadImageBufferToBlob(buffer, key);
-
+      console.log(`[KREA] Generating image for Beat ${i}/${beatCount}`);
+      const url = await generateKreaImageUrl(prompt, { aspectRatio });
       urls.push(url);
     } catch (err) {
       console.error(
-        `[STABILITY] Beat ${i} failed, leaving this beat without an image`,
+        `[KREA] Beat ${i} failed, leaving this beat without an image`,
         err
       );
-      urls.push(null);
+      urls.push(null); // This beat may show nothing if Creatomate has no fallback
     }
   }
 
@@ -261,6 +256,7 @@ function buildVariantSequence(beatCount) {
   let last = null;
 
   for (let i = 0; i < beatCount; i++) {
+    // simple round-robin that avoids repeating the same variant back-to-back
     const available = ANIMATION_VARIANTS.filter((v) => v !== last);
     const idx = i % available.length;
     const chosen = available[idx];
@@ -274,12 +270,13 @@ function buildVariantSequence(beatCount) {
 
 /**
  * Call our /api/voice-captions route to get voiceUrl + captions.
+ * (You already have this route implemented in api/voice-captions.js)
  */
-async function getVoiceAndCaptions(baseUrl, narration, languageIso) {
+async function getVoiceAndCaptions(baseUrl, narration, language) {
   const resp = await fetch(`${baseUrl}/api/voice-captions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ narration, language: languageIso }),
+    body: JSON.stringify({ narration, language }),
   });
 
   const data = await resp.json().catch(() => ({}));
@@ -309,24 +306,26 @@ module.exports = async function handler(req, res) {
         : req.body || {};
 
     const {
-      storyType     = 'Random AI story',
-      artStyle      = 'Scary toon',   // Webflow UI can override
-      language      = 'English',      // UI label (we’ll still send 'en' to STT)
-      voice         = 'Adam',
-      aspectRatio   = '9:16',
-      customPrompt  = '',
-      durationRange = '60-90',        // "30-60" or "60-90"
-      voice_url     = null,           // legacy / manual override if you ever use it
+      storyType = 'Random AI story',
+      artStyle = 'Scary toon', // Webflow UI can override
+      language = 'English',
+      voice = 'Adam',          // still used only as a label
+      aspectRatio = '9:16',
+      customPrompt = '',
+      durationRange = '60-90', // "30-60" or "60-90"
+      voice_url = null,        // legacy / manual override if you ever use it
     } = body;
 
     if (!process.env.CREATOMATE_API_KEY) {
-      return res.status(500).json({ error: 'MISSING_CREATOMATE_API_KEY' });
+      return res
+        .status(500)
+        .json({ error: 'MISSING_CREATOMATE_API_KEY' });
     }
 
     // Pick template ID by aspect ratio
     const templateMap = {
       '9:16': process.env.CREATO_TEMPLATE_916,
-      '1:1':  process.env.CREATO_TEMPLATE_11,
+      '1:1': process.env.CREATO_TEMPLATE_11,
       '16:9': process.env.CREATO_TEMPLATE_169,
     };
     const template_id = (templateMap[aspectRatio] || '').trim();
@@ -338,7 +337,7 @@ module.exports = async function handler(req, res) {
     }
 
     // 1) Get narration from generate-script
-    const baseUrl   = `https://${req.headers.host}`;
+    const baseUrl = `https://${req.headers.host}`;
     const scriptUrl = `${baseUrl}/api/generate-script`;
 
     const scriptResp = await fetch(scriptUrl, {
@@ -368,20 +367,13 @@ module.exports = async function handler(req, res) {
         .json({ error: 'SCRIPT_EMPTY', details: scriptResp });
     }
 
-    // 2) Generate voice + precise captions (TTS + STT via our endpoint)
+    // 2) Generate voice + precise captions (TTS + STT via our own endpoint)
     let voiceUrl = null;
     let captions = [];
     try {
-      // Hard-code STT language to ISO 'en' so Whisper doesn’t error on "English"
-      const sttLanguage = 'en';
-      const vc = await getVoiceAndCaptions(baseUrl, narration, sttLanguage);
+      const vc = await getVoiceAndCaptions(baseUrl, narration, language);
       voiceUrl = vc.voiceUrl;
       captions = vc.captions || [];
-
-      console.log('[CREATE_VIDEO] CAPTIONS_DEBUG', {
-        captionCount: captions.length,
-        sample: captions[0] || null,
-      });
     } catch (e) {
       console.error(
         '[CREATE_VIDEO] getVoiceAndCaptions failed, continuing without captions',
@@ -424,11 +416,11 @@ module.exports = async function handler(req, res) {
     // 4) Build beatTexts based on narration and beatCount
     const beatTexts = splitNarrationIntoBeats(narration, beatCount);
 
-    // 5) Generate Stability images for the beats we are actually using
-    let stabilityImageUrls = [];
-    if (IMAGE_PROVIDER === 'stability') {
+    // 5) Generate Krea images for the beats we are actually using
+    let imageUrls = [];
+    if (IMAGE_PROVIDER === 'krea') {
       try {
-        stabilityImageUrls = await generateStabilityImageUrlsForBeats({
+        imageUrls = await generateKreaImageUrlsForBeats({
           beatCount,
           beatTexts,
           artStyle,
@@ -436,10 +428,10 @@ module.exports = async function handler(req, res) {
         });
       } catch (err) {
         console.error(
-          '[CREATE_VIDEO] STABILITY_BATCH_FAILED, falling back to prompts only',
+          '[CREATE_VIDEO] KREA_BATCH_FAILED, falling back to prompts only',
           err
         );
-        stabilityImageUrls = [];
+        imageUrls = [];
       }
     }
 
@@ -448,26 +440,25 @@ module.exports = async function handler(req, res) {
 
     // 7) Build Creatomate modifications
     const mods = {
-      Narration:      narration, // safe for labels / debugging
-      // ⚠️ DO NOT send Voiceover text anymore (avoids 2nd TTS track)
-      VoiceLabel:     voice,
-      LanguageLabel:  language,
+      Narration: narration, // still useful for labels / debugging
+      Voiceover: narration, // optional — template can ignore this now
+      VoiceLabel: voice,
+      LanguageLabel: language,
       StoryTypeLabel: storyType,
     };
 
     // Prefer generated voice + captions
     if (voiceUrl) {
-      mods.VoiceUrl = voiceUrl; // bound to your dynamic audio src
+      mods.VoiceUrl = voiceUrl; // 🔑 dynamic key in your audio layer
 
       if (captions.length) {
-        // Captions_JSON.text is a *string* field in the template
         mods['Captions_JSON.text'] = JSON.stringify(captions);
       }
     }
 
     // Legacy manual override if you ever supply a voice_url directly
     if (voice_url) {
-      mods.VoiceUrl = voice_url;
+      mods.voice_url = voice_url;
     }
 
     const style = artStyle || 'Scary toon';
@@ -477,8 +468,8 @@ module.exports = async function handler(req, res) {
       const beatText = beatTexts[i - 1] || '';
       let imageUrl = null;
 
-      if (IMAGE_PROVIDER === 'stability' && stabilityImageUrls.length >= i) {
-        imageUrl = stabilityImageUrls[i - 1] || null;
+      if (IMAGE_PROVIDER === 'krea' && imageUrls.length >= i) {
+        imageUrl = imageUrls[i - 1] || null;
       } else if (IMAGE_PROVIDER === 'dalle') {
         // Fallback: if you ever switch back to DALL·E-style prompts
         imageUrl = buildScenePrompt({
@@ -503,7 +494,8 @@ module.exports = async function handler(req, res) {
       }
     }
 
-    // Clear any beats above beatCount up to MAX_BEATS
+    // Explicitly clear any beats above beatCount up to MAX_BEATS,
+    // so unused beats don't accidentally show anything.
     for (let i = beatCount + 1; i <= MAX_BEATS; i++) {
       for (const variant of ANIMATION_VARIANTS) {
         const imgKey = `Beat${i}_${variant}_Image`;
@@ -515,7 +507,7 @@ module.exports = async function handler(req, res) {
       template_id,
       modifications: mods,
       output_format: 'mp4',
-      // template + audio drive final duration
+      // let the template + audio drive final duration
     };
 
     console.log('[CREATE_VIDEO] PAYLOAD_PREVIEW', {
@@ -525,7 +517,7 @@ module.exports = async function handler(req, res) {
       MIN_BEATS,
       MAX_BEATS,
       imageProvider: IMAGE_PROVIDER,
-      stabilityImagesGenerated: stabilityImageUrls.length,
+      kreaImagesGenerated: imageUrls.length,
       hasVoiceUrl: !!mods.VoiceUrl,
       hasCaptionsJson: !!mods['Captions_JSON.text'],
     });
