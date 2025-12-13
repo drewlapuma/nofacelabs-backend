@@ -7,7 +7,7 @@ const IMAGE_PROVIDER = (process.env.IMAGE_PROVIDER || 'krea').toLowerCase();
 // Krea config
 const KREA_API_KEY = process.env.KREA_API_KEY;
 const KREA_API_URL =
-  process.env.KREA_API_URL || 'https://api.krea.ai/v1/images'; // <-- adjust to real endpoint if different
+  process.env.KREA_API_URL || 'https://api.krea.ai/generate/image/bfl/flux-1-dev'; // <-- adjust to real endpoint if different
 
 // Beat / timing settings
 const MIN_BEATS = 8;           // never fewer than this
