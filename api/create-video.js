@@ -1,26 +1,19 @@
-// api/create-video.js (CommonJS, Node 18)
+// api/create-video.js (Node 18, CommonJS)
+
 const https = require('https');
 
 const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN || '*';
 const IMAGE_PROVIDER = 'krea';
 
-// Krea config
 const KREA_API_KEY = process.env.KREA_API_KEY;
+const KREA_STYLE_ID = 'tvjlqsab9'; // Creepy Toon
 const KREA_GENERATE_URL =
   'https://api.krea.ai/generate/image/bfl/flux-1-dev';
 
-// Creatomate config
-const CREATOMATE_API_KEY = process.env.CREATOMATE_API_KEY;
-
-// Beats / timing
 const MIN_BEATS = 8;
 const MAX_BEATS = 24;
-const SECONDS_PER_BEAT = 3.0;
+const SECONDS_PER_BEAT = 3;
 
-// Creepy Toon style ID (locked)
-const KREA_STYLE_ID = 'tvjlqsab9';
-
-// Animation variants (template layers must exist)
 const ANIMATION_VARIANTS = [
   'PanRight',
   'PanLeft',
@@ -29,18 +22,18 @@ const ANIMATION_VARIANTS = [
   'Zoom',
 ];
 
-// ----------------- CORS -----------------
+// ---------------- CORS ----------------
 function setCors(res) {
   res.setHeader('Access-Control-Allow-Origin', ALLOW_ORIGIN);
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 }
 
-// ----------------- Creatomate helper -----------------
-function postJSON(url, headers, bodyObj) {
+// ---------------- HTTPS JSON helper ----------------
+function postJSON(url, headers, body) {
   return new Promise((resolve, reject) => {
     const { hostname, pathname } = new URL(url);
-    const data = JSON.stringify(bodyObj);
+    const data = JSON.stringify(body);
 
     const req = https.request(
       {
@@ -48,7 +41,7 @@ function postJSON(url, headers, bodyObj) {
         path: pathname,
         method: 'POST',
         headers: {
-          Authorization: headers.Authorization,
+          ...headers,
           'Content-Type': 'application/json',
           'Content-Length': Buffer.byteLength(data),
         },
@@ -72,19 +65,19 @@ function postJSON(url, headers, bodyObj) {
   });
 }
 
-// ----------------- Helpers -----------------
+// ---------------- Timing helpers ----------------
 function estimateSpeechSeconds(text) {
   const words = (text.match(/\S+/g) || []).length;
   return words / 2.5;
 }
 
-function splitNarrationIntoBeats(text, beatCount) {
-  const words = text.split(/\s+/);
-  const chunkSize = Math.ceil(words.length / beatCount);
-  const beats = [];
+function splitNarrationIntoBeats(narration, beatCount) {
+  const words = narration.split(/\s+/);
+  const chunk = Math.ceil(words.length / beatCount);
 
-  for (let i = 0; i < words.length; i += chunkSize) {
-    beats.push(words.slice(i, i + chunkSize).join(' '));
+  const beats = [];
+  for (let i = 0; i < words.length; i += chunk) {
+    beats.push(words.slice(i, i + chunk).join(' '));
   }
 
   while (beats.length < beatCount) {
@@ -94,23 +87,21 @@ function splitNarrationIntoBeats(text, beatCount) {
   return beats.slice(0, beatCount);
 }
 
-function buildVariantSequence(count) {
-  const seq = [];
-  let last = null;
+// ---------------- Prompt (NO STYLE) ----------------
+function buildScenePrompt({ beatText, index }) {
+  return `
+Scene ${index} from a narrated scary story.
 
-  for (let i = 0; i < count; i++) {
-    const available = ANIMATION_VARIANTS.filter((v) => v !== last);
-    const chosen = available[i % available.length];
-    seq.push(chosen);
-    last = chosen;
-  }
+Story narration:
+"${beatText}"
 
-  return seq;
+Single illustrated scene. No text in image.
+`.trim();
 }
 
-// ----------------- Krea image generation -----------------
-async function generateKreaImage(prompt, aspectRatio) {
-  const resp = await fetch(KREA_GENERATE_URL, {
+// ---------------- Krea generation ----------------
+async function createKreaJob(prompt, aspectRatio) {
+  const r = await fetch(KREA_GENERATE_URL, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${KREA_API_KEY}`,
@@ -118,16 +109,21 @@ async function generateKreaImage(prompt, aspectRatio) {
     },
     body: JSON.stringify({
       prompt,
-      style_id: KREA_STYLE_ID,
       aspect_ratio: aspectRatio,
+      styles: [
+        {
+          id: KREA_STYLE_ID,
+          strength: 0.85,
+        },
+      ],
     }),
   });
 
-  const data = await resp.json();
+  const data = await r.json();
 
-  if (!resp.ok || !data?.job_id) {
-    console.error('[KREA_ERROR]', resp.status, data);
-    throw new Error('KREA_GENERATION_FAILED');
+  if (!r.ok || !data.job_id) {
+    console.error('[KREA_GENERATE_ERROR]', data);
+    throw new Error('KREA_GENERATE_FAILED');
   }
 
   return data.job_id;
@@ -135,7 +131,7 @@ async function generateKreaImage(prompt, aspectRatio) {
 
 async function pollKreaJob(jobId) {
   for (let i = 0; i < 30; i++) {
-    await new Promise((r) => setTimeout(r, 2000));
+    await new Promise((r) => setTimeout(r, 3000));
 
     const r = await fetch(`https://api.krea.ai/jobs/${jobId}`, {
       headers: {
@@ -145,15 +141,33 @@ async function pollKreaJob(jobId) {
 
     const data = await r.json();
 
-    if (data.status === 'completed') {
-      return data.result?.urls?.[0] || null;
+    if (data.status === 'completed' && data?.result?.urls?.[0]) {
+      return data.result.urls[0];
+    }
+
+    if (data.status === 'failed') {
+      throw new Error('KREA_JOB_FAILED');
     }
   }
 
-  throw new Error('KREA_TIMEOUT');
+  throw new Error('KREA_JOB_TIMEOUT');
 }
 
-// ----------------- MAIN HANDLER -----------------
+// ---------------- Animations ----------------
+function buildVariantSequence(count) {
+  const out = [];
+  let last = null;
+
+  for (let i = 0; i < count; i++) {
+    const options = ANIMATION_VARIANTS.filter((v) => v !== last);
+    const v = options[i % options.length];
+    out.push(v);
+    last = v;
+  }
+  return out;
+}
+
+// ---------------- MAIN HANDLER ----------------
 module.exports = async function handler(req, res) {
   setCors(res);
   if (req.method === 'OPTIONS') return res.status(200).end();
@@ -161,97 +175,105 @@ module.exports = async function handler(req, res) {
     return res.status(405).json({ error: 'METHOD_NOT_ALLOWED' });
 
   try {
-    const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+    const body =
+      typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
 
     const {
       storyType,
+      artStyle,
       language,
       aspectRatio = '9:16',
       durationRange = '60-90',
       customPrompt = '',
     } = body;
 
-    // 1) Get narration
+    // ---- Generate script ----
     const baseUrl = `https://${req.headers.host}`;
     const scriptResp = await fetch(`${baseUrl}/api/generate-script`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         storyType,
+        artStyle,
         language,
-        durationRange,
         customPrompt,
+        durationRange,
       }),
     }).then((r) => r.json());
 
-    const narration = scriptResp?.narration?.trim();
+    const narration = scriptResp?.narration;
     if (!narration) throw new Error('SCRIPT_EMPTY');
 
-    // 2) Beats
+    // ---- Beats ----
     const speechSec = estimateSpeechSeconds(narration);
-    const targetSec =
-      durationRange === '30-60'
-        ? Math.min(Math.max(speechSec, 30), 60)
-        : Math.min(Math.max(speechSec, 60), 90);
-
-    let beatCount = Math.round(targetSec / SECONDS_PER_BEAT);
+    let beatCount = Math.round(speechSec / SECONDS_PER_BEAT);
     beatCount = Math.max(MIN_BEATS, Math.min(MAX_BEATS, beatCount));
 
     const beatTexts = splitNarrationIntoBeats(narration, beatCount);
-    const variants = buildVariantSequence(beatCount);
 
-    // 3) Generate images
+    // ---- Images ----
     const imageUrls = [];
     for (let i = 0; i < beatCount; i++) {
-      const scenePrompt = `Illustration of this scene:\n${beatTexts[i]}`;
-      const jobId = await generateKreaImage(scenePrompt, aspectRatio);
+      const prompt = buildScenePrompt({
+        beatText: beatTexts[i],
+        index: i + 1,
+      });
+
+      const jobId = await createKreaJob(prompt, aspectRatio);
       const url = await pollKreaJob(jobId);
       imageUrls.push(url);
     }
 
-    // 4) Build Creatomate mods (NO VOICE CHANGES)
+    // ---- Animations ----
+    const variants = buildVariantSequence(beatCount);
+
+    // ---- Creatomate mods ----
     const mods = {
-      Narration: narration,
-      StoryTypeLabel: storyType,
-      LanguageLabel: language,
+      'Voiceover.text': narration, // 🔊 ONLY voice source
     };
 
     for (let i = 1; i <= beatCount; i++) {
       for (const v of ANIMATION_VARIANTS) {
-        mods[`Beat${i}_${v}_Image`] =
+        const key = `Beat${i}_${v}_Image`;
+        mods[key] =
           v === variants[i - 1] ? imageUrls[i - 1] : null;
       }
     }
 
-    // Clear unused beats
     for (let i = beatCount + 1; i <= MAX_BEATS; i++) {
       for (const v of ANIMATION_VARIANTS) {
         mods[`Beat${i}_${v}_Image`] = null;
       }
     }
 
-    // 5) Render video
-    const template_id =
-      aspectRatio === '1:1'
-        ? process.env.CREATO_TEMPLATE_11
-        : aspectRatio === '16:9'
-        ? process.env.CREATO_TEMPLATE_169
-        : process.env.CREATO_TEMPLATE_916;
+    // ---- Render ----
+    const templateMap = {
+      '9:16': process.env.CREATO_TEMPLATE_916,
+      '1:1': process.env.CREATO_TEMPLATE_11,
+      '16:9': process.env.CREATO_TEMPLATE_169,
+    };
+
+    const template_id = templateMap[aspectRatio];
 
     const render = await postJSON(
       'https://api.creatomate.com/v1/renders',
-      { Authorization: `Bearer ${CREATOMATE_API_KEY}` },
-      { template_id, modifications: mods, output_format: 'mp4' }
+      { Authorization: `Bearer ${process.env.CREATOMATE_API_KEY}` },
+      {
+        template_id,
+        modifications: mods,
+        output_format: 'mp4',
+      }
     );
 
-    const job_id = render?.json?.[0]?.id || render?.json?.id;
-    if (!job_id) throw new Error('CREATOMATE_FAILED');
+    const job_id = render.json?.id || render.json?.[0]?.id;
+    if (!job_id) throw new Error('CREATOMATE_NO_JOB');
 
     return res.status(200).json({ ok: true, job_id });
   } catch (err) {
     console.error('[CREATE_VIDEO_ERROR]', err);
-    return res
-      .status(500)
-      .json({ error: 'SERVER_ERROR', message: err.message });
+    return res.status(500).json({
+      error: 'SERVER_ERROR',
+      message: String(err.message || err),
+    });
   }
 };
