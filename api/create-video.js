@@ -17,37 +17,6 @@ const SECONDS_PER_BEAT = 3.0;  // approx seconds per scene (your beats are 3s in
 // Animation variants in your Creatomate template
 const ANIMATION_VARIANTS = ['PanRight', 'PanLeft', 'PanUp', 'PanDown', 'Zoom'];
 
-// ----------------- STYLE REGISTRY -----------------
-const STYLE_REGISTRY = {
-  creepy_toon: {
-    provider: 'krea',
-    style_id: 'tvjlqsab9',
-    negative_prompt:
-      'photorealistic, realistic skin, hyperreal, 3d render, CGI, glossy, ultra-detailed, ' +
-      'anime, manga, selfie, portrait, pretty girl, text, subtitles, watermark, logo, UI, border',
-  },
-  // keep scary_toon as prompt-driven (no style_id) unless you later add one
-  scary_toon: {
-    provider: 'krea',
-    style_id: null,
-    negative_prompt:
-      'gore, graphic violence, realistic blood, photorealistic, realistic skin, hyperreal, ' +
-      '3d render, CGI, selfie, portrait, pretty girl, text, subtitles, watermark, logo, UI, border',
-  },
-};
-
-function normalizeStyleKey(artStyle, styleKey) {
-  const k = (styleKey || '').trim().toLowerCase();
-  if (k) return k;
-
-  const s = (artStyle || '').trim().toLowerCase();
-  if (s.includes('creepy')) return 'creepy_toon';
-  if (s.includes('scary') && s.includes('toon')) return 'scary_toon';
-  if (s.includes('toon') && s.includes('scary')) return 'scary_toon';
-  if (s.includes('toon')) return 'scary_toon'; // default toon bucket
-  return 'scary_toon';
-}
-
 // ----------------- CORS -----------------
 function setCors(res) {
   res.setHeader('Access-Control-Allow-Origin', ALLOW_ORIGIN);
@@ -58,13 +27,13 @@ function setCors(res) {
 // ----------------- Simple HTTPS JSON helper (Creatomate) -----------------
 function postJSON(url, headers, bodyObj) {
   return new Promise((resolve, reject) => {
-    const { hostname, pathname } = new URL(url);
+    const u = new URL(url);
     const data = JSON.stringify(bodyObj);
 
     const req = https.request(
       {
-        hostname,
-        path: pathname,
+        hostname: u.hostname,
+        path: u.pathname + (u.search || ''),
         method: 'POST',
         headers: {
           Authorization: headers.Authorization,
@@ -101,6 +70,10 @@ function estimateSpeechSeconds(narration) {
   return words / wordsPerSec;
 }
 
+/**
+ * Split narration into `beatCount` chunks so each beat has its own text.
+ * Simple word-based splitter: keeps order, roughly equal lengths.
+ */
 function splitNarrationIntoBeats(narration, beatCount) {
   const text = (narration || '').trim();
   if (!text || beatCount <= 0) return [];
@@ -111,91 +84,44 @@ function splitNarrationIntoBeats(narration, beatCount) {
 
   const beats = [];
   for (let i = 0; i < totalWords; i += chunkSize) {
-    const chunkWords = words.slice(i, i + chunkSize);
-    beats.push(chunkWords.join(' '));
+    beats.push(words.slice(i, i + chunkSize).join(' '));
   }
 
-  if (beats.length > beatCount) {
-    beats.length = beatCount;
-  }
-
-  while (beats.length < beatCount) {
-    beats.push(beats[beats.length - 1] || text);
-  }
+  if (beats.length > beatCount) beats.length = beatCount;
+  while (beats.length < beatCount) beats.push(beats[beats.length - 1] || text);
 
   return beats;
 }
 
 /**
- * Build a visual prompt for a scene, based on the beat text + styleKey/artStyle.
+ * Build a scene prompt WITHOUT any style instructions and WITHOUT any negative prompts.
+ * Style will be applied via Krea style_id (e.g., tvjlqsab9) instead.
  */
-function buildScenePrompt({ beatText, artStyle, sceneIndex, aspectRatio, styleKey }) {
+function buildScenePrompt({ beatText, sceneIndex, aspectRatio }) {
   const ratioText =
     aspectRatio === '9:16'
-      ? 'vertical 9:16 composition'
+      ? 'Vertical composition, 9:16 aspect ratio.'
       : aspectRatio === '1:1'
-      ? 'square 1:1 composition'
-      : 'horizontal 16:9 composition';
+      ? 'Square composition, 1:1 aspect ratio.'
+      : 'Horizontal composition, 16:9 aspect ratio.';
 
-  // Default base rules (keep these!)
-  const globalRules =
-    'no text, no subtitles, no user interface, no watermarks, no logos, no borders, single scene only, no comic panels, no multiple frames.';
-
-  let styleChunk = '';
-
-  // Creepy Toon (your tvjlqsab9 cover vibe: simple/dark/cartoon, not gothic, not anime)
-  if (styleKey === 'creepy_toon') {
-    styleChunk =
-      'Creepy toon cartoon storytelling illustration: clean bold outlines, flat colors with soft cel shading, ' +
-      'simple shapes, slightly eerie vibe, dark nighttime palette (deep blues/greens), subtle grain texture, ' +
-      'minimal background detail, strong silhouette readability, playful-spooky but family-friendly, ' +
-      'cinematic framing, crisp edges, 2D digital illustration. ' +
-      'No anime look, no manga look, not photorealistic, not 3D.';
-  }
-  // Scary toon (your existing TikTok horror cartoon spec)
-  else {
-    const styleRaw = (artStyle || '').toLowerCase();
-    if (styleRaw.includes('scary') || styleRaw.includes('toon')) {
-      styleChunk =
-        'Cartoon storytelling illustration in the style of viral TikTok horror story animations: ' +
-        'clean bold outlines, soft cel-shading, smooth gradients, expressive characters, ' +
-        'light anime influence, high contrast lighting, slightly exaggerated proportions, ' +
-        'cinematic framing, vibrant but not neon colors, simple textured backgrounds, ' +
-        'smooth line art, crisp edges, digital painting, storybook vibe, ' +
-        'no comic panels, no multiple frames, single scene only. ' +
-        'Darker mood with spooky atmosphere, still family-friendly, no gore or graphic violence, ' +
-        'no photorealistic faces, no pretty girls, no selfies, no portraits.';
-    } else {
-      styleChunk =
-        '2d digital cartoon storytelling illustration, flat colors with soft shading, ' +
-        'clean bold outlines, expressive characters, light anime influence, cinematic framing, ' +
-        'vibrant but not neon colors, simple textured backgrounds, smooth line art, crisp edges, ' +
-        'digital painting, storybook vibe, no comic panels, no multiple frames, single scene only.';
-    }
-  }
-
+  // ✅ No style chunk, ✅ No "no ___" constraints
   return `
-Scene ${sceneIndex} from a narrated TikTok story.
+Scene ${sceneIndex} for a narrated short video.
 
-Narration for this scene:
-"${beatText}"
+${ratioText}
 
-Visual style: ${styleChunk}, ${ratioText}. ${globalRules}
+Scene description:
+${beatText}
 `.trim();
 }
 
 /**
  * Call Krea's image API for a single prompt and return an image URL.
- * Supports optional style_id + negative_prompt.
- * NOTE: Adjust payload/response parsing to match Krea docs if needed.
+ * styleId is passed through as "style_id" when provided.
  */
-async function generateKreaImageUrl(
-  prompt,
-  { aspectRatio = '9:16', style_id = null, negative_prompt = null } = {}
-) {
-  if (!KREA_API_KEY) {
-    throw new Error('KREA_API_KEY not set');
-  }
+async function generateKreaImageUrl(prompt, { aspectRatio = '9:16', styleId = '' } = {}) {
+  if (!KREA_API_KEY) throw new Error('KREA_API_KEY not set');
 
   const payload = {
     prompt,
@@ -207,9 +133,10 @@ async function generateKreaImageUrl(
         : '16:9',
   };
 
-  // ✅ Plug in Krea style + negatives when we have them
-  if (style_id) payload.style_id = style_id;
-  if (negative_prompt) payload.negative_prompt = negative_prompt;
+  // ✅ Apply style ONLY via Krea style id (no prompt words)
+  if (styleId && String(styleId).trim()) {
+    payload.style_id = String(styleId).trim();
+  }
 
   const resp = await fetch(KREA_API_URL, {
     method: 'POST',
@@ -249,28 +176,17 @@ async function generateKreaImageUrl(
 async function generateKreaImageUrlsForBeats({
   beatCount,
   beatTexts,
-  artStyle,
   aspectRatio,
-  styleKey,
-  styleIdOverride = null,
+  styleId,
 }) {
   const urls = [];
 
-  // Resolve style settings
-  const reg = STYLE_REGISTRY[styleKey] || {};
-  const style_id = styleIdOverride || reg.style_id || null;
-  const negative_prompt = reg.negative_prompt || null;
-
   for (let i = 1; i <= beatCount; i++) {
-    const beatText =
-      beatTexts[i - 1] || beatTexts[beatTexts.length - 1] || '';
-
+    const beatText = beatTexts[i - 1] || beatTexts[beatTexts.length - 1] || '';
     const prompt = buildScenePrompt({
       beatText,
-      artStyle,
       sceneIndex: i,
       aspectRatio,
-      styleKey,
     });
 
     console.log('================ PROMPT_BEAT_%d ================', i);
@@ -278,23 +194,11 @@ async function generateKreaImageUrlsForBeats({
     console.log('=================================================');
 
     try {
-      console.log(`[KREA] Generating image for Beat ${i}/${beatCount}`, {
-        styleKey,
-        style_id: style_id || '(none)',
-      });
-
-      const url = await generateKreaImageUrl(prompt, {
-        aspectRatio,
-        style_id,
-        negative_prompt,
-      });
-
+      console.log(`[KREA] Generating image for Beat ${i}/${beatCount} (style_id=${styleId || 'none'})`);
+      const url = await generateKreaImageUrl(prompt, { aspectRatio, styleId });
       urls.push(url);
     } catch (err) {
-      console.error(
-        `[KREA] Beat ${i} failed, leaving this beat without an image`,
-        err
-      );
+      console.error(`[KREA] Beat ${i} failed, leaving this beat without an image`, err);
       urls.push(null);
     }
   }
@@ -302,6 +206,10 @@ async function generateKreaImageUrlsForBeats({
   return urls;
 }
 
+/**
+ * Build a sequence of animation variants for all beats
+ * so that no two consecutive beats use the same variant.
+ */
 function buildVariantSequence(beatCount) {
   const seq = [];
   let last = null;
@@ -310,7 +218,6 @@ function buildVariantSequence(beatCount) {
     const available = ANIMATION_VARIANTS.filter((v) => v !== last);
     const idx = i % available.length;
     const chosen = available[idx];
-
     seq.push(chosen);
     last = chosen;
   }
@@ -318,6 +225,9 @@ function buildVariantSequence(beatCount) {
   return seq;
 }
 
+/**
+ * Call our /api/voice-captions route to get voiceUrl + captions.
+ */
 async function getVoiceAndCaptions(baseUrl, narration, language) {
   const resp = await fetch(`${baseUrl}/api/voice-captions`, {
     method: 'POST',
@@ -331,19 +241,17 @@ async function getVoiceAndCaptions(baseUrl, narration, language) {
     throw new Error('VOICE_CAPTIONS_FAILED');
   }
 
-  const voiceUrl = data.voiceUrl;
-  const captions = Array.isArray(data.captions) ? data.captions : [];
-
-  return { voiceUrl, captions };
+  return {
+    voiceUrl: data.voiceUrl,
+    captions: Array.isArray(data.captions) ? data.captions : [],
+  };
 }
 
 // ----------------- MAIN HANDLER -----------------
 module.exports = async function handler(req, res) {
   setCors(res);
   if (req.method === 'OPTIONS') return res.status(200).end();
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'METHOD_NOT_ALLOWED' });
-  }
+  if (req.method !== 'POST') return res.status(405).json({ error: 'METHOD_NOT_ALLOWED' });
 
   try {
     const body =
@@ -353,7 +261,7 @@ module.exports = async function handler(req, res) {
 
     const {
       storyType = 'Random AI story',
-      artStyle = 'Scary toon',
+      artStyle = 'Creepy Toon', // label only (optional)
       language = 'English',
       voice = 'Adam',
       aspectRatio = '9:16',
@@ -361,22 +269,14 @@ module.exports = async function handler(req, res) {
       durationRange = '60-90',
       voice_url = null,
 
-      // ✅ NEW:
-      // styleKey: "creepy_toon" (recommended) or "scary_toon"
-      // styleId: "tvjlqsab9" (optional override)
+      // ✅ NEW: style fields from Webflow
       styleKey = '',
-      styleId = '',
+      styleId = '', // <-- you want tvjlqsab9 here
     } = body;
 
     if (!process.env.CREATOMATE_API_KEY) {
-      return res
-        .status(500)
-        .json({ error: 'MISSING_CREATOMATE_API_KEY' });
+      return res.status(500).json({ error: 'MISSING_CREATOMATE_API_KEY' });
     }
-
-    // Resolve style key + style settings
-    const resolvedStyleKey = normalizeStyleKey(artStyle, styleKey);
-    const styleIdOverride = (styleId || '').trim() || null;
 
     // Pick template ID by aspect ratio
     const templateMap = {
@@ -385,11 +285,8 @@ module.exports = async function handler(req, res) {
       '16:9': process.env.CREATO_TEMPLATE_169,
     };
     const template_id = (templateMap[aspectRatio] || '').trim();
-
     if (!template_id) {
-      return res
-        .status(400)
-        .json({ error: 'NO_TEMPLATE_FOR_ASPECT', aspectRatio });
+      return res.status(400).json({ error: 'NO_TEMPLATE_FOR_ASPECT', aspectRatio });
     }
 
     // 1) Get narration from generate-script
@@ -401,31 +298,20 @@ module.exports = async function handler(req, res) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         storyType,
-        artStyle,
+        artStyle,       // still used for script flavor, not image style
         language,
         customPrompt,
         durationRange,
       }),
     }).then((r) => r.json());
 
-    console.log('[CREATE_VIDEO] SCRIPT_RESP preview', {
-      hasNarration: !!scriptResp?.narration,
-      storyType,
-      artStyle,
-      durationRange,
-      resolvedStyleKey,
-      styleIdOverride: styleIdOverride || '(none)',
-    });
-
     const narration = (scriptResp && scriptResp.narration) || '';
     if (!narration.trim()) {
       console.error('[CREATE_VIDEO] SCRIPT_EMPTY', scriptResp);
-      return res
-        .status(502)
-        .json({ error: 'SCRIPT_EMPTY', details: scriptResp });
+      return res.status(502).json({ error: 'SCRIPT_EMPTY', details: scriptResp });
     }
 
-    // 2) Generate voice + precise captions
+    // 2) Voice + captions
     let voiceUrl = null;
     let captions = [];
     try {
@@ -433,22 +319,16 @@ module.exports = async function handler(req, res) {
       voiceUrl = vc.voiceUrl;
       captions = vc.captions || [];
     } catch (e) {
-      console.error(
-        '[CREATE_VIDEO] getVoiceAndCaptions failed, continuing without captions',
-        e
-      );
+      console.error('[CREATE_VIDEO] getVoiceAndCaptions failed, continuing without captions', e);
     }
 
     // 3) Estimate narration time & decide beats
     const speechSec = estimateSpeechSeconds(narration);
 
     let targetSec = Math.round(speechSec + 2);
-    let minSec = 60;
-    let maxSec = 90;
-    if (durationRange === '30-60') {
-      minSec = 30;
-      maxSec = 60;
-    }
+    let minSec = durationRange === '30-60' ? 30 : 60;
+    let maxSec = durationRange === '30-60' ? 60 : 90;
+
     if (targetSec < minSec) targetSec = minSec;
     if (targetSec > maxSec && targetSec < maxSec + 10) {
       // small overflow ok
@@ -457,40 +337,24 @@ module.exports = async function handler(req, res) {
     }
 
     let beatCount = Math.round(targetSec / SECONDS_PER_BEAT);
-    if (!beatCount || !Number.isFinite(beatCount)) {
-      beatCount = MIN_BEATS;
-    }
+    if (!beatCount || !Number.isFinite(beatCount)) beatCount = MIN_BEATS;
     beatCount = Math.max(MIN_BEATS, Math.min(MAX_BEATS, beatCount));
-
-    console.log('[CREATE_VIDEO] BEAT_CONFIG', {
-      speechSec,
-      targetSec,
-      beatCount,
-      MIN_BEATS,
-      MAX_BEATS,
-      SECONDS_PER_BEAT,
-    });
 
     // 4) Build beatTexts
     const beatTexts = splitNarrationIntoBeats(narration, beatCount);
 
-    // 5) Generate Krea images
+    // 5) Generate images (Krea) using ONLY style_id, no prompt styling, no negatives
     let imageUrls = [];
     if (IMAGE_PROVIDER === 'krea') {
       try {
         imageUrls = await generateKreaImageUrlsForBeats({
           beatCount,
           beatTexts,
-          artStyle,
           aspectRatio,
-          styleKey: resolvedStyleKey,
-          styleIdOverride,
+          styleId: String(styleId || '').trim(), // <-- tvjlqsab9
         });
       } catch (err) {
-        console.error(
-          '[CREATE_VIDEO] KREA_BATCH_FAILED, falling back to prompts only',
-          err
-        );
+        console.error('[CREATE_VIDEO] KREA_BATCH_FAILED', err);
         imageUrls = [];
       }
     }
@@ -505,59 +369,32 @@ module.exports = async function handler(req, res) {
       VoiceLabel: voice,
       LanguageLabel: language,
       StoryTypeLabel: storyType,
-
-      // helpful debug labels (optional—safe even if template ignores)
-      StyleKeyLabel: resolvedStyleKey,
-      StyleIdLabel: styleIdOverride || (STYLE_REGISTRY[resolvedStyleKey]?.style_id || ''),
+      ArtStyleLabel: artStyle,
+      StyleKeyLabel: styleKey,
+      StyleIdLabel: styleId,
     };
 
     if (voiceUrl) {
       mods.VoiceUrl = voiceUrl;
-      if (captions.length) {
-        mods['Captions_JSON.text'] = JSON.stringify(captions);
-      }
+      if (captions.length) mods['Captions_JSON.text'] = JSON.stringify(captions);
     }
+    if (voice_url) mods.voice_url = voice_url;
 
-    if (voice_url) {
-      mods.voice_url = voice_url;
-    }
-
-    const style = artStyle || 'Scary toon';
-
-    // Fill beats
+    // Fill active beats 1..beatCount
     for (let i = 1; i <= beatCount; i++) {
-      const beatText = beatTexts[i - 1] || '';
-      let imageUrl = null;
-
-      if (IMAGE_PROVIDER === 'krea' && imageUrls.length >= i) {
-        imageUrl = imageUrls[i - 1] || null;
-      } else if (IMAGE_PROVIDER === 'dalle') {
-        imageUrl = buildScenePrompt({
-          beatText,
-          artStyle: style,
-          sceneIndex: i,
-          aspectRatio,
-          styleKey: resolvedStyleKey,
-        });
-      }
-
+      const imageUrl = (IMAGE_PROVIDER === 'krea' && imageUrls.length >= i) ? (imageUrls[i - 1] || null) : null;
       const chosenVariant = variantSequence[i - 1];
 
       for (const variant of ANIMATION_VARIANTS) {
         const imgKey = `Beat${i}_${variant}_Image`;
-        if (variant === chosenVariant && imageUrl) {
-          mods[imgKey] = imageUrl;
-        } else {
-          mods[imgKey] = null;
-        }
+        mods[imgKey] = (variant === chosenVariant) ? imageUrl : null;
       }
     }
 
     // Clear unused beats
     for (let i = beatCount + 1; i <= MAX_BEATS; i++) {
       for (const variant of ANIMATION_VARIANTS) {
-        const imgKey = `Beat${i}_${variant}_Image`;
-        mods[imgKey] = null;
+        mods[`Beat${i}_${variant}_Image`] = null;
       }
     }
 
@@ -567,18 +404,6 @@ module.exports = async function handler(req, res) {
       output_format: 'mp4',
     };
 
-    console.log('[CREATE_VIDEO] PAYLOAD_PREVIEW', {
-      template_id_preview: template_id.slice(0, 6) + '…',
-      targetSec,
-      beatCount,
-      imageProvider: IMAGE_PROVIDER,
-      kreaImagesGenerated: imageUrls.length,
-      hasVoiceUrl: !!mods.VoiceUrl,
-      hasCaptionsJson: !!mods['Captions_JSON.text'],
-      resolvedStyleKey,
-      styleIdOverride: styleIdOverride || '(none)',
-    });
-
     // 8) Call Creatomate
     const resp = await postJSON(
       'https://api.creatomate.com/v1/renders',
@@ -586,31 +411,20 @@ module.exports = async function handler(req, res) {
       payload
     );
 
-    console.log('[CREATE_VIDEO] CREATOMATE_RESP_STATUS', resp.status);
-
     if (resp.status !== 202 && resp.status !== 200) {
       console.error('[CREATOMATE_ERROR]', resp.status, resp.json);
-      return res
-        .status(resp.status)
-        .json({ error: 'CREATOMATE_ERROR', details: resp.json });
+      return res.status(resp.status).json({ error: 'CREATOMATE_ERROR', details: resp.json });
     }
 
-    const job_id = Array.isArray(resp.json)
-      ? resp.json[0]?.id
-      : resp.json?.id;
-
+    const job_id = Array.isArray(resp.json) ? resp.json[0]?.id : resp.json?.id;
     if (!job_id) {
       console.error('[CREATE_VIDEO] NO_JOB_ID_IN_RESPONSE', resp.json);
-      return res
-        .status(502)
-        .json({ error: 'NO_JOB_ID_IN_RESPONSE', details: resp.json });
+      return res.status(502).json({ error: 'NO_JOB_ID_IN_RESPONSE', details: resp.json });
     }
 
     return res.status(200).json({ ok: true, job_id });
   } catch (err) {
     console.error('[CREATE_VIDEO] SERVER_ERROR', err);
-    return res
-      .status(500)
-      .json({ error: 'SERVER_ERROR', message: String(err?.message || err) });
+    return res.status(500).json({ error: 'SERVER_ERROR', message: String(err?.message || err) });
   }
 };
