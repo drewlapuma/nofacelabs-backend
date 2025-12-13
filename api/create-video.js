@@ -6,15 +6,20 @@ const IMAGE_PROVIDER = (process.env.IMAGE_PROVIDER || 'krea').toLowerCase();
 
 // Krea config
 const KREA_API_KEY = process.env.KREA_API_KEY;
-const KREA_API_URL =
-  process.env.KREA_API_URL || 'https://api.krea.ai/generate/image/bfl/flux-1-dev'; // <-- adjust to real endpoint if different
+
+// IMPORTANT: Your 404 is almost certainly because this endpoint is wrong.
+// Set KREA_API_URL in Vercel env to the correct Krea endpoint you’re using.
+const KREA_API_URL = process.env.KREA_API_URL || 'https://api.krea.ai/v1/images';
+
+// Default style id (your Creepy Toon)
+const DEFAULT_KREA_STYLE_ID = process.env.KREA_STYLE_ID || 'tvjlqsab9';
 
 // Beat / timing settings
-const MIN_BEATS = 8;           // never fewer than this
-const MAX_BEATS = 24;          // must match how many Beat groups your template supports
-const SECONDS_PER_BEAT = 3.0;  // approx seconds per scene (your beats are 3s in Creatomate)
+const MIN_BEATS = 8;
+const MAX_BEATS = 24;
+const SECONDS_PER_BEAT = 3.0;
 
-// Animation variants in your Creatomate template
+// Creatomate animation variants
 const ANIMATION_VARIANTS = ['PanRight', 'PanLeft', 'PanUp', 'PanDown', 'Zoom'];
 
 // ----------------- CORS -----------------
@@ -61,7 +66,7 @@ function postJSON(url, headers, bodyObj) {
   });
 }
 
-// ----------------- Speech timing helper (words -> seconds) -----------------
+// ----------------- Speech timing helper -----------------
 function estimateSpeechSeconds(narration) {
   const text = (narration || '').trim();
   if (!text) return 0;
@@ -70,10 +75,6 @@ function estimateSpeechSeconds(narration) {
   return words / wordsPerSec;
 }
 
-/**
- * Split narration into `beatCount` chunks so each beat has its own text.
- * Simple word-based splitter: keeps order, roughly equal lengths.
- */
 function splitNarrationIntoBeats(narration, beatCount) {
   const text = (narration || '').trim();
   if (!text || beatCount <= 0) return [];
@@ -94,34 +95,35 @@ function splitNarrationIntoBeats(narration, beatCount) {
 }
 
 /**
- * Build a scene prompt WITHOUT any style instructions and WITHOUT any negative prompts.
- * Style will be applied via Krea style_id (e.g., tvjlqsab9) instead.
+ * ✅ NO style prompt
+ * ✅ NO negative prompts
+ *
+ * We only describe what to draw, and let Krea style_id handle the look.
  */
 function buildScenePrompt({ beatText, sceneIndex, aspectRatio }) {
   const ratioText =
     aspectRatio === '9:16'
-      ? 'Vertical composition, 9:16 aspect ratio.'
+      ? 'Vertical composition (9:16).'
       : aspectRatio === '1:1'
-      ? 'Square composition, 1:1 aspect ratio.'
-      : 'Horizontal composition, 16:9 aspect ratio.';
+      ? 'Square composition (1:1).'
+      : 'Horizontal composition (16:9).';
 
-  // ✅ No style chunk, ✅ No "no ___" constraints
   return `
-Scene ${sceneIndex} for a narrated short video.
-
+Scene ${sceneIndex}.
 ${ratioText}
 
-Scene description:
+Story narration for this scene:
 ${beatText}
 `.trim();
 }
 
 /**
- * Call Krea's image API for a single prompt and return an image URL.
- * styleId is passed through as "style_id" when provided.
+ * Call Krea API for a single prompt and return an image URL.
+ * This function is defensive because the endpoint/shape may differ.
  */
-async function generateKreaImageUrl(prompt, { aspectRatio = '9:16', styleId = '' } = {}) {
+async function generateKreaImageUrl(prompt, { aspectRatio = '9:16', styleId } = {}) {
   if (!KREA_API_KEY) throw new Error('KREA_API_KEY not set');
+  if (!KREA_API_URL) throw new Error('KREA_API_URL not set');
 
   const payload = {
     prompt,
@@ -131,34 +133,51 @@ async function generateKreaImageUrl(prompt, { aspectRatio = '9:16', styleId = ''
         : aspectRatio === '1:1'
         ? '1:1'
         : '16:9',
-  };
 
-  // ✅ Apply style ONLY via Krea style id (no prompt words)
-  if (styleId && String(styleId).trim()) {
-    payload.style_id = String(styleId).trim();
-  }
+    // ✅ Use the Krea style id for the look
+    style_id: styleId || DEFAULT_KREA_STYLE_ID,
+  };
 
   const resp = await fetch(KREA_API_URL, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${KREA_API_KEY}`,
       'Content-Type': 'application/json',
+      Accept: 'application/json',
     },
     body: JSON.stringify(payload),
   });
 
-  const data = await resp.json().catch(() => ({}));
+  // Read text first so we can log it even if JSON parsing fails
+  const rawText = await resp.text().catch(() => '');
+  let data = {};
+  try {
+    data = rawText ? JSON.parse(rawText) : {};
+  } catch {
+    data = { raw: rawText };
+  }
 
   if (!resp.ok) {
-    console.error('[KREA_ERROR]', resp.status, data);
+    console.error('[KREA_ERROR]', {
+      status: resp.status,
+      url: KREA_API_URL,
+      payloadPreview: {
+        aspect_ratio: payload.aspect_ratio,
+        style_id: payload.style_id,
+        promptPreview: String(prompt || '').slice(0, 140),
+      },
+      response: data,
+    });
     throw new Error(`Krea image error: ${resp.status}`);
   }
 
+  // Try common response shapes
   const url =
     data?.images?.[0]?.url ||
     data?.data?.[0]?.url ||
     data?.output?.[0]?.image_url ||
     data?.image_url ||
+    data?.url ||
     null;
 
   if (!url) {
@@ -169,15 +188,11 @@ async function generateKreaImageUrl(prompt, { aspectRatio = '9:16', styleId = ''
   return url;
 }
 
-/**
- * Generate one Krea image per beat and return an array of URLs.
- * On error we push null for that beat (no reuse).
- */
 async function generateKreaImageUrlsForBeats({
   beatCount,
   beatTexts,
   aspectRatio,
-  styleId,
+  kreaStyleId,
 }) {
   const urls = [];
 
@@ -194,8 +209,11 @@ async function generateKreaImageUrlsForBeats({
     console.log('=================================================');
 
     try {
-      console.log(`[KREA] Generating image for Beat ${i}/${beatCount} (style_id=${styleId || 'none'})`);
-      const url = await generateKreaImageUrl(prompt, { aspectRatio, styleId });
+      console.log(`[KREA] Generating image for Beat ${i}/${beatCount}`);
+      const url = await generateKreaImageUrl(prompt, {
+        aspectRatio,
+        styleId: kreaStyleId || DEFAULT_KREA_STYLE_ID,
+      });
       urls.push(url);
     } catch (err) {
       console.error(`[KREA] Beat ${i} failed, leaving this beat without an image`, err);
@@ -206,18 +224,13 @@ async function generateKreaImageUrlsForBeats({
   return urls;
 }
 
-/**
- * Build a sequence of animation variants for all beats
- * so that no two consecutive beats use the same variant.
- */
 function buildVariantSequence(beatCount) {
   const seq = [];
   let last = null;
 
   for (let i = 0; i < beatCount; i++) {
     const available = ANIMATION_VARIANTS.filter((v) => v !== last);
-    const idx = i % available.length;
-    const chosen = available[idx];
+    const chosen = available[i % available.length];
     seq.push(chosen);
     last = chosen;
   }
@@ -225,9 +238,6 @@ function buildVariantSequence(beatCount) {
   return seq;
 }
 
-/**
- * Call our /api/voice-captions route to get voiceUrl + captions.
- */
 async function getVoiceAndCaptions(baseUrl, narration, language) {
   const resp = await fetch(`${baseUrl}/api/voice-captions`, {
     method: 'POST',
@@ -255,13 +265,11 @@ module.exports = async function handler(req, res) {
 
   try {
     const body =
-      typeof req.body === 'string'
-        ? JSON.parse(req.body || '{}')
-        : req.body || {};
+      typeof req.body === 'string' ? JSON.parse(req.body || '{}') : (req.body || {});
 
     const {
       storyType = 'Random AI story',
-      artStyle = 'Creepy Toon', // label only (optional)
+      artStyle = 'Creepy Toon',
       language = 'English',
       voice = 'Adam',
       aspectRatio = '9:16',
@@ -269,22 +277,21 @@ module.exports = async function handler(req, res) {
       durationRange = '60-90',
       voice_url = null,
 
-      // ✅ NEW: style fields from Webflow
-      styleKey = '',
-      styleId = '', // <-- you want tvjlqsab9 here
+      // ✅ allow passing style id from Webflow later if you want
+      krea_style_id = null,
     } = body;
 
     if (!process.env.CREATOMATE_API_KEY) {
       return res.status(500).json({ error: 'MISSING_CREATOMATE_API_KEY' });
     }
 
-    // Pick template ID by aspect ratio
     const templateMap = {
       '9:16': process.env.CREATO_TEMPLATE_916,
       '1:1': process.env.CREATO_TEMPLATE_11,
       '16:9': process.env.CREATO_TEMPLATE_169,
     };
     const template_id = (templateMap[aspectRatio] || '').trim();
+
     if (!template_id) {
       return res.status(400).json({ error: 'NO_TEMPLATE_FOR_ASPECT', aspectRatio });
     }
@@ -298,7 +305,7 @@ module.exports = async function handler(req, res) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         storyType,
-        artStyle,       // still used for script flavor, not image style
+        artStyle,
         language,
         customPrompt,
         durationRange,
@@ -322,7 +329,7 @@ module.exports = async function handler(req, res) {
       console.error('[CREATE_VIDEO] getVoiceAndCaptions failed, continuing without captions', e);
     }
 
-    // 3) Estimate narration time & decide beats
+    // 3) Beats
     const speechSec = estimateSpeechSeconds(narration);
 
     let targetSec = Math.round(speechSec + 2);
@@ -330,57 +337,45 @@ module.exports = async function handler(req, res) {
     let maxSec = durationRange === '30-60' ? 60 : 90;
 
     if (targetSec < minSec) targetSec = minSec;
-    if (targetSec > maxSec && targetSec < maxSec + 10) {
-      // small overflow ok
-    } else if (targetSec > maxSec + 10) {
-      targetSec = Math.round(speechSec + 2);
-    }
+    if (targetSec > maxSec + 10) targetSec = Math.round(speechSec + 2);
 
     let beatCount = Math.round(targetSec / SECONDS_PER_BEAT);
     if (!beatCount || !Number.isFinite(beatCount)) beatCount = MIN_BEATS;
     beatCount = Math.max(MIN_BEATS, Math.min(MAX_BEATS, beatCount));
 
-    // 4) Build beatTexts
     const beatTexts = splitNarrationIntoBeats(narration, beatCount);
 
-    // 5) Generate images (Krea) using ONLY style_id, no prompt styling, no negatives
+    // 4) Images (Krea)
     let imageUrls = [];
     if (IMAGE_PROVIDER === 'krea') {
-      try {
-        imageUrls = await generateKreaImageUrlsForBeats({
-          beatCount,
-          beatTexts,
-          aspectRatio,
-          styleId: String(styleId || '').trim(), // <-- tvjlqsab9
-        });
-      } catch (err) {
-        console.error('[CREATE_VIDEO] KREA_BATCH_FAILED', err);
-        imageUrls = [];
-      }
+      imageUrls = await generateKreaImageUrlsForBeats({
+        beatCount,
+        beatTexts,
+        aspectRatio,
+        kreaStyleId: krea_style_id || DEFAULT_KREA_STYLE_ID,
+      });
     }
 
-    // 6) Animation sequence
+    // 5) Variants + mods
     const variantSequence = buildVariantSequence(beatCount);
 
-    // 7) Creatomate modifications
     const mods = {
       Narration: narration,
       Voiceover: narration,
       VoiceLabel: voice,
       LanguageLabel: language,
       StoryTypeLabel: storyType,
-      ArtStyleLabel: artStyle,
-      StyleKeyLabel: styleKey,
-      StyleIdLabel: styleId,
     };
 
     if (voiceUrl) {
       mods.VoiceUrl = voiceUrl;
       if (captions.length) mods['Captions_JSON.text'] = JSON.stringify(captions);
     }
-    if (voice_url) mods.voice_url = voice_url;
 
-    // Fill active beats 1..beatCount
+    if (voice_url) {
+      mods.voice_url = voice_url;
+    }
+
     for (let i = 1; i <= beatCount; i++) {
       const imageUrl = (IMAGE_PROVIDER === 'krea' && imageUrls.length >= i) ? (imageUrls[i - 1] || null) : null;
       const chosenVariant = variantSequence[i - 1];
@@ -391,7 +386,6 @@ module.exports = async function handler(req, res) {
       }
     }
 
-    // Clear unused beats
     for (let i = beatCount + 1; i <= MAX_BEATS; i++) {
       for (const variant of ANIMATION_VARIANTS) {
         mods[`Beat${i}_${variant}_Image`] = null;
@@ -404,7 +398,7 @@ module.exports = async function handler(req, res) {
       output_format: 'mp4',
     };
 
-    // 8) Call Creatomate
+    // 6) Creatomate render
     const resp = await postJSON(
       'https://api.creatomate.com/v1/renders',
       { Authorization: `Bearer ${process.env.CREATOMATE_API_KEY}` },
