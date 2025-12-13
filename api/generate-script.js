@@ -38,7 +38,6 @@ function buildStyleHints(mode) {
         'Tell the story as a sequence of very visual moments the viewer could actually see.',
         'In almost every sentence, describe concrete things in the scene: environment, lighting, objects, shadows, silhouettes, motion.',
         'Avoid vague lines like "it felt scary" unless they are attached to a clear visual detail.',
-        'Use woods, houses, hallways, doors, windows, silhouettes, shadows, mist, etc. as your main visual tools.',
       ].join(' ');
     case 'urbanLegend':
       return 'Write it like a spooky urban legend people tell each other, with a mysterious or ambiguous ending.';
