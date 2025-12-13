@@ -15,9 +15,38 @@ const MAX_BEATS = 24;          // must match how many Beat groups your template 
 const SECONDS_PER_BEAT = 3.0;  // approx seconds per scene (your beats are 3s in Creatomate)
 
 // Animation variants in your Creatomate template
-// For each beat you have layers:
-// BeatX_PanRight_Image, BeatX_PanLeft_Image, BeatX_PanUp_Image, BeatX_PanDown_Image, BeatX_Zoom_Image
 const ANIMATION_VARIANTS = ['PanRight', 'PanLeft', 'PanUp', 'PanDown', 'Zoom'];
+
+// ----------------- STYLE REGISTRY -----------------
+const STYLE_REGISTRY = {
+  creepy_toon: {
+    provider: 'krea',
+    style_id: 'tvjlqsab9',
+    negative_prompt:
+      'photorealistic, realistic skin, hyperreal, 3d render, CGI, glossy, ultra-detailed, ' +
+      'anime, manga, selfie, portrait, pretty girl, text, subtitles, watermark, logo, UI, border',
+  },
+  // keep scary_toon as prompt-driven (no style_id) unless you later add one
+  scary_toon: {
+    provider: 'krea',
+    style_id: null,
+    negative_prompt:
+      'gore, graphic violence, realistic blood, photorealistic, realistic skin, hyperreal, ' +
+      '3d render, CGI, selfie, portrait, pretty girl, text, subtitles, watermark, logo, UI, border',
+  },
+};
+
+function normalizeStyleKey(artStyle, styleKey) {
+  const k = (styleKey || '').trim().toLowerCase();
+  if (k) return k;
+
+  const s = (artStyle || '').trim().toLowerCase();
+  if (s.includes('creepy')) return 'creepy_toon';
+  if (s.includes('scary') && s.includes('toon')) return 'scary_toon';
+  if (s.includes('toon') && s.includes('scary')) return 'scary_toon';
+  if (s.includes('toon')) return 'scary_toon'; // default toon bucket
+  return 'scary_toon';
+}
 
 // ----------------- CORS -----------------
 function setCors(res) {
@@ -72,10 +101,6 @@ function estimateSpeechSeconds(narration) {
   return words / wordsPerSec;
 }
 
-/**
- * Split narration into `beatCount` chunks so each beat has its own text.
- * Simple word-based splitter: keeps order, roughly equal lengths.
- */
 function splitNarrationIntoBeats(narration, beatCount) {
   const text = (narration || '').trim();
   if (!text || beatCount <= 0) return [];
@@ -90,12 +115,10 @@ function splitNarrationIntoBeats(narration, beatCount) {
     beats.push(chunkWords.join(' '));
   }
 
-  // If we ended up with more chunks than beats (rounding), trim
   if (beats.length > beatCount) {
     beats.length = beatCount;
   }
 
-  // If fewer (weird edge cases), pad last one
   while (beats.length < beatCount) {
     beats.push(beats[beats.length - 1] || text);
   }
@@ -104,34 +127,9 @@ function splitNarrationIntoBeats(narration, beatCount) {
 }
 
 /**
- * Build a visual prompt for a scene, based on the *beat text* + artStyle.
- * Uses your scary toon TikTok-style spec when artStyle is "Scary toon".
+ * Build a visual prompt for a scene, based on the beat text + styleKey/artStyle.
  */
-function buildScenePrompt({ beatText, artStyle, sceneIndex, aspectRatio }) {
-  const styleRaw = (artStyle || '').toLowerCase();
-
-  let styleChunk;
-
-  // 🔥 Scary toon style — your TikTok cartoon spec
-  if (styleRaw.includes('scary') || styleRaw.includes('toon')) {
-    styleChunk =
-      'Cartoon storytelling illustration in the style of viral TikTok horror story animations: ' +
-      'clean bold outlines, soft cel-shading, smooth gradients, expressive characters, ' +
-      'light anime influence, high contrast lighting, slightly exaggerated proportions, ' +
-      'cinematic framing, vibrant but not neon colors, simple textured backgrounds, ' +
-      'smooth line art, crisp edges, digital painting, storybook vibe, ' +
-      'no comic panels, no multiple frames, single scene only. ' +
-      'Darker mood with spooky atmosphere, still family-friendly, no gore or graphic violence, ' +
-      'no photorealistic faces, no pretty girls, no selfies, no portraits.';
-  } else {
-    // Generic cartoon / story style for non-scary art styles
-    styleChunk =
-      '2d digital cartoon storytelling illustration, flat colors with soft shading, ' +
-      'clean bold outlines, expressive characters, light anime influence, cinematic framing, ' +
-      'vibrant but not neon colors, simple textured backgrounds, smooth line art, crisp edges, ' +
-      'digital painting, storybook vibe, no comic panels, no multiple frames, single scene only.';
-  }
-
+function buildScenePrompt({ beatText, artStyle, sceneIndex, aspectRatio, styleKey }) {
   const ratioText =
     aspectRatio === '9:16'
       ? 'vertical 9:16 composition'
@@ -139,26 +137,66 @@ function buildScenePrompt({ beatText, artStyle, sceneIndex, aspectRatio }) {
       ? 'square 1:1 composition'
       : 'horizontal 16:9 composition';
 
+  // Default base rules (keep these!)
+  const globalRules =
+    'no text, no subtitles, no user interface, no watermarks, no logos, no borders, single scene only, no comic panels, no multiple frames.';
+
+  let styleChunk = '';
+
+  // Creepy Toon (your tvjlqsab9 cover vibe: simple/dark/cartoon, not gothic, not anime)
+  if (styleKey === 'creepy_toon') {
+    styleChunk =
+      'Creepy toon cartoon storytelling illustration: clean bold outlines, flat colors with soft cel shading, ' +
+      'simple shapes, slightly eerie vibe, dark nighttime palette (deep blues/greens), subtle grain texture, ' +
+      'minimal background detail, strong silhouette readability, playful-spooky but family-friendly, ' +
+      'cinematic framing, crisp edges, 2D digital illustration. ' +
+      'No anime look, no manga look, not photorealistic, not 3D.';
+  }
+  // Scary toon (your existing TikTok horror cartoon spec)
+  else {
+    const styleRaw = (artStyle || '').toLowerCase();
+    if (styleRaw.includes('scary') || styleRaw.includes('toon')) {
+      styleChunk =
+        'Cartoon storytelling illustration in the style of viral TikTok horror story animations: ' +
+        'clean bold outlines, soft cel-shading, smooth gradients, expressive characters, ' +
+        'light anime influence, high contrast lighting, slightly exaggerated proportions, ' +
+        'cinematic framing, vibrant but not neon colors, simple textured backgrounds, ' +
+        'smooth line art, crisp edges, digital painting, storybook vibe, ' +
+        'no comic panels, no multiple frames, single scene only. ' +
+        'Darker mood with spooky atmosphere, still family-friendly, no gore or graphic violence, ' +
+        'no photorealistic faces, no pretty girls, no selfies, no portraits.';
+    } else {
+      styleChunk =
+        '2d digital cartoon storytelling illustration, flat colors with soft shading, ' +
+        'clean bold outlines, expressive characters, light anime influence, cinematic framing, ' +
+        'vibrant but not neon colors, simple textured backgrounds, smooth line art, crisp edges, ' +
+        'digital painting, storybook vibe, no comic panels, no multiple frames, single scene only.';
+    }
+  }
+
   return `
 Scene ${sceneIndex} from a narrated TikTok story.
 
 Narration for this scene:
 "${beatText}"
 
-Visual style: ${styleChunk}, ${ratioText}, no text, no subtitles, no user interface, no watermarks, no logos, no borders.
+Visual style: ${styleChunk}, ${ratioText}. ${globalRules}
 `.trim();
 }
 
 /**
  * Call Krea's image API for a single prompt and return an image URL.
- * NOTE: You MUST adjust the payload + response-parsing to match Krea's official docs.
+ * Supports optional style_id + negative_prompt.
+ * NOTE: Adjust payload/response parsing to match Krea docs if needed.
  */
-async function generateKreaImageUrl(prompt, { aspectRatio = '9:16' } = {}) {
+async function generateKreaImageUrl(
+  prompt,
+  { aspectRatio = '9:16', style_id = null, negative_prompt = null } = {}
+) {
   if (!KREA_API_KEY) {
     throw new Error('KREA_API_KEY not set');
   }
 
-  // 🔁 Adjust this payload to match Krea's API
   const payload = {
     prompt,
     aspect_ratio:
@@ -167,10 +205,11 @@ async function generateKreaImageUrl(prompt, { aspectRatio = '9:16' } = {}) {
         : aspectRatio === '1:1'
         ? '1:1'
         : '16:9',
-    // You can add model/style here if Krea supports it, e.g.:
-    // model: process.env.KREA_MODEL || 'sdxl',
-    // style: 'cartoon' // example
   };
+
+  // ✅ Plug in Krea style + negatives when we have them
+  if (style_id) payload.style_id = style_id;
+  if (negative_prompt) payload.negative_prompt = negative_prompt;
 
   const resp = await fetch(KREA_API_URL, {
     method: 'POST',
@@ -188,8 +227,6 @@ async function generateKreaImageUrl(prompt, { aspectRatio = '9:16' } = {}) {
     throw new Error(`Krea image error: ${resp.status}`);
   }
 
-  // 🔁 You MUST adapt this bit to the exact shape of Krea’s response.
-  // I’m being defensive and checking a few common patterns:
   const url =
     data?.images?.[0]?.url ||
     data?.data?.[0]?.url ||
@@ -206,7 +243,7 @@ async function generateKreaImageUrl(prompt, { aspectRatio = '9:16' } = {}) {
 }
 
 /**
- * Generate one Krea image per beat (using beatTexts) and return an array of URLs.
+ * Generate one Krea image per beat and return an array of URLs.
  * On error we push null for that beat (no reuse).
  */
 async function generateKreaImageUrlsForBeats({
@@ -214,17 +251,26 @@ async function generateKreaImageUrlsForBeats({
   beatTexts,
   artStyle,
   aspectRatio,
+  styleKey,
+  styleIdOverride = null,
 }) {
   const urls = [];
+
+  // Resolve style settings
+  const reg = STYLE_REGISTRY[styleKey] || {};
+  const style_id = styleIdOverride || reg.style_id || null;
+  const negative_prompt = reg.negative_prompt || null;
 
   for (let i = 1; i <= beatCount; i++) {
     const beatText =
       beatTexts[i - 1] || beatTexts[beatTexts.length - 1] || '';
+
     const prompt = buildScenePrompt({
       beatText,
       artStyle,
       sceneIndex: i,
       aspectRatio,
+      styleKey,
     });
 
     console.log('================ PROMPT_BEAT_%d ================', i);
@@ -232,31 +278,35 @@ async function generateKreaImageUrlsForBeats({
     console.log('=================================================');
 
     try {
-      console.log(`[KREA] Generating image for Beat ${i}/${beatCount}`);
-      const url = await generateKreaImageUrl(prompt, { aspectRatio });
+      console.log(`[KREA] Generating image for Beat ${i}/${beatCount}`, {
+        styleKey,
+        style_id: style_id || '(none)',
+      });
+
+      const url = await generateKreaImageUrl(prompt, {
+        aspectRatio,
+        style_id,
+        negative_prompt,
+      });
+
       urls.push(url);
     } catch (err) {
       console.error(
         `[KREA] Beat ${i} failed, leaving this beat without an image`,
         err
       );
-      urls.push(null); // This beat may show nothing if Creatomate has no fallback
+      urls.push(null);
     }
   }
 
   return urls;
 }
 
-/**
- * Build a sequence of animation variants for all beats
- * so that no two consecutive beats use the same variant.
- */
 function buildVariantSequence(beatCount) {
   const seq = [];
   let last = null;
 
   for (let i = 0; i < beatCount; i++) {
-    // simple round-robin that avoids repeating the same variant back-to-back
     const available = ANIMATION_VARIANTS.filter((v) => v !== last);
     const idx = i % available.length;
     const chosen = available[idx];
@@ -268,10 +318,6 @@ function buildVariantSequence(beatCount) {
   return seq;
 }
 
-/**
- * Call our /api/voice-captions route to get voiceUrl + captions.
- * (You already have this route implemented in api/voice-captions.js)
- */
 async function getVoiceAndCaptions(baseUrl, narration, language) {
   const resp = await fetch(`${baseUrl}/api/voice-captions`, {
     method: 'POST',
@@ -307,13 +353,19 @@ module.exports = async function handler(req, res) {
 
     const {
       storyType = 'Random AI story',
-      artStyle = 'Scary toon', // Webflow UI can override
+      artStyle = 'Scary toon',
       language = 'English',
-      voice = 'Adam',          // still used only as a label
+      voice = 'Adam',
       aspectRatio = '9:16',
       customPrompt = '',
-      durationRange = '60-90', // "30-60" or "60-90"
-      voice_url = null,        // legacy / manual override if you ever use it
+      durationRange = '60-90',
+      voice_url = null,
+
+      // ✅ NEW:
+      // styleKey: "creepy_toon" (recommended) or "scary_toon"
+      // styleId: "tvjlqsab9" (optional override)
+      styleKey = '',
+      styleId = '',
     } = body;
 
     if (!process.env.CREATOMATE_API_KEY) {
@@ -321,6 +373,10 @@ module.exports = async function handler(req, res) {
         .status(500)
         .json({ error: 'MISSING_CREATOMATE_API_KEY' });
     }
+
+    // Resolve style key + style settings
+    const resolvedStyleKey = normalizeStyleKey(artStyle, styleKey);
+    const styleIdOverride = (styleId || '').trim() || null;
 
     // Pick template ID by aspect ratio
     const templateMap = {
@@ -357,6 +413,8 @@ module.exports = async function handler(req, res) {
       storyType,
       artStyle,
       durationRange,
+      resolvedStyleKey,
+      styleIdOverride: styleIdOverride || '(none)',
     });
 
     const narration = (scriptResp && scriptResp.narration) || '';
@@ -367,7 +425,7 @@ module.exports = async function handler(req, res) {
         .json({ error: 'SCRIPT_EMPTY', details: scriptResp });
     }
 
-    // 2) Generate voice + precise captions (TTS + STT via our own endpoint)
+    // 2) Generate voice + precise captions
     let voiceUrl = null;
     let captions = [];
     try {
@@ -413,10 +471,10 @@ module.exports = async function handler(req, res) {
       SECONDS_PER_BEAT,
     });
 
-    // 4) Build beatTexts based on narration and beatCount
+    // 4) Build beatTexts
     const beatTexts = splitNarrationIntoBeats(narration, beatCount);
 
-    // 5) Generate Krea images for the beats we are actually using
+    // 5) Generate Krea images
     let imageUrls = [];
     if (IMAGE_PROVIDER === 'krea') {
       try {
@@ -425,6 +483,8 @@ module.exports = async function handler(req, res) {
           beatTexts,
           artStyle,
           aspectRatio,
+          styleKey: resolvedStyleKey,
+          styleIdOverride,
         });
       } catch (err) {
         console.error(
@@ -435,35 +495,36 @@ module.exports = async function handler(req, res) {
       }
     }
 
-    // 6) Build a non-repeating animation sequence (no same variant twice in a row)
+    // 6) Animation sequence
     const variantSequence = buildVariantSequence(beatCount);
 
-    // 7) Build Creatomate modifications
+    // 7) Creatomate modifications
     const mods = {
-      Narration: narration, // still useful for labels / debugging
-      Voiceover: narration, // optional — template can ignore this now
+      Narration: narration,
+      Voiceover: narration,
       VoiceLabel: voice,
       LanguageLabel: language,
       StoryTypeLabel: storyType,
+
+      // helpful debug labels (optional—safe even if template ignores)
+      StyleKeyLabel: resolvedStyleKey,
+      StyleIdLabel: styleIdOverride || (STYLE_REGISTRY[resolvedStyleKey]?.style_id || ''),
     };
 
-    // Prefer generated voice + captions
     if (voiceUrl) {
-      mods.VoiceUrl = voiceUrl; // 🔑 dynamic key in your audio layer
-
+      mods.VoiceUrl = voiceUrl;
       if (captions.length) {
         mods['Captions_JSON.text'] = JSON.stringify(captions);
       }
     }
 
-    // Legacy manual override if you ever supply a voice_url directly
     if (voice_url) {
       mods.voice_url = voice_url;
     }
 
     const style = artStyle || 'Scary toon';
 
-    // Fill active beats 1..beatCount
+    // Fill beats
     for (let i = 1; i <= beatCount; i++) {
       const beatText = beatTexts[i - 1] || '';
       let imageUrl = null;
@@ -471,21 +532,19 @@ module.exports = async function handler(req, res) {
       if (IMAGE_PROVIDER === 'krea' && imageUrls.length >= i) {
         imageUrl = imageUrls[i - 1] || null;
       } else if (IMAGE_PROVIDER === 'dalle') {
-        // Fallback: if you ever switch back to DALL·E-style prompts
         imageUrl = buildScenePrompt({
           beatText,
           artStyle: style,
           sceneIndex: i,
           aspectRatio,
+          styleKey: resolvedStyleKey,
         });
       }
 
       const chosenVariant = variantSequence[i - 1];
 
-      // Clear and set only the chosen animation variant image for this beat
       for (const variant of ANIMATION_VARIANTS) {
         const imgKey = `Beat${i}_${variant}_Image`;
-
         if (variant === chosenVariant && imageUrl) {
           mods[imgKey] = imageUrl;
         } else {
@@ -494,8 +553,7 @@ module.exports = async function handler(req, res) {
       }
     }
 
-    // Explicitly clear any beats above beatCount up to MAX_BEATS,
-    // so unused beats don't accidentally show anything.
+    // Clear unused beats
     for (let i = beatCount + 1; i <= MAX_BEATS; i++) {
       for (const variant of ANIMATION_VARIANTS) {
         const imgKey = `Beat${i}_${variant}_Image`;
@@ -507,19 +565,18 @@ module.exports = async function handler(req, res) {
       template_id,
       modifications: mods,
       output_format: 'mp4',
-      // let the template + audio drive final duration
     };
 
     console.log('[CREATE_VIDEO] PAYLOAD_PREVIEW', {
       template_id_preview: template_id.slice(0, 6) + '…',
       targetSec,
       beatCount,
-      MIN_BEATS,
-      MAX_BEATS,
       imageProvider: IMAGE_PROVIDER,
       kreaImagesGenerated: imageUrls.length,
       hasVoiceUrl: !!mods.VoiceUrl,
       hasCaptionsJson: !!mods['Captions_JSON.text'],
+      resolvedStyleKey,
+      styleIdOverride: styleIdOverride || '(none)',
     });
 
     // 8) Call Creatomate
