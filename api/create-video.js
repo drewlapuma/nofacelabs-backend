@@ -1,4 +1,4 @@
-// api/create-video.js  (CommonJS, Node 18)
+// api/create-video.js (CommonJS, Node 18)
 const https = require('https');
 
 const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN || '*';
@@ -16,7 +16,9 @@ const KREA_STYLE_STRENGTH = Number(process.env.KREA_STYLE_STRENGTH || 0.85);
 // ---------- Beats ----------
 const MIN_BEATS = 8;
 const MAX_BEATS = 24;
-const SECONDS_PER_BEAT = 3.0;
+
+// keep as a *starting point*; we now compute per-beat durations dynamically
+const SECONDS_PER_BEAT_ESTIMATE = 3.0;
 
 const ANIMATION_VARIANTS = ['PanRight', 'PanLeft', 'PanUp', 'PanDown', 'Zoom'];
 
@@ -72,23 +74,140 @@ function estimateSpeechSeconds(narration) {
   return words / 2.5; // ~150 wpm
 }
 
+function countWords(text) {
+  return (String(text || '').match(/\S+/g) || []).length;
+}
+
+/**
+ * Sentence splitter (simple but effective for narration).
+ * Keeps punctuation with the sentence.
+ */
+function splitIntoSentences(text) {
+  const t = (text || '').trim();
+  if (!t) return [];
+  const parts = t.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [];
+  return parts.map((s) => s.trim()).filter(Boolean);
+}
+
+function splitLongSentence(sentence, maxWords) {
+  const words = String(sentence || '').split(/\s+/).filter(Boolean);
+  if (words.length <= maxWords) return [String(sentence).trim()];
+
+  const out = [];
+  for (let i = 0; i < words.length; i += maxWords) {
+    out.push(words.slice(i, i + maxWords).join(' ').trim());
+  }
+  return out.filter(Boolean);
+}
+
+/**
+ * Sentence-aware beat splitting:
+ * - Packs whole sentences into beats
+ * - Only splits a sentence if it's extremely long
+ * - Then normalizes beat count by merging/splitting whole beats
+ */
 function splitNarrationIntoBeats(narration, beatCount) {
   const text = (narration || '').trim();
   if (!text || beatCount <= 0) return [];
 
-  const words = text.split(/\s+/);
-  const totalWords = words.length;
-  const chunkSize = Math.max(1, Math.ceil(totalWords / beatCount));
+  const totalWords = countWords(text);
+  const targetWordsPerBeat = Math.max(8, Math.round(totalWords / beatCount));
+
+  let sentences = splitIntoSentences(text);
+
+  // Split any huge sentence so we can still pack nicely
+  const maxSentenceWords = Math.max(18, targetWordsPerBeat * 2);
+  sentences = sentences.flatMap((s) => splitLongSentence(s, maxSentenceWords));
 
   const beats = [];
-  for (let i = 0; i < totalWords; i += chunkSize) {
-    beats.push(words.slice(i, i + chunkSize).join(' '));
+  let current = '';
+  let currentWords = 0;
+
+  for (const s of sentences) {
+    const w = countWords(s);
+
+    if (current && currentWords + w > targetWordsPerBeat) {
+      beats.push(current.trim());
+      current = '';
+      currentWords = 0;
+    }
+
+    current += (current ? ' ' : '') + s;
+    currentWords += w;
   }
 
-  if (beats.length > beatCount) beats.length = beatCount;
+  if (current.trim()) beats.push(current.trim());
+
+  // Too many beats? Merge smallest adjacent pairs
+  while (beats.length > beatCount) {
+    let bestIdx = 0;
+    let bestLen = Infinity;
+    for (let i = 0; i < beats.length - 1; i++) {
+      const len = countWords(beats[i]) + countWords(beats[i + 1]);
+      if (len < bestLen) {
+        bestLen = len;
+        bestIdx = i;
+      }
+    }
+    const merged = `${beats[bestIdx]} ${beats[bestIdx + 1]}`.trim();
+    beats.splice(bestIdx, 2, merged);
+  }
+
+  // Too few beats? Split the longest beat (word-safe)
+  while (beats.length < beatCount) {
+    let longestIdx = 0;
+    let longestWords = 0;
+    for (let i = 0; i < beats.length; i++) {
+      const w = countWords(beats[i]);
+      if (w > longestWords) {
+        longestWords = w;
+        longestIdx = i;
+      }
+    }
+
+    const words = beats[longestIdx].split(/\s+/).filter(Boolean);
+    if (words.length < 12) break;
+
+    const mid = Math.floor(words.length / 2);
+    const a = words.slice(0, mid).join(' ').trim();
+    const b = words.slice(mid).join(' ').trim();
+    beats.splice(longestIdx, 1, a, b);
+  }
+
   while (beats.length < beatCount) beats.push(beats[beats.length - 1] || text);
 
   return beats;
+}
+
+/**
+ * Per-beat timing derived from text length.
+ * Returns arrays aligned to beatTexts.
+ * Uses BeatX_Group.time and BeatX_Group.duration in Creatomate.
+ */
+function beatDurationFromText(text) {
+  const words = countWords(text);
+
+  // ~150 wpm pacing
+  const speechSeconds = words / 2.5;
+
+  // breathing room for visuals
+  const padded = speechSeconds + 0.6;
+
+  // clamp so beats feel natural
+  return Math.max(2.5, Math.min(7.0, padded));
+}
+
+function buildBeatTiming(beatTexts) {
+  const durations = beatTexts.map(beatDurationFromText);
+
+  let t = 0;
+  const starts = durations.map((d) => {
+    const s = t;
+    t += d;
+    return s;
+  });
+
+  return { durations, starts, total: t };
 }
 
 // ---------- Krea: create job + poll until complete ----------
@@ -98,9 +217,7 @@ async function createKreaJob(prompt, aspectRatio) {
   const payload = {
     prompt,
     aspect_ratio: aspectRatio,
-    styles: KREA_STYLE_ID
-      ? [{ id: KREA_STYLE_ID, strength: KREA_STYLE_STRENGTH }]
-      : undefined,
+    styles: KREA_STYLE_ID ? [{ id: KREA_STYLE_ID, strength: KREA_STYLE_STRENGTH }] : undefined,
   };
 
   const resp = await fetch(KREA_GENERATE_URL, {
@@ -166,11 +283,21 @@ async function pollKreaJob(jobId) {
   throw new Error('KREA_JOB_TIMEOUT');
 }
 
+// Prompt builder: includes a continuity anchor + complete beat text
 function buildPromptForBeat({ beatText, storyType, artStyle, sceneIndex }) {
   const t = (beatText || '').trim();
   const st = (storyType || '').trim();
   const as = (artStyle || '').trim();
-  return `Scene ${sceneIndex}. Story type: ${st}. Art style: ${as}. ${t}`;
+
+  // Keep it simple but consistent; your Krea style ID does heavy lifting
+  return [
+    `Scene ${sceneIndex}.`,
+    `Story type: ${st}.`,
+    `Art style: ${as}.`,
+    `Consistent main character and consistent environment across scenes.`,
+    `Cinematic framing, clear subject, dramatic lighting.`,
+    t,
+  ].join(' ');
 }
 
 async function generateKreaImageUrlsForBeats({ beatCount, beatTexts, storyType, artStyle, aspectRatio }) {
@@ -189,7 +316,7 @@ async function generateKreaImageUrlsForBeats({ beatCount, beatTexts, storyType, 
     const beatText = beatTexts[i - 1] || '';
     const prompt = buildPromptForBeat({ beatText, storyType, artStyle, sceneIndex: i });
 
-    // ✅ Vercel log: show EXACT prompt
+    // ✅ Vercel log: see exact prompt
     console.log('[KREA] PROMPT', { beat: i, prompt });
 
     try {
@@ -236,7 +363,7 @@ module.exports = async function handler(req, res) {
       storyType = 'Random AI story',
       artStyle = 'Scary toon',
       language = 'English',
-      voice = 'Adam', // kept for labeling only
+      voice = 'Adam', // label only
       aspectRatio = '9:16',
       customPrompt = '',
       durationRange = '60-90',
@@ -273,17 +400,22 @@ module.exports = async function handler(req, res) {
       preview: narration.slice(0, 180),
     });
 
-    // 2) Beats
+    // 2) Decide beatCount (still based on rough speech)
     const speechSec = estimateSpeechSeconds(narration);
     let targetSec = Math.round(speechSec + 2);
+
     let minSec = 60, maxSec = 90;
     if (durationRange === '30-60') { minSec = 30; maxSec = 60; }
-    if (targetSec < minSec) targetSec = minSec;
 
-    let beatCount = Math.round(targetSec / SECONDS_PER_BEAT);
+    // keep within UI expectation
+    if (targetSec < minSec) targetSec = minSec;
+    if (targetSec > maxSec) targetSec = maxSec;
+
+    let beatCount = Math.round(targetSec / SECONDS_PER_BEAT_ESTIMATE);
     if (!beatCount || !Number.isFinite(beatCount)) beatCount = MIN_BEATS;
     beatCount = Math.max(MIN_BEATS, Math.min(MAX_BEATS, beatCount));
 
+    // 3) Sentence-aware beats
     const beatTexts = splitNarrationIntoBeats(narration, beatCount);
 
     console.log('[CREATE_VIDEO] BEATS', {
@@ -291,10 +423,25 @@ module.exports = async function handler(req, res) {
       targetSec,
       durationRange,
       beatCount,
-      beat1Preview: (beatTexts[0] || '').slice(0, 120),
+      beat1Preview: (beatTexts[0] || '').slice(0, 140),
     });
 
-    // 3) Krea images
+    // 4) Build per-beat timing (requires BeatX_Group.time/duration set to Dynamic in Creatomate)
+    const timing = buildBeatTiming(beatTexts);
+
+    console.log('[CREATE_VIDEO] BEAT_TIMING_PREVIEW', {
+      beatCount,
+      first5: beatTexts.slice(0, 5).map((t, idx) => ({
+        idx: idx + 1,
+        words: countWords(t),
+        start: timing.starts[idx],
+        dur: timing.durations[idx],
+        preview: t.slice(0, 90),
+      })),
+      totalEstimatedVideoSec: timing.total,
+    });
+
+    // 5) Krea images
     let imageUrls = [];
     if (IMAGE_PROVIDER === 'krea') {
       imageUrls = await generateKreaImageUrlsForBeats({
@@ -306,30 +453,38 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    // 4) Anim sequence
+    // 6) Animation variant per beat
     const variantSequence = buildVariantSequence(beatCount);
 
-    // 5) Creatomate mods
+    // 7) Creatomate mods
     const mods = {
       Narration: narration,
       VoiceLabel: voice,
       LanguageLabel: language,
       StoryTypeLabel: storyType,
+
+      // ✅ Use ONLY Creatomate voice (your Voiceover layer)
+      Voiceover: narration,
+
+      // ✅ Ensure no external audio URL ever used
+      VoiceUrl: null,
+
+      // captions off for now
+      'Captions_JSON.text': '',
     };
 
-    // ✅ IMPORTANT: Use ONLY the Creatomate TTS layer ("Voiceover") and feed it narration text.
-    // ✅ Do NOT call voice-captions. Do NOT set VoiceUrl.
-    // If your audio layer is named "Voiceover", setting this typically populates its Text field.
-    mods.Voiceover = narration;
+    // ✅ Dynamic timing keys (your UI style)
+    // You must set BeatX_Group Time + Duration to Dynamic inside Creatomate.
+    for (let i = 1; i <= beatCount; i++) {
+      mods[`Beat${i}_Group.time`] = timing.starts[i - 1];
+      mods[`Beat${i}_Group.duration`] = timing.durations[i - 1];
+    }
+    for (let i = beatCount + 1; i <= MAX_BEATS; i++) {
+      mods[`Beat${i}_Group.time`] = 0;
+      mods[`Beat${i}_Group.duration`] = 0;
+    }
 
-    // Optional: ensure VoiceUrl layer (if present) is cleared so it never overrides anything
-    mods.VoiceUrl = null;
-
-    // Captions (keeping your existing key name)
-    // (If you aren't using captions right now, leave it blank.)
-    mods['Captions_JSON.text'] = '';
-
-    // 6) Beat images
+    // Beat images (show only one variant image per beat)
     for (let i = 1; i <= beatCount; i++) {
       const imageUrl = imageUrls[i - 1] || null;
       const chosenVariant = variantSequence[i - 1];
@@ -340,7 +495,7 @@ module.exports = async function handler(req, res) {
       }
     }
 
-    // Clear unused beats
+    // Clear unused beat images
     for (let i = beatCount + 1; i <= MAX_BEATS; i++) {
       for (const variant of ANIMATION_VARIANTS) {
         mods[`Beat${i}_${variant}_Image`] = null;
@@ -349,10 +504,15 @@ module.exports = async function handler(req, res) {
 
     console.log('[CREATE_VIDEO] PAYLOAD_PREVIEW', {
       template_id,
+      beatCount,
       hasVoiceoverText: Boolean(mods.Voiceover && mods.Voiceover.trim()),
       voiceoverChars: (mods.Voiceover || '').length,
-      beatCount,
-      firstBeatKeys: Object.keys(mods).filter((k) => k.startsWith('Beat1_')),
+      firstTimingKeys: {
+        'Beat1_Group.time': mods['Beat1_Group.time'],
+        'Beat1_Group.duration': mods['Beat1_Group.duration'],
+      },
+      sampleImageKey: 'Beat1_PanRight_Image',
+      sampleImageVal: mods['Beat1_PanRight_Image'],
     });
 
     const payload = {
