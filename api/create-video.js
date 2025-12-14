@@ -16,8 +16,6 @@ const KREA_STYLE_STRENGTH = Number(process.env.KREA_STYLE_STRENGTH || 0.85);
 // ---------- Beats ----------
 const MIN_BEATS = 8;
 const MAX_BEATS = 24;
-
-// keep as a *starting point*; we now compute per-beat durations dynamically
 const SECONDS_PER_BEAT_ESTIMATE = 3.0;
 
 const ANIMATION_VARIANTS = ['PanRight', 'PanLeft', 'PanUp', 'PanDown', 'Zoom'];
@@ -78,10 +76,6 @@ function countWords(text) {
   return (String(text || '').match(/\S+/g) || []).length;
 }
 
-/**
- * Sentence splitter (simple but effective for narration).
- * Keeps punctuation with the sentence.
- */
 function splitIntoSentences(text) {
   const t = (text || '').trim();
   if (!t) return [];
@@ -100,12 +94,7 @@ function splitLongSentence(sentence, maxWords) {
   return out.filter(Boolean);
 }
 
-/**
- * Sentence-aware beat splitting:
- * - Packs whole sentences into beats
- * - Only splits a sentence if it's extremely long
- * - Then normalizes beat count by merging/splitting whole beats
- */
+// Sentence-aware beat splitting
 function splitNarrationIntoBeats(narration, beatCount) {
   const text = (narration || '').trim();
   if (!text || beatCount <= 0) return [];
@@ -115,7 +104,6 @@ function splitNarrationIntoBeats(narration, beatCount) {
 
   let sentences = splitIntoSentences(text);
 
-  // Split any huge sentence so we can still pack nicely
   const maxSentenceWords = Math.max(18, targetWordsPerBeat * 2);
   sentences = sentences.flatMap((s) => splitLongSentence(s, maxSentenceWords));
 
@@ -138,7 +126,6 @@ function splitNarrationIntoBeats(narration, beatCount) {
 
   if (current.trim()) beats.push(current.trim());
 
-  // Too many beats? Merge smallest adjacent pairs
   while (beats.length > beatCount) {
     let bestIdx = 0;
     let bestLen = Infinity;
@@ -149,11 +136,9 @@ function splitNarrationIntoBeats(narration, beatCount) {
         bestIdx = i;
       }
     }
-    const merged = `${beats[bestIdx]} ${beats[bestIdx + 1]}`.trim();
-    beats.splice(bestIdx, 2, merged);
+    beats.splice(bestIdx, 2, `${beats[bestIdx]} ${beats[bestIdx + 1]}`.trim());
   }
 
-  // Too few beats? Split the longest beat (word-safe)
   while (beats.length < beatCount) {
     let longestIdx = 0;
     let longestWords = 0;
@@ -164,7 +149,6 @@ function splitNarrationIntoBeats(narration, beatCount) {
         longestIdx = i;
       }
     }
-
     const words = beats[longestIdx].split(/\s+/).filter(Boolean);
     if (words.length < 12) break;
 
@@ -179,21 +163,11 @@ function splitNarrationIntoBeats(narration, beatCount) {
   return beats;
 }
 
-/**
- * Per-beat timing derived from text length.
- * Returns arrays aligned to beatTexts.
- * Uses BeatX_Group.time and BeatX_Group.duration in Creatomate.
- */
+// Per-beat duration from text length
 function beatDurationFromText(text) {
   const words = countWords(text);
-
-  // ~150 wpm pacing
   const speechSeconds = words / 2.5;
-
-  // breathing room for visuals
   const padded = speechSeconds + 0.6;
-
-  // clamp so beats feel natural
   return Math.max(2.5, Math.min(7.0, padded));
 }
 
@@ -210,7 +184,7 @@ function buildBeatTiming(beatTexts) {
   return { durations, starts, total: t };
 }
 
-// ---------- Krea: create job + poll until complete ----------
+// ---------- Krea: create job + poll ----------
 async function createKreaJob(prompt, aspectRatio) {
   if (!KREA_API_KEY) throw new Error('KREA_API_KEY not set');
 
@@ -283,13 +257,12 @@ async function pollKreaJob(jobId) {
   throw new Error('KREA_JOB_TIMEOUT');
 }
 
-// Prompt builder: includes a continuity anchor + complete beat text
+// Prompt builder
 function buildPromptForBeat({ beatText, storyType, artStyle, sceneIndex }) {
   const t = (beatText || '').trim();
   const st = (storyType || '').trim();
   const as = (artStyle || '').trim();
 
-  // Keep it simple but consistent; your Krea style ID does heavy lifting
   return [
     `Scene ${sceneIndex}.`,
     `Story type: ${st}.`,
@@ -316,7 +289,6 @@ async function generateKreaImageUrlsForBeats({ beatCount, beatTexts, storyType, 
     const beatText = beatTexts[i - 1] || '';
     const prompt = buildPromptForBeat({ beatText, storyType, artStyle, sceneIndex: i });
 
-    // ✅ Vercel log: see exact prompt
     console.log('[KREA] PROMPT', { beat: i, prompt });
 
     try {
@@ -400,14 +372,12 @@ module.exports = async function handler(req, res) {
       preview: narration.slice(0, 180),
     });
 
-    // 2) Decide beatCount (still based on rough speech)
+    // 2) Pick beatCount (rough)
     const speechSec = estimateSpeechSeconds(narration);
     let targetSec = Math.round(speechSec + 2);
 
     let minSec = 60, maxSec = 90;
     if (durationRange === '30-60') { minSec = 30; maxSec = 60; }
-
-    // keep within UI expectation
     if (targetSec < minSec) targetSec = minSec;
     if (targetSec > maxSec) targetSec = maxSec;
 
@@ -426,7 +396,7 @@ module.exports = async function handler(req, res) {
       beat1Preview: (beatTexts[0] || '').slice(0, 140),
     });
 
-    // 4) Build per-beat timing (requires BeatX_Group.time/duration set to Dynamic in Creatomate)
+    // 4) Dynamic timing (requires BeatX_Group time+duration set Dynamic in Creatomate)
     const timing = buildBeatTiming(beatTexts);
 
     console.log('[CREATE_VIDEO] BEAT_TIMING_PREVIEW', {
@@ -453,7 +423,7 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    // 6) Animation variant per beat
+    // 6) Anim variants
     const variantSequence = buildVariantSequence(beatCount);
 
     // 7) Creatomate mods
@@ -463,18 +433,17 @@ module.exports = async function handler(req, res) {
       LanguageLabel: language,
       StoryTypeLabel: storyType,
 
-      // ✅ Use ONLY Creatomate voice (your Voiceover layer)
+      // ✅ Use ONLY Creatomate voice layer
       Voiceover: narration,
 
-      // ✅ Ensure no external audio URL ever used
+      // ✅ Make sure nothing external overrides audio
       VoiceUrl: null,
 
       // captions off for now
       'Captions_JSON.text': '',
     };
 
-    // ✅ Dynamic timing keys (your UI style)
-    // You must set BeatX_Group Time + Duration to Dynamic inside Creatomate.
+    // ✅ Beat timing keys
     for (let i = 1; i <= beatCount; i++) {
       mods[`Beat${i}_Group.time`] = timing.starts[i - 1];
       mods[`Beat${i}_Group.duration`] = timing.durations[i - 1];
@@ -484,35 +453,41 @@ module.exports = async function handler(req, res) {
       mods[`Beat${i}_Group.duration`] = 0;
     }
 
-    // Beat images (show only one variant image per beat)
+    // ✅ Beat images: MUST set .source (this prevents black beats)
     for (let i = 1; i <= beatCount; i++) {
-      const imageUrl = imageUrls[i - 1] || null;
+      const imageUrl = imageUrls[i - 1] || '';
       const chosenVariant = variantSequence[i - 1];
 
       for (const variant of ANIMATION_VARIANTS) {
-        const imgKey = `Beat${i}_${variant}_Image`;
-        mods[imgKey] = variant === chosenVariant ? imageUrl : null;
+        const layer = `Beat${i}_${variant}_Image`;
+        const key = `${layer}.source`;
+
+        // Empty string reliably disables non-selected variants
+        mods[key] = (variant === chosenVariant) ? imageUrl : '';
       }
     }
 
-    // Clear unused beat images
+    // Clear unused beat image sources
     for (let i = beatCount + 1; i <= MAX_BEATS; i++) {
       for (const variant of ANIMATION_VARIANTS) {
-        mods[`Beat${i}_${variant}_Image`] = null;
+        mods[`Beat${i}_${variant}_Image.source`] = '';
       }
     }
 
     console.log('[CREATE_VIDEO] PAYLOAD_PREVIEW', {
       template_id,
       beatCount,
-      hasVoiceoverText: Boolean(mods.Voiceover && mods.Voiceover.trim()),
-      voiceoverChars: (mods.Voiceover || '').length,
-      firstTimingKeys: {
+      firstTiming: {
         'Beat1_Group.time': mods['Beat1_Group.time'],
         'Beat1_Group.duration': mods['Beat1_Group.duration'],
       },
-      sampleImageKey: 'Beat1_PanRight_Image',
-      sampleImageVal: mods['Beat1_PanRight_Image'],
+      beat1Sources: {
+        PanRight: mods['Beat1_PanRight_Image.source'],
+        PanLeft:  mods['Beat1_PanLeft_Image.source'],
+        PanUp:    mods['Beat1_PanUp_Image.source'],
+        PanDown:  mods['Beat1_PanDown_Image.source'],
+        Zoom:     mods['Beat1_Zoom_Image.source'],
+      },
     });
 
     const payload = {
