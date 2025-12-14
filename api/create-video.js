@@ -10,7 +10,6 @@ const KREA_GENERATE_URL =
   process.env.KREA_GENERATE_URL || 'https://api.krea.ai/generate/image/bfl/flux-1-dev';
 const KREA_JOB_URL_BASE = process.env.KREA_JOB_URL_BASE || 'https://api.krea.ai/jobs';
 
-// style id (your creepy toon id)
 const KREA_STYLE_ID = (process.env.KREA_STYLE_ID || 'tvjlqsab9').trim();
 const KREA_STYLE_STRENGTH = Number(process.env.KREA_STYLE_STRENGTH || 0.85);
 
@@ -99,7 +98,6 @@ async function createKreaJob(prompt, aspectRatio) {
   const payload = {
     prompt,
     aspect_ratio: aspectRatio,
-    // Apply style via styles array (as Krea AI said)
     styles: KREA_STYLE_ID
       ? [{ id: KREA_STYLE_ID, strength: KREA_STYLE_STRENGTH }]
       : undefined,
@@ -168,8 +166,6 @@ async function pollKreaJob(jobId) {
   throw new Error('KREA_JOB_TIMEOUT');
 }
 
-// You said: no style prompt text, no negative prompts.
-// This is the smallest prompt that still makes images match the story.
 function buildPromptForBeat({ beatText, storyType, artStyle, sceneIndex }) {
   const t = (beatText || '').trim();
   const st = (storyType || '').trim();
@@ -180,13 +176,29 @@ function buildPromptForBeat({ beatText, storyType, artStyle, sceneIndex }) {
 async function generateKreaImageUrlsForBeats({ beatCount, beatTexts, storyType, artStyle, aspectRatio }) {
   const urls = [];
 
+  console.log('[KREA] SETTINGS', {
+    generateUrl: KREA_GENERATE_URL,
+    jobBase: KREA_JOB_URL_BASE,
+    styleId: KREA_STYLE_ID || null,
+    styleStrength: KREA_STYLE_STRENGTH,
+    aspectRatio,
+    beatCount,
+  });
+
   for (let i = 1; i <= beatCount; i++) {
     const beatText = beatTexts[i - 1] || '';
     const prompt = buildPromptForBeat({ beatText, storyType, artStyle, sceneIndex: i });
 
+    // ✅ Vercel log: show EXACT prompt
+    console.log('[KREA] PROMPT', { beat: i, prompt });
+
     try {
       const jobId = await createKreaJob(prompt, aspectRatio);
+      console.log('[KREA] JOB_CREATED', { beat: i, jobId });
+
       const imageUrl = await pollKreaJob(jobId);
+      console.log('[KREA] JOB_DONE', { beat: i, imageUrl });
+
       urls.push(imageUrl);
     } catch (err) {
       console.error(`[KREA] Beat ${i} failed`, err);
@@ -212,26 +224,6 @@ function buildVariantSequence(beatCount) {
   return seq;
 }
 
-// ---------- voice-captions endpoint ----------
-async function getVoiceAndCaptions(baseUrl, narration, language) {
-  const resp = await fetch(`${baseUrl}/api/voice-captions`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ narration, language }),
-  });
-
-  const data = await resp.json().catch(() => ({}));
-  if (!resp.ok || !data.ok) {
-    console.error('[CREATE_VIDEO] voice-captions failed', resp.status, data);
-    throw new Error('VOICE_CAPTIONS_FAILED');
-  }
-
-  return {
-    voiceUrl: data.voiceUrl || null,
-    captions: Array.isArray(data.captions) ? data.captions : [],
-  };
-}
-
 // ---------- MAIN ----------
 module.exports = async function handler(req, res) {
   setCors(res);
@@ -244,7 +236,7 @@ module.exports = async function handler(req, res) {
       storyType = 'Random AI story',
       artStyle = 'Scary toon',
       language = 'English',
-      voice = 'Adam',
+      voice = 'Adam', // kept for labeling only
       aspectRatio = '9:16',
       customPrompt = '',
       durationRange = '60-90',
@@ -276,18 +268,12 @@ module.exports = async function handler(req, res) {
       return res.status(502).json({ error: 'SCRIPT_EMPTY', details: scriptResp });
     }
 
-    // 2) Voice + captions (THIS is the voice you said you want)
-    let voiceUrl = null;
-    let captions = [];
-    try {
-      const vc = await getVoiceAndCaptions(baseUrl, narration, language);
-      voiceUrl = vc.voiceUrl;
-      captions = vc.captions || [];
-    } catch (e) {
-      console.error('[CREATE_VIDEO] getVoiceAndCaptions failed', e);
-    }
+    console.log('[CREATE_VIDEO] NARRATION_PREVIEW', {
+      chars: narration.length,
+      preview: narration.slice(0, 180),
+    });
 
-    // 3) Beats
+    // 2) Beats
     const speechSec = estimateSpeechSeconds(narration);
     let targetSec = Math.round(speechSec + 2);
     let minSec = 60, maxSec = 90;
@@ -300,7 +286,15 @@ module.exports = async function handler(req, res) {
 
     const beatTexts = splitNarrationIntoBeats(narration, beatCount);
 
-    // 4) Krea images
+    console.log('[CREATE_VIDEO] BEATS', {
+      speechSec,
+      targetSec,
+      durationRange,
+      beatCount,
+      beat1Preview: (beatTexts[0] || '').slice(0, 120),
+    });
+
+    // 3) Krea images
     let imageUrls = [];
     if (IMAGE_PROVIDER === 'krea') {
       imageUrls = await generateKreaImageUrlsForBeats({
@@ -312,10 +306,10 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    // 5) Anim sequence
+    // 4) Anim sequence
     const variantSequence = buildVariantSequence(beatCount);
 
-    // 6) Creatomate mods using YOUR EXACT NAMES
+    // 5) Creatomate mods
     const mods = {
       Narration: narration,
       VoiceLabel: voice,
@@ -323,19 +317,19 @@ module.exports = async function handler(req, res) {
       StoryTypeLabel: storyType,
     };
 
-    // ✅ Use ONLY VoiceUrl (your old pipeline voice).
-    // ✅ Disable Voiceover to avoid the default TTS line / double voices.
-    mods.VoiceUrl = voiceUrl || null;
-    mods.Voiceover = ''; // important: stops "This text is read aloud"
+    // ✅ IMPORTANT: Use ONLY the Creatomate TTS layer ("Voiceover") and feed it narration text.
+    // ✅ Do NOT call voice-captions. Do NOT set VoiceUrl.
+    // If your audio layer is named "Voiceover", setting this typically populates its Text field.
+    mods.Voiceover = narration;
 
-    // ✅ Captions variable name EXACT
-    if (captions.length) {
-      mods['Captions_JSON.text'] = JSON.stringify(captions);
-    } else {
-      mods['Captions_JSON.text'] = '';
-    }
+    // Optional: ensure VoiceUrl layer (if present) is cleared so it never overrides anything
+    mods.VoiceUrl = null;
 
-    // 7) Beat images (NO .source!)
+    // Captions (keeping your existing key name)
+    // (If you aren't using captions right now, leave it blank.)
+    mods['Captions_JSON.text'] = '';
+
+    // 6) Beat images
     for (let i = 1; i <= beatCount; i++) {
       const imageUrl = imageUrls[i - 1] || null;
       const chosenVariant = variantSequence[i - 1];
@@ -352,6 +346,14 @@ module.exports = async function handler(req, res) {
         mods[`Beat${i}_${variant}_Image`] = null;
       }
     }
+
+    console.log('[CREATE_VIDEO] PAYLOAD_PREVIEW', {
+      template_id,
+      hasVoiceoverText: Boolean(mods.Voiceover && mods.Voiceover.trim()),
+      voiceoverChars: (mods.Voiceover || '').length,
+      beatCount,
+      firstBeatKeys: Object.keys(mods).filter((k) => k.startsWith('Beat1_')),
+    });
 
     const payload = {
       template_id,
