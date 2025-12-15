@@ -10,7 +10,7 @@ const KREA_GENERATE_URL =
   process.env.KREA_GENERATE_URL || 'https://api.krea.ai/generate/image/bfl/flux-1-dev';
 const KREA_JOB_URL_BASE = process.env.KREA_JOB_URL_BASE || 'https://api.krea.ai/jobs';
 
-const KREA_STYLE_ID = (process.env.KREA_STYLE_ID || 'tvjlqsab9').trim();
+const KREA_STYLE_ID = (process.env.KREA_STYLE_ID || '').trim(); // optional now
 const KREA_STYLE_STRENGTH = Number(process.env.KREA_STYLE_STRENGTH || 0.85);
 
 // ---------- Beats ----------
@@ -153,6 +153,22 @@ function buildBeatTiming(beatTexts) {
   return { durations, starts, total: t };
 }
 
+// ---------- PROMPT BUILDER (UPDATED) ----------
+// Removes: Scene # / Story type / Art style
+// Uses: beat text as visual description + consistent cinematic tail
+function buildPromptForBeat({ beatText }) {
+  const t = (beatText || '').trim();
+  return `
+${t}
+
+A precise, highly detailed visual depiction of the described moment.
+Environment and objects clearly visible.
+Cinematic composition, realistic perspective, natural shadows.
+Soft volumetric lighting where appropriate, floating dust or haze if mentioned.
+High detail, sharp textures, high quality.
+`.trim();
+}
+
 // ---------- Krea ----------
 async function createKreaJob(prompt, aspectRatio) {
   if (!KREA_API_KEY) throw new Error('KREA_API_KEY not set');
@@ -160,6 +176,7 @@ async function createKreaJob(prompt, aspectRatio) {
   const payload = {
     prompt,
     aspect_ratio: aspectRatio,
+    // keep optional style support if you want it, but it's not required
     styles: KREA_STYLE_ID ? [{ id: KREA_STYLE_ID, strength: KREA_STYLE_STRENGTH }] : undefined,
   };
 
@@ -200,7 +217,6 @@ async function pollKreaJob(jobId) {
     }
 
     const status = String(data?.status || '').toLowerCase();
-
     if (status === 'completed' || status === 'complete' || status === 'succeeded') {
       const urls = data?.result?.urls || data?.urls || [];
       const imageUrl = Array.isArray(urls) ? urls[0] : null;
@@ -215,18 +231,12 @@ async function pollKreaJob(jobId) {
   throw new Error('KREA_JOB_TIMEOUT');
 }
 
-function buildPromptForBeat({ beatText, storyType, artStyle, sceneIndex }) {
-  const t = (beatText || '').trim();
-  const st = (storyType || '').trim();
-  const as = (artStyle || '').trim();
-  return `Scene ${sceneIndex}. Story type: ${st}. Art style: ${as}. ${t}`;
-}
-
-async function generateKreaImageUrlsForBeats({ beatCount, beatTexts, storyType, artStyle, aspectRatio }) {
+async function generateKreaImageUrlsForBeats({ beatCount, beatTexts, aspectRatio }) {
   const urls = [];
+
   for (let i = 1; i <= beatCount; i++) {
     const beatText = beatTexts[i - 1] || '';
-    const prompt = buildPromptForBeat({ beatText, storyType, artStyle, sceneIndex: i });
+    const prompt = buildPromptForBeat({ beatText });
 
     console.log('[KREA] PROMPT', { beat: i, prompt });
 
@@ -237,6 +247,7 @@ async function generateKreaImageUrlsForBeats({ beatCount, beatTexts, storyType, 
 
     urls.push(imageUrl);
   }
+
   return urls;
 }
 
@@ -312,8 +323,6 @@ module.exports = async function handler(req, res) {
       imageUrls = await generateKreaImageUrlsForBeats({
         beatCount,
         beatTexts,
-        storyType,
-        artStyle,
         aspectRatio,
       });
     }
@@ -331,7 +340,7 @@ module.exports = async function handler(req, res) {
       'Captions_JSON.text': '',
     };
 
-    // ✅ TIMING KEYS: use .start (not .time)
+    // timing keys
     for (let i = 1; i <= beatCount; i++) {
       const start = timing.starts[i - 1];
       const dur = timing.durations[i - 1];
@@ -363,7 +372,7 @@ module.exports = async function handler(req, res) {
       }
     }
 
-    // images (proxy) + Beat 1 forced to PanRight
+    // images (proxy) + beat1 forced to PanRight
     let lastGood = '';
     for (let i = 1; i <= beatCount; i++) {
       const raw = imageUrls[i - 1] || '';
