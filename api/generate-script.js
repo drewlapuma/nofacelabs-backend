@@ -1,8 +1,8 @@
-// api/generate-script.js  (CommonJS, Node 18+)
+// api/generate-script.js (CommonJS, Node 18+)
 
-const ALLOW_ORIGIN   = process.env.ALLOW_ORIGIN || '*';
+const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN || '*';
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const OPENAI_MODEL   = process.env.OPENAI_MODEL || 'gpt-4.1-mini';
+const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4.1-mini';
 
 function setCors(res) {
   res.setHeader('Access-Control-Allow-Origin', ALLOW_ORIGIN);
@@ -14,16 +14,16 @@ function setCors(res) {
 function classifyStoryType(storyTypeRaw) {
   const s = String(storyTypeRaw || '').toLowerCase();
 
-  if (s.includes('scary'))        return 'scary';
-  if (s.includes('urban'))        return 'urbanLegend';
-  if (s.includes('bedtime'))      return 'bedtime';
-  if (s.includes('what if'))      return 'whatIf';
-  if (s.includes('history'))      return 'history';
-  if (s.includes('fun fact'))     return 'funFacts';
-  if (s.includes('philosophy'))   return 'philosophy';
+  if (s.includes('scary')) return 'scary';
+  if (s.includes('urban')) return 'urbanLegend';
+  if (s.includes('bedtime')) return 'bedtime';
+  if (s.includes('what if')) return 'whatIf';
+  if (s.includes('history')) return 'history';
+  if (s.includes('fun fact')) return 'funFacts';
+  if (s.includes('philosophy')) return 'philosophy';
   if (s.includes('motivational')) return 'motivational';
-  if (s.includes('custom'))       return 'customPrompt';
-  if (s.includes('random'))       return 'random';
+  if (s.includes('custom')) return 'customPrompt';
+  if (s.includes('random')) return 'random';
 
   return 'generic';
 }
@@ -32,12 +32,12 @@ function classifyStoryType(storyTypeRaw) {
 function buildStyleHints(mode) {
   switch (mode) {
     case 'scary':
-      // 🔥 Updated: make stories *visual* and scene-based
       return [
-        'Write a creepy horror story with suspense and a twist.',
+        'Write a creepy but TikTok-safe horror story with suspense and a twist.',
         'Tell the story as a sequence of very visual moments the viewer could actually see.',
-        'In almost every sentence, describe concrete things in the scene: environment, objects, shadows, silhouettes,',
-        'Avoid vague lines like "it felt scary" unless they are attached to a clear visual detail.',
+        'In most sentences, describe concrete things in the scene: environment, lighting, objects, shadows, silhouettes, motion.',
+        'Avoid vague lines like "it felt scary" unless attached to a clear visual detail.',
+        'Do NOT default to the same tropes (alley, streetlamp, abandoned house, 3:00 AM, static on TV) unless explicitly requested.',
       ].join(' ');
     case 'urbanLegend':
       return 'Write it like a spooky urban legend people tell each other, with a mysterious or ambiguous ending.';
@@ -67,7 +67,7 @@ function fallbackNarration({ storyType }) {
   const mode = classifyStoryType(storyType);
 
   if (mode === 'scary') {
-    return 'In a quiet, forgotten town, a single streetlight flickered every night at 3:07 AM, casting a thin, trembling shadow of someone who was no longer alive.';
+    return 'The elevator doors opened to a floor that didn’t exist on the directory, and the hallway lights blinked as if they were breathing.';
   }
   if (mode === 'bedtime') {
     return 'A calm bedtime story where the stars watch over a small, sleepy village and everything ends peacefully.';
@@ -88,21 +88,52 @@ function fallbackNarration({ storyType }) {
     return 'A short motivational-style story about someone overcoming a challenge.';
   }
 
-  // generic / random
   return 'A short, engaging story that works well as a vertical video voiceover.';
 }
 
-/* --------- Call OpenAI: narration ONLY (but more visual) --------- */
-async function callOpenAI({ storyType, artStyle, language, customPrompt, durationRange }) {
-  if (!OPENAI_API_KEY) {
-    console.warn('[GENERATE_SCRIPT] Missing OPENAI_API_KEY, using fallback narration.');
-    return { narration: fallbackNarration({ storyType }) };
-  }
+/* --------- Variety hooks --------- */
+function pickOne(arr) {
+  return arr[Math.floor(Math.random() * arr.length)];
+}
 
-  const mode       = classifyStoryType(storyType);
+function buildVarietyHook(mode) {
+  // These hooks force different “starting frames” so stories stop feeling identical.
+  const scarySettings = [
+    'a bright grocery store at closing time',
+    'a packed movie theater during the trailers',
+    'a suburban kitchen during a thunderstorm',
+    'a school hallway after a pep rally',
+    'a motel ice machine room',
+    'a crowded bus at night',
+    'a laundromat with humming fluorescent lights',
+    'a hospital waiting room with a broken TV',
+    'a hiking trail parking lot at sunrise',
+    'a library basement archive room',
+  ];
+
+  const genericSettings = [
+    'a small town main street',
+    'a train station platform',
+    'a quiet apartment hallway',
+    'a beach boardwalk',
+    'a warehouse office',
+  ];
+
+  const setting = mode === 'scary' ? pickOne(scarySettings) : pickOne(genericSettings);
+  return `Start in this setting (do not ignore it): ${setting}.`;
+}
+
+/* --------- Call OpenAI: narration ONLY --------- */
+async function callOpenAI({ storyType, artStyle, language, customPrompt, durationRange }) {
+  const mode = classifyStoryType(storyType);
   const styleHints = buildStyleHints(mode);
 
-  // Map durationRange -> target seconds & words
+  if (!OPENAI_API_KEY) {
+    console.warn('[GENERATE_SCRIPT] Missing OPENAI_API_KEY -> using fallback narration.');
+    return { narration: fallbackNarration({ storyType }), usedOpenAI: false };
+  }
+
+  // durationRange -> seconds & words
   let minSec = 60;
   let maxSec = 90;
   if (durationRange === '30-60') {
@@ -110,29 +141,32 @@ async function callOpenAI({ storyType, artStyle, language, customPrompt, duratio
     maxSec = 60;
   }
 
-  // Simple words-per-second estimate (about 2.5 words/sec = 150 wpm)
-  const minWords = Math.round(minSec * 2.0);  // slightly under so we don’t overshoot
-  const maxWords = Math.round(maxSec * 2.8);  // upper bound
+  // words-per-second estimate
+  const minWords = Math.round(minSec * 2.0);
+  const maxWords = Math.round(maxSec * 2.8);
 
   const userTopic =
     mode === 'customPrompt' && customPrompt
       ? `Base the story on this user prompt:\n"${customPrompt}"`
       : storyType
-      ? `Story type: ${storyType}`
-      : 'Story type: Random AI story';
+      ? `Story type label: ${storyType}`
+      : 'Story type label: Random AI story';
+
+  const varietyHook = buildVarietyHook(mode);
+
+  const antiRepetitionRules = `
+Anti-repetition rules:
+- Do not reuse the same core setup from previous stories (no repeated streetlamp/alley/abandoned-house defaults).
+- Vary: setting, time of day, protagonist, and the “strange object” that triggers events.
+- Avoid the phrases: "it felt like", "I couldn't believe", "I knew I shouldn't", unless tied to a visible action.
+`.trim();
 
   const extraVisualRules = `
-Global rules for this narration:
-
-- Imagine this will be turned into illustrated scenes for a TikTok story video.
-- Favor concrete, visual description over abstract feelings.
-- In most sentences, clearly mention what is physically present in the scene:
-  - environment (room, hallway, forest, city street, house exterior, etc.),
-  - lighting and shadows (moonlight, flickering lights, silhouettes),
-  - important objects (doors, windows, phones, journals, photos, furniture),
-  - motion (shadows moving, doors closing, wind blowing leaves).
-- You can still mention fear, tension, and emotions, but *attach* them to something visible (e.g., "her hands shook as the door slowly opened").
-- Avoid vague lines like "it was terrifying" on their own; instead, show *why* it is terrifying through visual detail.
+Global rules:
+- This will be turned into illustrated scenes.
+- Favor concrete visual description over abstract feelings.
+- In most sentences mention: environment, lighting/shadows, important objects, and motion.
+- Keep it TikTok-safe (no graphic injury descriptions).
 `.trim();
 
   const prompt = `
@@ -140,53 +174,67 @@ You write short scripts for vertical videos (TikTok / Reels / Shorts).
 
 ${styleHints}
 
+${varietyHook}
+
+${antiRepetitionRules}
+
 ${extraVisualRules}
 
 - Language: ${language || 'English'}.
-- Art style preference (for the visuals, not the text): ${artStyle || 'Realistic'}.
-- Length: The narration should be about ${minSec}–${maxSec} seconds when spoken at a natural pace.
-  That is roughly ${minWords}–${maxWords} words.
+- Art style preference (for visuals only): ${artStyle || 'Realistic'}.
+- Length: ${minSec}–${maxSec} seconds spoken, roughly ${minWords}–${maxWords} words.
 
 Do NOT break the script into bullet points or numbered beats.
-Write ONE continuous narration that can be read as a single voiceover track.
+Write ONE continuous narration for a single voiceover track.
 
 Return ONLY valid JSON in this exact shape:
-
 {
   "narration": "full voiceover text for the whole video"
 }
 
 ${userTopic}
-  `.trim();
+`.trim();
 
-  const resp = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: OPENAI_MODEL,
-      messages: [
-        {
-          role: 'system',
-          content:
-            'You are a JSON-only API. Always return strictly valid JSON with no extra text.',
-        },
-        {
-          role: 'user',
-          content: prompt,
-        },
-      ],
-      temperature: 0.9,
-    }),
+  let resp;
+  let data;
+  try {
+    resp = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: OPENAI_MODEL,
+        messages: [
+          { role: 'system', content: 'You are a JSON-only API. Always return strictly valid JSON with no extra text.' },
+          { role: 'user', content: prompt },
+        ],
+        temperature: 0.9,
+        top_p: 0.95,
+        presence_penalty: 0.6,
+        frequency_penalty: 0.4,
+      }),
+    });
+
+    data = await resp.json().catch(() => ({}));
+  } catch (e) {
+    console.error('[GENERATE_SCRIPT] Fetch failed -> fallback', e);
+    return { narration: fallbackNarration({ storyType }), usedOpenAI: false };
+  }
+
+  // ✅ HARD LOG: did OpenAI actually get called successfully?
+  console.log('[GENERATE_SCRIPT] OPENAI_RESPONSE', {
+    ok: resp.ok,
+    status: resp.status,
+    model: OPENAI_MODEL,
+    usage: data?.usage || null,
+    error: data?.error?.message || null,
   });
-
-  const data = await resp.json().catch(() => ({}));
 
   if (!resp.ok) {
     console.error('[GENERATE_SCRIPT] OpenAI error', resp.status, data);
-    return { narration: fallbackNarration({ storyType }) };
+    return { narration: fallbackNarration({ storyType }), usedOpenAI: false };
   }
 
   const raw = data?.choices?.[0]?.message?.content?.trim();
@@ -194,16 +242,17 @@ ${userTopic}
   try {
     parsed = JSON.parse(raw);
   } catch (e) {
-    console.error('[GENERATE_SCRIPT] JSON parse failed, raw content:', raw);
-    return { narration: fallbackNarration({ storyType }) };
+    console.error('[GENERATE_SCRIPT] JSON parse failed, raw:', raw);
+    return { narration: fallbackNarration({ storyType }), usedOpenAI: false };
   }
 
-  if (!parsed || typeof parsed.narration !== 'string' || !parsed.narration.trim()) {
-    console.error('[GENERATE_SCRIPT] Parsed JSON missing narration:', parsed);
-    return { narration: fallbackNarration({ storyType }) };
+  const narration = parsed?.narration;
+  if (!narration || typeof narration !== 'string' || !narration.trim()) {
+    console.error('[GENERATE_SCRIPT] Missing narration in JSON:', parsed);
+    return { narration: fallbackNarration({ storyType }), usedOpenAI: false };
   }
 
-  return { narration: parsed.narration.trim() };
+  return { narration: narration.trim(), usedOpenAI: true };
 }
 
 /* --------- HTTP handler --------- */
@@ -211,9 +260,7 @@ module.exports = async (req, res) => {
   setCors(res);
 
   if (req.method === 'OPTIONS') return res.status(200).end();
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'METHOD_NOT_ALLOWED' });
-  }
+  if (req.method !== 'POST') return res.status(405).json({ error: 'METHOD_NOT_ALLOWED' });
 
   try {
     const body =
@@ -222,10 +269,10 @@ module.exports = async (req, res) => {
         : (req.body || {});
 
     const {
-      storyType     = 'Random AI story',
-      artStyle      = 'Realistic',
-      language      = 'English',
-      customPrompt  = '',
+      storyType = 'Random AI story',
+      artStyle = 'Realistic',
+      language = 'English',
+      customPrompt = '',
       durationRange = '60-90',
     } = body;
 
@@ -235,9 +282,11 @@ module.exports = async (req, res) => {
       language,
       durationRange,
       hasCustomPrompt: !!customPrompt,
+      hasOpenAIKey: !!OPENAI_API_KEY, // ✅ this will tell you immediately in Vercel logs
+      model: OPENAI_MODEL,
     });
 
-    const { narration } = await callOpenAI({
+    const { narration, usedOpenAI } = await callOpenAI({
       storyType,
       artStyle,
       language,
@@ -246,7 +295,9 @@ module.exports = async (req, res) => {
     });
 
     console.log('[GENERATE_SCRIPT] OUTPUT_PREVIEW', {
+      usedOpenAI,
       narrationLen: (narration || '').length,
+      preview: (narration || '').slice(0, 140),
     });
 
     return res.status(200).json({
@@ -254,6 +305,7 @@ module.exports = async (req, res) => {
       artStyle,
       language,
       durationRange,
+      usedOpenAI, // ✅ now you’ll know for sure
       narration,
     });
   } catch (err) {
