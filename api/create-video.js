@@ -69,32 +69,26 @@ function estimateSpeechSeconds(narration) {
   const text = (narration || '').trim();
   if (!text) return 0;
   const words = (text.match(/\S+/g) || []).length;
-  return words / 2.5; // ~150 wpm
+  return words / 2.5;
 }
-
 function countWords(text) {
   return (String(text || '').match(/\S+/g) || []).length;
 }
-
 function splitIntoSentences(text) {
   const t = (text || '').trim();
   if (!t) return [];
   const parts = t.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [];
   return parts.map((s) => s.trim()).filter(Boolean);
 }
-
 function splitLongSentence(sentence, maxWords) {
   const words = String(sentence || '').split(/\s+/).filter(Boolean);
   if (words.length <= maxWords) return [String(sentence).trim()];
-
   const out = [];
   for (let i = 0; i < words.length; i += maxWords) {
     out.push(words.slice(i, i + maxWords).join(' ').trim());
   }
   return out.filter(Boolean);
 }
-
-// Sentence-aware beats (does NOT cut sentences mid-thought)
 function splitNarrationIntoBeats(narration, beatCount) {
   const text = (narration || '').trim();
   if (!text || beatCount <= 0) return [];
@@ -122,7 +116,6 @@ function splitNarrationIntoBeats(narration, beatCount) {
   }
   if (current.trim()) beats.push(current.trim());
 
-  // Normalize count without breaking sentence packing too much
   while (beats.length > beatCount) {
     let bestIdx = 0;
     let bestLen = Infinity;
@@ -147,7 +140,6 @@ function beatDurationFromText(text) {
   const padded = speechSeconds + 0.6;
   return Math.max(2.5, Math.min(7.0, padded));
 }
-
 function buildBeatTiming(beatTexts) {
   const durations = beatTexts.map(beatDurationFromText);
   let t = 0;
@@ -235,7 +227,6 @@ function buildPromptForBeat({ beatText, storyType, artStyle, sceneIndex }) {
   const t = (beatText || '').trim();
   const st = (storyType || '').trim();
   const as = (artStyle || '').trim();
-
   return [
     `Scene ${sceneIndex}.`,
     `Story type: ${st}.`,
@@ -264,18 +255,13 @@ async function generateKreaImageUrlsForBeats({ beatCount, beatTexts, storyType, 
 
     console.log('[KREA] PROMPT', { beat: i, prompt });
 
-    try {
-      const jobId = await createKreaJob(prompt, aspectRatio);
-      console.log('[KREA] JOB_CREATED', { beat: i, jobId });
+    const jobId = await createKreaJob(prompt, aspectRatio);
+    console.log('[KREA] JOB_CREATED', { beat: i, jobId });
 
-      const imageUrl = await pollKreaJob(jobId);
-      console.log('[KREA] JOB_DONE', { beat: i, imageUrl });
+    const imageUrl = await pollKreaJob(jobId);
+    console.log('[KREA] JOB_DONE', { beat: i, imageUrl });
 
-      urls.push(imageUrl);
-    } catch (e) {
-      console.error('[KREA] FAILED', { beat: i, message: String(e?.message || e) });
-      urls.push(null);
-    }
+    urls.push(imageUrl);
   }
 
   return urls;
@@ -306,7 +292,7 @@ module.exports = async function handler(req, res) {
       storyType = 'Random AI story',
       artStyle = 'Scary toon',
       language = 'English',
-      voice = 'Adam', // label only
+      voice = 'Adam',
       aspectRatio = '9:16',
       customPrompt = '',
       durationRange = '60-90',
@@ -326,7 +312,7 @@ module.exports = async function handler(req, res) {
 
     const baseUrl = `https://${req.headers.host}`;
 
-    // 1) Script
+    // Script
     const scriptResp = await fetch(`${baseUrl}/api/generate-script`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -338,7 +324,7 @@ module.exports = async function handler(req, res) {
       return res.status(502).json({ error: 'SCRIPT_EMPTY', details: scriptResp });
     }
 
-    // 2) Beat count
+    // Beat count
     const speechSec = estimateSpeechSeconds(narration);
     let targetSec = Math.round(speechSec + 2);
 
@@ -351,24 +337,10 @@ module.exports = async function handler(req, res) {
     if (!beatCount || !Number.isFinite(beatCount)) beatCount = MIN_BEATS;
     beatCount = Math.max(MIN_BEATS, Math.min(MAX_BEATS, beatCount));
 
-    // 3) Beats
     const beatTexts = splitNarrationIntoBeats(narration, beatCount);
-
-    // 4) Timing (requires BeatX_Group time+duration toggled Dynamic in Creatomate)
     const timing = buildBeatTiming(beatTexts);
 
-    console.log('[CREATE_VIDEO] TIMING_PREVIEW', {
-      beatCount,
-      totalEstimatedVideoSec: timing.total,
-      sample: beatTexts.slice(0, 3).map((t, i) => ({
-        beat: i + 1,
-        start: timing.starts[i],
-        dur: timing.durations[i],
-        preview: t.slice(0, 80),
-      })),
-    });
-
-    // 5) Krea images
+    // Images
     let imageUrls = [];
     if (IMAGE_PROVIDER === 'krea') {
       imageUrls = await generateKreaImageUrlsForBeats({
@@ -380,25 +352,23 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    // 6) Variants
     const variantSequence = buildVariantSequence(beatCount);
 
-    // 7) Mods
+    // Mods
     const mods = {
       Narration: narration,
       VoiceLabel: voice,
       LanguageLabel: language,
       StoryTypeLabel: storyType,
 
-      // ✅ Use ONLY Creatomate Voiceover layer (no external audio)
+      // Use Creatomate Voiceover (no external)
       Voiceover: narration,
       VoiceUrl: null,
 
-      // captions off for now
       'Captions_JSON.text': '',
     };
 
-    // 8) Apply dynamic time/duration for Beat groups
+    // Dynamic group timing (requires Time + Duration set Dynamic in Creatomate)
     for (let i = 1; i <= beatCount; i++) {
       mods[`Beat${i}_Group.time`] = timing.starts[i - 1];
       mods[`Beat${i}_Group.duration`] = timing.durations[i - 1];
@@ -408,66 +378,49 @@ module.exports = async function handler(req, res) {
       mods[`Beat${i}_Group.duration`] = 0;
     }
 
-    // 9) Image sources with HARD fallback so a beat never has "no image"
+    // ✅ KEY FIX: hide non-selected variants so they can't cover the selected image with black
     let lastGoodProxied = '';
     for (let i = 1; i <= beatCount; i++) {
       const raw = imageUrls[i - 1] || '';
       let proxied = raw ? `${baseUrl}/api/krea-image?url=${encodeURIComponent(raw)}` : '';
 
-      // If this beat has no URL, reuse last good one (prevents black beats)
-      if (!proxied && lastGoodProxied) {
-        proxied = lastGoodProxied;
-        console.warn('[IMAGE_FALLBACK] reuse last good image', { beat: i });
-      }
-
+      // fallback: if somehow empty, reuse last good
+      if (!proxied && lastGoodProxied) proxied = lastGoodProxied;
       if (proxied) lastGoodProxied = proxied;
 
       const chosenVariant = variantSequence[i - 1];
 
-      // Debug the problematic beats + first few
       if (i <= 3 || i === 14) {
         console.log('[BEAT_MEDIA_DEBUG]', {
           beat: i,
           chosenVariant,
-          raw: raw ? raw.slice(0, 120) : '',
-          proxied: proxied ? proxied.slice(0, 180) : '',
-          keyUsed: `Beat${i}_${chosenVariant}_Image.source`,
+          proxied: proxied ? proxied.slice(0, 160) : '',
         });
       }
 
       for (const variant of ANIMATION_VARIANTS) {
         const layer = `Beat${i}_${variant}_Image`;
-        const key = `${layer}.source`;
 
-        // Only ONE variant gets the source; others disabled
-        mods[key] = (variant === chosenVariant) ? proxied : '';
+        // Always set media source only for chosen
+        mods[`${layer}.source`] = (variant === chosenVariant) ? proxied : '';
+
+        // Force visibility/opacity so empty layers don't show as black
+        mods[`${layer}.visible`] = (variant === chosenVariant);
+        mods[`${layer}.opacity`] = (variant === chosenVariant) ? 100 : 0;
       }
     }
 
-    // Clear unused beat image sources
+    // Clear unused beats completely
     for (let i = beatCount + 1; i <= MAX_BEATS; i++) {
       for (const variant of ANIMATION_VARIANTS) {
-        mods[`Beat${i}_${variant}_Image.source`] = '';
+        const layer = `Beat${i}_${variant}_Image`;
+        mods[`${layer}.source`] = '';
+        mods[`${layer}.visible`] = false;
+        mods[`${layer}.opacity`] = 0;
       }
     }
 
-    console.log('[CREATE_VIDEO] PAYLOAD_CHECK', {
-      template_id,
-      beatCount,
-      beat14: {
-        t: mods['Beat14_Group.time'],
-        d: mods['Beat14_Group.duration'],
-        pr: mods['Beat14_PanRight_Image.source'] ? 'set' : 'empty',
-        pu: mods['Beat14_PanUp_Image.source'] ? 'set' : 'empty',
-        zl: mods['Beat14_Zoom_Image.source'] ? 'set' : 'empty',
-      },
-    });
-
-    const payload = {
-      template_id,
-      modifications: mods,
-      output_format: 'mp4',
-    };
+    const payload = { template_id, modifications: mods, output_format: 'mp4' };
 
     const resp = await postJSON(
       'https://api.creatomate.com/v1/renders',
