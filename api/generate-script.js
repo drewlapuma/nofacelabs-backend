@@ -1,4 +1,4 @@
-// api/generate-script.js (CommonJS, Node 18+)
+// api/generate-script.js  (CommonJS, Node 18+)
 
 const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN || '*';
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
@@ -33,9 +33,9 @@ function buildStyleHints(mode) {
   switch (mode) {
     case 'scary':
       return [
-        'Write a creepy horror story with suspense and a twist.',
+        'Write a creepy but TikTok-safe horror story with suspense and a twist.',
         'Tell the story as a sequence of very visual moments the viewer could actually see.',
-        'In most sentences, describe concrete things in the scene: environment, lighting, objects, silhouettes,',
+        'In most sentences, describe concrete things in the scene: environment, lighting, objects, shadows, silhouettes, motion.',
         'Avoid vague lines like "it felt scary" unless attached to a clear visual detail.',
         'Do NOT default to the same tropes (alley, streetlamp, abandoned house, 3:00 AM, static on TV) unless explicitly requested.',
       ].join(' ');
@@ -97,7 +97,6 @@ function pickOne(arr) {
 }
 
 function buildVarietyHook(mode) {
-  // These hooks force different “starting frames” so stories stop feeling identical.
   const scarySettings = [
     'a bright grocery store at closing time',
     'a packed movie theater during the trailers',
@@ -123,8 +122,50 @@ function buildVarietyHook(mode) {
   return `Start in this setting (do not ignore it): ${setting}.`;
 }
 
+function buildArchetypeHook(mode) {
+  if (mode !== 'scary' && mode !== 'urbanLegend') return '';
+
+  const archetypes = [
+    'Archetype: "Rule list" story (a set of rules that get violated).',
+    'Archetype: "Found note / journal entry" discovered by the narrator.',
+    'Archetype: "Time loop" where one detail changes each loop.',
+    'Archetype: "Witness interview" style—someone recounts what they saw.',
+    'Archetype: "Cursed object" that seems harmless at first.',
+    'Archetype: "Glitch in reality"—signs, labels, or maps change.',
+    'Archetype: "Misdirection"—the scary thing is not what it first seems.',
+    'Archetype: "Missing person" told through concrete clues and locations.',
+  ];
+
+  return `Use this specific story structure (do not ignore it): ${pickOne(archetypes)}`;
+}
+
+function buildPovHook(mode, povRaw) {
+  // User can pass pov: "first", "third", "second", "pov", etc.
+  const p = String(povRaw || '').toLowerCase();
+
+  // If they explicitly asked for POV stories, we randomize between first/second.
+  const wantsPov =
+    p.includes('pov') || p.includes('first') || p.includes('second') || p.includes('third');
+
+  if (!wantsPov) {
+    // default: mix it up a bit for scary/urban
+    if (mode === 'scary' || mode === 'urbanLegend') {
+      return `POV: ${pickOne(['first-person ("I")', 'second-person ("you")', 'third-person'])}.`;
+    }
+    return 'POV: third-person.';
+  }
+
+  if (p.includes('first')) return 'POV: first-person ("I").';
+  if (p.includes('second')) return 'POV: second-person ("you").';
+  if (p.includes('third')) return 'POV: third-person.';
+  if (p.includes('pov')) {
+    return `POV: ${pickOne(['first-person ("I")', 'second-person ("you")'])}.`;
+  }
+  return 'POV: third-person.';
+}
+
 /* --------- Call OpenAI: narration ONLY --------- */
-async function callOpenAI({ storyType, artStyle, language, customPrompt, durationRange }) {
+async function callOpenAI({ storyType, artStyle, language, customPrompt, durationRange, pov }) {
   const mode = classifyStoryType(storyType);
   const styleHints = buildStyleHints(mode);
 
@@ -153,19 +194,32 @@ async function callOpenAI({ storyType, artStyle, language, customPrompt, duratio
       : 'Story type label: Random AI story';
 
   const varietyHook = buildVarietyHook(mode);
+  const archetypeHook = buildArchetypeHook(mode);
+  const povHook = buildPovHook(mode, pov);
+
+  const tropeBlocker = `
+Avoid these overused horror defaults unless the user explicitly asks:
+- streetlamp in an alley
+- 3:00 AM / 3:07 AM time stamp
+- abandoned house in the woods
+- shadow figure behind you in a mirror
+- TV static / phone calls from "unknown"
+Instead, make the horror come from a fresh object, social setting, or public place.
+`.trim();
 
   const antiRepetitionRules = `
 Anti-repetition rules:
-- Do not reuse the same core setup from previous stories (no repeated streetlamp/alley/abandoned-house defaults).
+- Do not reuse the same core setup from previous stories.
 - Vary: setting, time of day, protagonist, and the “strange object” that triggers events.
-- Avoid the phrases: "it felt like", "I couldn't believe", "I knew I shouldn't", unless tied to a visible action.
+- Avoid filler phrases unless tied to visible action.
 `.trim();
 
   const extraVisualRules = `
 Global rules:
 - This will be turned into illustrated scenes.
 - Favor concrete visual description over abstract feelings.
-- In most sentences mention: environment, lighting, important objects, and motion.
+- In most sentences mention: environment, lighting/shadows, important objects, and motion.
+- Keep it TikTok-safe (no graphic injury descriptions).
 `.trim();
 
   const prompt = `
@@ -174,6 +228,12 @@ You write short scripts for vertical videos (TikTok / Reels / Shorts).
 ${styleHints}
 
 ${varietyHook}
+
+${archetypeHook}
+
+${povHook}
+
+${tropeBlocker}
 
 ${antiRepetitionRules}
 
@@ -206,7 +266,10 @@ ${userTopic}
       body: JSON.stringify({
         model: OPENAI_MODEL,
         messages: [
-          { role: 'system', content: 'You are a JSON-only API. Always return strictly valid JSON with no extra text.' },
+          {
+            role: 'system',
+            content: 'You are a JSON-only API. Always return strictly valid JSON with no extra text.',
+          },
           { role: 'user', content: prompt },
         ],
         temperature: 0.9,
@@ -222,7 +285,6 @@ ${userTopic}
     return { narration: fallbackNarration({ storyType }), usedOpenAI: false };
   }
 
-  // ✅ HARD LOG: did OpenAI actually get called successfully?
   console.log('[GENERATE_SCRIPT] OPENAI_RESPONSE', {
     ok: resp.ok,
     status: resp.status,
@@ -273,6 +335,7 @@ module.exports = async (req, res) => {
       language = 'English',
       customPrompt = '',
       durationRange = '60-90',
+      pov = '', // ✅ NEW: supports POV style stories
     } = body;
 
     console.log('[GENERATE_SCRIPT] INPUT', {
@@ -280,8 +343,9 @@ module.exports = async (req, res) => {
       artStyle,
       language,
       durationRange,
+      pov,
       hasCustomPrompt: !!customPrompt,
-      hasOpenAIKey: !!OPENAI_API_KEY, // ✅ this will tell you immediately in Vercel logs
+      hasOpenAIKey: !!OPENAI_API_KEY,
       model: OPENAI_MODEL,
     });
 
@@ -291,6 +355,7 @@ module.exports = async (req, res) => {
       language,
       customPrompt,
       durationRange,
+      pov,
     });
 
     console.log('[GENERATE_SCRIPT] OUTPUT_PREVIEW', {
@@ -304,7 +369,8 @@ module.exports = async (req, res) => {
       artStyle,
       language,
       durationRange,
-      usedOpenAI, // ✅ now you’ll know for sure
+      pov,
+      usedOpenAI,
       narration,
     });
   } catch (err) {
