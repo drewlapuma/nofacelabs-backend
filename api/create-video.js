@@ -64,7 +64,7 @@ function postJSON(url, headers, bodyObj) {
   });
 }
 
-// ---------- Speech / beats ----------
+// ---------- Text helpers ----------
 function estimateSpeechSeconds(narration) {
   const text = (narration || '').trim();
   if (!text) return 0;
@@ -94,6 +94,7 @@ function splitLongSentence(sentence, maxWords) {
   return out.filter(Boolean);
 }
 
+// Sentence-aware beats (does NOT cut sentences mid-thought)
 function splitNarrationIntoBeats(narration, beatCount) {
   const text = (narration || '').trim();
   if (!text || beatCount <= 0) return [];
@@ -102,7 +103,6 @@ function splitNarrationIntoBeats(narration, beatCount) {
   const targetWordsPerBeat = Math.max(8, Math.round(totalWords / beatCount));
 
   let sentences = splitIntoSentences(text);
-
   const maxSentenceWords = Math.max(18, targetWordsPerBeat * 2);
   sentences = sentences.flatMap((s) => splitLongSentence(s, maxSentenceWords));
 
@@ -112,54 +112,35 @@ function splitNarrationIntoBeats(narration, beatCount) {
 
   for (const s of sentences) {
     const w = countWords(s);
-
     if (current && currentWords + w > targetWordsPerBeat) {
       beats.push(current.trim());
       current = '';
       currentWords = 0;
     }
-
     current += (current ? ' ' : '') + s;
     currentWords += w;
   }
-
   if (current.trim()) beats.push(current.trim());
 
-  // normalize beat count (merge/split beats, not sentences)
+  // Normalize count without breaking sentence packing too much
   while (beats.length > beatCount) {
     let bestIdx = 0;
     let bestLen = Infinity;
     for (let i = 0; i < beats.length - 1; i++) {
       const len = countWords(beats[i]) + countWords(beats[i + 1]);
-      if (len < bestLen) { bestLen = len; bestIdx = i; }
+      if (len < bestLen) {
+        bestLen = len;
+        bestIdx = i;
+      }
     }
     beats.splice(bestIdx, 2, `${beats[bestIdx]} ${beats[bestIdx + 1]}`.trim());
   }
 
-  while (beats.length < beatCount) {
-    let longestIdx = 0;
-    let longestWords = 0;
-    for (let i = 0; i < beats.length; i++) {
-      const w = countWords(beats[i]);
-      if (w > longestWords) { longestWords = w; longestIdx = i; }
-    }
-    const words = beats[longestIdx].split(/\s+/).filter(Boolean);
-    if (words.length < 12) break;
-    const mid = Math.floor(words.length / 2);
-    beats.splice(
-      longestIdx,
-      1,
-      words.slice(0, mid).join(' ').trim(),
-      words.slice(mid).join(' ').trim()
-    );
-  }
-
   while (beats.length < beatCount) beats.push(beats[beats.length - 1] || text);
-
   return beats;
 }
 
-// ---------- Dynamic per-beat timing ----------
+// ---------- Dynamic timing ----------
 function beatDurationFromText(text) {
   const words = countWords(text);
   const speechSeconds = words / 2.5;
@@ -254,11 +235,12 @@ function buildPromptForBeat({ beatText, storyType, artStyle, sceneIndex }) {
   const t = (beatText || '').trim();
   const st = (storyType || '').trim();
   const as = (artStyle || '').trim();
+
   return [
     `Scene ${sceneIndex}.`,
     `Story type: ${st}.`,
     `Art style: ${as}.`,
-    `Consistent main character and consistent environment across scenes.`,
+    `Same main character across scenes.`,
     `Cinematic framing, clear subject, dramatic lighting.`,
     t,
   ].join(' ');
@@ -282,30 +264,33 @@ async function generateKreaImageUrlsForBeats({ beatCount, beatTexts, storyType, 
 
     console.log('[KREA] PROMPT', { beat: i, prompt });
 
-    const jobId = await createKreaJob(prompt, aspectRatio);
-    console.log('[KREA] JOB_CREATED', { beat: i, jobId });
+    try {
+      const jobId = await createKreaJob(prompt, aspectRatio);
+      console.log('[KREA] JOB_CREATED', { beat: i, jobId });
 
-    const imageUrl = await pollKreaJob(jobId);
-    console.log('[KREA] JOB_DONE', { beat: i, imageUrl });
+      const imageUrl = await pollKreaJob(jobId);
+      console.log('[KREA] JOB_DONE', { beat: i, imageUrl });
 
-    urls.push(imageUrl);
+      urls.push(imageUrl);
+    } catch (e) {
+      console.error('[KREA] FAILED', { beat: i, message: String(e?.message || e) });
+      urls.push(null);
+    }
   }
 
   return urls;
 }
 
-// ---------- Animation variants ----------
+// ---------- Variants ----------
 function buildVariantSequence(beatCount) {
   const seq = [];
   let last = null;
-
   for (let i = 0; i < beatCount; i++) {
     const available = ANIMATION_VARIANTS.filter((v) => v !== last);
     const chosen = available[i % available.length];
     seq.push(chosen);
     last = chosen;
   }
-
   return seq;
 }
 
@@ -353,12 +338,7 @@ module.exports = async function handler(req, res) {
       return res.status(502).json({ error: 'SCRIPT_EMPTY', details: scriptResp });
     }
 
-    console.log('[CREATE_VIDEO] NARRATION_PREVIEW', {
-      chars: narration.length,
-      preview: narration.slice(0, 180),
-    });
-
-    // 2) beatCount
+    // 2) Beat count
     const speechSec = estimateSpeechSeconds(narration);
     let targetSec = Math.round(speechSec + 2);
 
@@ -371,24 +351,24 @@ module.exports = async function handler(req, res) {
     if (!beatCount || !Number.isFinite(beatCount)) beatCount = MIN_BEATS;
     beatCount = Math.max(MIN_BEATS, Math.min(MAX_BEATS, beatCount));
 
-    // 3) beats (sentence-aware)
+    // 3) Beats
     const beatTexts = splitNarrationIntoBeats(narration, beatCount);
 
-    // 4) timing (requires BeatX_Group time+duration dynamic in template)
+    // 4) Timing (requires BeatX_Group time+duration toggled Dynamic in Creatomate)
     const timing = buildBeatTiming(beatTexts);
 
-    console.log('[CREATE_VIDEO] BEAT_TIMING_PREVIEW', {
+    console.log('[CREATE_VIDEO] TIMING_PREVIEW', {
       beatCount,
-      first3: beatTexts.slice(0, 3).map((t, idx) => ({
-        idx: idx + 1,
-        start: timing.starts[idx],
-        dur: timing.durations[idx],
-        preview: t.slice(0, 90),
-      })),
       totalEstimatedVideoSec: timing.total,
+      sample: beatTexts.slice(0, 3).map((t, i) => ({
+        beat: i + 1,
+        start: timing.starts[i],
+        dur: timing.durations[i],
+        preview: t.slice(0, 80),
+      })),
     });
 
-    // 5) images
+    // 5) Krea images
     let imageUrls = [];
     if (IMAGE_PROVIDER === 'krea') {
       imageUrls = await generateKreaImageUrlsForBeats({
@@ -400,24 +380,25 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    // 6) variants
+    // 6) Variants
     const variantSequence = buildVariantSequence(beatCount);
 
-    // 7) mods
+    // 7) Mods
     const mods = {
       Narration: narration,
       VoiceLabel: voice,
       LanguageLabel: language,
       StoryTypeLabel: storyType,
 
-      // ✅ only Creatomate voice
+      // ✅ Use ONLY Creatomate Voiceover layer (no external audio)
       Voiceover: narration,
       VoiceUrl: null,
 
+      // captions off for now
       'Captions_JSON.text': '',
     };
 
-    // timing keys
+    // 8) Apply dynamic time/duration for Beat groups
     for (let i = 1; i <= beatCount; i++) {
       mods[`Beat${i}_Group.time`] = timing.starts[i - 1];
       mods[`Beat${i}_Group.duration`] = timing.durations[i - 1];
@@ -427,38 +408,66 @@ module.exports = async function handler(req, res) {
       mods[`Beat${i}_Group.duration`] = 0;
     }
 
-    // image keys (proxy URLs so Creatomate can fetch reliably)
+    // 9) Image sources with HARD fallback so a beat never has "no image"
+    let lastGoodProxied = '';
     for (let i = 1; i <= beatCount; i++) {
       const raw = imageUrls[i - 1] || '';
-      const proxied = raw ? `${baseUrl}/api/krea-image?url=${encodeURIComponent(raw)}` : '';
+      let proxied = raw ? `${baseUrl}/api/krea-image?url=${encodeURIComponent(raw)}` : '';
+
+      // If this beat has no URL, reuse last good one (prevents black beats)
+      if (!proxied && lastGoodProxied) {
+        proxied = lastGoodProxied;
+        console.warn('[IMAGE_FALLBACK] reuse last good image', { beat: i });
+      }
+
+      if (proxied) lastGoodProxied = proxied;
+
       const chosenVariant = variantSequence[i - 1];
 
-      console.log('[IMAGE] SOURCE', { beat: i, chosenVariant, proxied });
+      // Debug the problematic beats + first few
+      if (i <= 3 || i === 14) {
+        console.log('[BEAT_MEDIA_DEBUG]', {
+          beat: i,
+          chosenVariant,
+          raw: raw ? raw.slice(0, 120) : '',
+          proxied: proxied ? proxied.slice(0, 180) : '',
+          keyUsed: `Beat${i}_${chosenVariant}_Image.source`,
+        });
+      }
 
       for (const variant of ANIMATION_VARIANTS) {
         const layer = `Beat${i}_${variant}_Image`;
         const key = `${layer}.source`;
+
+        // Only ONE variant gets the source; others disabled
         mods[key] = (variant === chosenVariant) ? proxied : '';
       }
     }
 
+    // Clear unused beat image sources
     for (let i = beatCount + 1; i <= MAX_BEATS; i++) {
       for (const variant of ANIMATION_VARIANTS) {
         mods[`Beat${i}_${variant}_Image.source`] = '';
       }
     }
 
-    console.log('[CREATE_VIDEO] PAYLOAD_PREVIEW', {
+    console.log('[CREATE_VIDEO] PAYLOAD_CHECK', {
       template_id,
       beatCount,
-      sample: {
-        'Beat1_Group.time': mods['Beat1_Group.time'],
-        'Beat1_Group.duration': mods['Beat1_Group.duration'],
-        'Beat1_PanRight_Image.source': mods['Beat1_PanRight_Image.source'],
+      beat14: {
+        t: mods['Beat14_Group.time'],
+        d: mods['Beat14_Group.duration'],
+        pr: mods['Beat14_PanRight_Image.source'] ? 'set' : 'empty',
+        pu: mods['Beat14_PanUp_Image.source'] ? 'set' : 'empty',
+        zl: mods['Beat14_Zoom_Image.source'] ? 'set' : 'empty',
       },
     });
 
-    const payload = { template_id, modifications: mods, output_format: 'mp4' };
+    const payload = {
+      template_id,
+      modifications: mods,
+      output_format: 'mp4',
+    };
 
     const resp = await postJSON(
       'https://api.creatomate.com/v1/renders',
