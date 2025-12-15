@@ -224,7 +224,6 @@ function buildPromptForBeat({ beatText, storyType, artStyle, sceneIndex }) {
 
 async function generateKreaImageUrlsForBeats({ beatCount, beatTexts, storyType, artStyle, aspectRatio }) {
   const urls = [];
-
   for (let i = 1; i <= beatCount; i++) {
     const beatText = beatTexts[i - 1] || '';
     const prompt = buildPromptForBeat({ beatText, storyType, artStyle, sceneIndex: i });
@@ -238,7 +237,6 @@ async function generateKreaImageUrlsForBeats({ beatCount, beatTexts, storyType, 
 
     urls.push(imageUrl);
   }
-
   return urls;
 }
 
@@ -283,7 +281,6 @@ module.exports = async function handler(req, res) {
 
     const baseUrl = `https://${req.headers.host}`;
 
-    // Script
     const scriptResp = await fetch(`${baseUrl}/api/generate-script`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -295,7 +292,6 @@ module.exports = async function handler(req, res) {
       return res.status(502).json({ error: 'SCRIPT_EMPTY', details: scriptResp });
     }
 
-    // beat count
     const speechSec = estimateSpeechSeconds(narration);
     let targetSec = Math.round(speechSec + 2);
     let minSec = 60, maxSec = 90;
@@ -311,7 +307,6 @@ module.exports = async function handler(req, res) {
     const timing = buildBeatTiming(beatTexts);
     const variantSequence = buildVariantSequence(beatCount);
 
-    // images
     let imageUrls = [];
     if (IMAGE_PROVIDER === 'krea') {
       imageUrls = await generateKreaImageUrlsForBeats({
@@ -336,25 +331,31 @@ module.exports = async function handler(req, res) {
       'Captions_JSON.text': '',
     };
 
-    // ✅ Correct timing:
-    // Scene is absolute, group is relative inside scene (start at 0)
+    // ✅ TIMING KEYS: use .start (not .time)
     for (let i = 1; i <= beatCount; i++) {
       const start = timing.starts[i - 1];
       const dur = timing.durations[i - 1];
 
-      mods[`Beat${i}_Scene.time`] = start;
+      mods[`Beat${i}_Scene.start`] = start;
       mods[`Beat${i}_Scene.duration`] = dur;
 
-      mods[`Beat${i}_Group.time`] = 0;
+      mods[`Beat${i}_Group.start`] = 0;
       mods[`Beat${i}_Group.duration`] = dur;
+
+      if (i === 1) {
+        console.log('[BEAT1_TIMING_KEYS]', {
+          sceneStart: mods['Beat1_Scene.start'],
+          sceneDuration: mods['Beat1_Scene.duration'],
+          groupStart: mods['Beat1_Group.start'],
+          groupDuration: mods['Beat1_Group.duration'],
+        });
+      }
     }
 
-    // clear unused
     for (let i = beatCount + 1; i <= MAX_BEATS; i++) {
-      mods[`Beat${i}_Scene.time`] = 0;
+      mods[`Beat${i}_Scene.start`] = 0;
       mods[`Beat${i}_Scene.duration`] = 0;
-
-      mods[`Beat${i}_Group.time`] = 0;
+      mods[`Beat${i}_Group.start`] = 0;
       mods[`Beat${i}_Group.duration`] = 0;
 
       for (const variant of ANIMATION_VARIANTS) {
@@ -362,7 +363,7 @@ module.exports = async function handler(req, res) {
       }
     }
 
-    // images (proxy) + ✅ Beat 1 forced to PanRight
+    // images (proxy) + Beat 1 forced to PanRight
     let lastGood = '';
     for (let i = 1; i <= beatCount; i++) {
       const raw = imageUrls[i - 1] || '';
