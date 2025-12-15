@@ -4,13 +4,20 @@ const https = require('https');
 const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN || '*';
 const IMAGE_PROVIDER = (process.env.IMAGE_PROVIDER || 'krea').toLowerCase();
 
+// ---------- OpenAI prompt expander ----------
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4.1-mini';
+const PROMPT_EXPANDER = (process.env.PROMPT_EXPANDER || 'openai').toLowerCase(); // 'openai' | 'off'
+const EXPAND_SHORT_BEATS_ONLY = String(process.env.EXPAND_SHORT_BEATS_ONLY || 'true').toLowerCase() !== 'false';
+const EXPAND_WORD_THRESHOLD = Number(process.env.EXPAND_WORD_THRESHOLD || 14); // beats with < 14 words get expanded
+
 // ---------- Krea ----------
 const KREA_API_KEY = process.env.KREA_API_KEY;
 const KREA_GENERATE_URL =
   process.env.KREA_GENERATE_URL || 'https://api.krea.ai/generate/image/bfl/flux-1-dev';
 const KREA_JOB_URL_BASE = process.env.KREA_JOB_URL_BASE || 'https://api.krea.ai/jobs';
 
-// ✅ Always use style id (do not allow it to silently disappear)
+// ✅ Always apply your style id (do not silently drop it)
 const KREA_STYLE_ID = (process.env.KREA_STYLE_ID || 'tvjlqsab9').trim();
 const KREA_STYLE_STRENGTH = Number(process.env.KREA_STYLE_STRENGTH || 0.85);
 
@@ -66,14 +73,14 @@ function postJSON(url, headers, bodyObj) {
 }
 
 // ---------- Text helpers ----------
+function countWords(text) {
+  return (String(text || '').match(/\S+/g) || []).length;
+}
 function estimateSpeechSeconds(narration) {
   const text = (narration || '').trim();
   if (!text) return 0;
-  const words = (text.match(/\S+/g) || []).length;
-  return words / 2.5;
-}
-function countWords(text) {
-  return (String(text || '').match(/\S+/g) || []).length;
+  const words = countWords(text);
+  return words / 2.5; // ~150 wpm
 }
 function splitIntoSentences(text) {
   const t = (text || '').trim();
@@ -91,7 +98,7 @@ function splitLongSentence(sentence, maxWords) {
   return out.filter(Boolean);
 }
 
-// Sentence-aware beats
+// Sentence-aware beats (no cut-off sentences)
 function splitNarrationIntoBeats(narration, beatCount) {
   const text = (narration || '').trim();
   if (!text || beatCount <= 0) return [];
@@ -119,6 +126,7 @@ function splitNarrationIntoBeats(narration, beatCount) {
   }
   if (current.trim()) beats.push(current.trim());
 
+  // Merge if too many
   while (beats.length > beatCount) {
     let bestIdx = 0;
     let bestLen = Infinity;
@@ -154,17 +162,60 @@ function buildBeatTiming(beatTexts) {
   return { durations, starts, total: t };
 }
 
-// ---------- PROMPT BUILDER (UPDATED, STYLE-SAFE) ----------
-// No "Scene #", no "story type", no "art style", no "cinematic", no "realistic".
-function buildPromptForBeat({ beatText }) {
-  const t = (beatText || '').trim();
-  return `
-${t}
+// ---------- OpenAI prompt expander (style-safe) ----------
+async function expandBeatToVisualPrompt(beatText) {
+  const text = String(beatText || '').trim();
+  if (!text) return '';
 
-Clear environment and object details.
-Specific lighting sources and shadows.
-Consistent perspective.
-`.trim();
+  // feature off or missing key -> just return beat text
+  if (!OPENAI_API_KEY || PROMPT_EXPANDER !== 'openai') return text;
+
+  const instruction = `
+Turn the following narration line into a single, highly detailed visual scene prompt for image generation.
+
+Rules:
+- Output ONLY the prompt text (no quotes, no bullets, no headings).
+- Describe: environment, key objects, lighting/shadows, mood via visible details, spatial layout.
+- Keep it TikTok-safe (no graphic injury).
+- Do NOT include words like: cinematic, realistic, photorealistic, 8k, ultra, high quality, masterpiece.
+- Do NOT mention "art style" or "story type" or "Scene #".
+- Keep it 2–5 sentences, dense and specific.
+
+Narration line:
+"${text}"
+  `.trim();
+
+  const resp = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: OPENAI_MODEL,
+      messages: [
+        { role: 'system', content: 'You output only the final prompt text. No JSON. No extra text.' },
+        { role: 'user', content: instruction },
+      ],
+      temperature: 0.7,
+      top_p: 0.95,
+      presence_penalty: 0.3,
+      frequency_penalty: 0.2,
+    }),
+  });
+
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    console.error('[PROMPT_EXPANDER] OpenAI failed', resp.status, data?.error || data);
+    return text;
+  }
+
+  const out = String(data?.choices?.[0]?.message?.content || '').trim();
+  if (!out) return text;
+
+  // lightweight safety: keep output from becoming huge
+  const maxChars = 900;
+  return out.length > maxChars ? out.slice(0, maxChars).trim() : out;
 }
 
 // ---------- Krea ----------
@@ -175,13 +226,15 @@ async function createKreaJob(prompt, aspectRatio) {
   const payload = {
     prompt,
     aspect_ratio: aspectRatio,
-    // ✅ Apply your Krea style via style ID (not via prompt words)
     styles: [{ id: KREA_STYLE_ID, strength: KREA_STYLE_STRENGTH }],
   };
 
   const resp = await fetch(KREA_GENERATE_URL, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${KREA_API_KEY}`, 'Content-Type': 'application/json' },
+    headers: {
+      Authorization: `Bearer ${KREA_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
     body: JSON.stringify(payload),
   });
 
@@ -192,7 +245,11 @@ async function createKreaJob(prompt, aspectRatio) {
   }
 
   const jobId = data?.job_id || data?.id;
-  if (!jobId) throw new Error('KREA_MISSING_JOB_ID');
+  if (!jobId) {
+    console.error('[KREA_GENERATE_ERROR] Missing job_id', data);
+    throw new Error('KREA_MISSING_JOB_ID');
+  }
+
   return jobId;
 }
 
@@ -216,11 +273,18 @@ async function pollKreaJob(jobId) {
     if (status === 'completed' || status === 'complete' || status === 'succeeded') {
       const urls = data?.result?.urls || data?.urls || [];
       const imageUrl = Array.isArray(urls) ? urls[0] : null;
-      if (!imageUrl) throw new Error('KREA_JOB_NO_RESULT_URL');
+      if (!imageUrl) {
+        console.error('[KREA_JOB_ERROR] Completed but no result urls', data);
+        throw new Error('KREA_JOB_NO_RESULT_URL');
+      }
       return imageUrl;
     }
 
-    if (status === 'failed' || status === 'error') throw new Error('KREA_JOB_FAILED');
+    if (status === 'failed' || status === 'error') {
+      console.error('[KREA_JOB_ERROR] Job failed', data);
+      throw new Error('KREA_JOB_FAILED');
+    }
+
     await new Promise((r) => setTimeout(r, 2500));
   }
 
@@ -231,12 +295,25 @@ async function generateKreaImageUrlsForBeats({ beatCount, beatTexts, aspectRatio
   const urls = [];
 
   console.log('[KREA] STYLE', { styleId: KREA_STYLE_ID, strength: KREA_STYLE_STRENGTH });
+  console.log('[PROMPT_EXPANDER] CONFIG', {
+    enabled: PROMPT_EXPANDER === 'openai' && !!OPENAI_API_KEY,
+    shortBeatsOnly: EXPAND_SHORT_BEATS_ONLY,
+    threshold: EXPAND_WORD_THRESHOLD,
+    model: OPENAI_MODEL,
+  });
 
   for (let i = 1; i <= beatCount; i++) {
     const beatText = beatTexts[i - 1] || '';
-    const prompt = buildPromptForBeat({ beatText });
 
-    console.log('[KREA] PROMPT', { beat: i, prompt });
+    const needsExpand =
+      !EXPAND_SHORT_BEATS_ONLY ? true : (countWords(beatText) < EXPAND_WORD_THRESHOLD);
+
+    const prompt = needsExpand
+      ? await expandBeatToVisualPrompt(beatText)
+      : beatText.trim();
+
+    console.log('[KREA] BEAT_TEXT', { beat: i, beatText });
+    console.log('[KREA] PROMPT', { beat: i, expanded: needsExpand, prompt });
 
     const jobId = await createKreaJob(prompt, aspectRatio);
     const imageUrl = await pollKreaJob(jobId);
@@ -274,11 +351,15 @@ module.exports = async function handler(req, res) {
       storyType = 'Random AI story',
       artStyle = 'Scary toon',
       language = 'English',
-      voice = 'Adam',
+      voice = 'Adam', // label only
       aspectRatio = '9:16',
       customPrompt = '',
       durationRange = '60-90',
     } = body;
+
+    if (!process.env.CREATOMATE_API_KEY) {
+      return res.status(500).json({ error: 'MISSING_CREATOMATE_API_KEY' });
+    }
 
     const templateMap = {
       '9:16': process.env.CREATO_TEMPLATE_916,
@@ -288,8 +369,8 @@ module.exports = async function handler(req, res) {
     const template_id = (templateMap[aspectRatio] || '').trim();
     if (!template_id) return res.status(400).json({ error: 'NO_TEMPLATE_FOR_ASPECT', aspectRatio });
 
+    // 1) Get narration
     const baseUrl = `https://${req.headers.host}`;
-
     const scriptResp = await fetch(`${baseUrl}/api/generate-script`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -301,6 +382,7 @@ module.exports = async function handler(req, res) {
       return res.status(502).json({ error: 'SCRIPT_EMPTY', details: scriptResp });
     }
 
+    // 2) Beats + timing
     const speechSec = estimateSpeechSeconds(narration);
     let targetSec = Math.round(speechSec + 2);
     let minSec = 60, maxSec = 90;
@@ -314,8 +396,8 @@ module.exports = async function handler(req, res) {
 
     const beatTexts = splitNarrationIntoBeats(narration, beatCount);
     const timing = buildBeatTiming(beatTexts);
-    const variantSequence = buildVariantSequence(beatCount);
 
+    // 3) Images (Krea)
     let imageUrls = [];
     if (IMAGE_PROVIDER === 'krea') {
       imageUrls = await generateKreaImageUrlsForBeats({
@@ -325,20 +407,25 @@ module.exports = async function handler(req, res) {
       });
     }
 
+    // 4) Animation sequence
+    const variantSequence = buildVariantSequence(beatCount);
+
+    // 5) Creatomate mods
     const mods = {
       Narration: narration,
       VoiceLabel: voice,
       LanguageLabel: language,
       StoryTypeLabel: storyType,
 
-      // Creatomate voice only
+      // ✅ Use Creatomate voice layer only
       Voiceover: narration,
       VoiceUrl: null,
 
+      // captions not used in this version
       'Captions_JSON.text': '',
     };
 
-    // timing keys (.start)
+    // ✅ Timing: Scene absolute, Group relative
     for (let i = 1; i <= beatCount; i++) {
       const start = timing.starts[i - 1];
       const dur = timing.durations[i - 1];
@@ -350,9 +437,11 @@ module.exports = async function handler(req, res) {
       mods[`Beat${i}_Group.duration`] = dur;
     }
 
+    // Clear unused beats
     for (let i = beatCount + 1; i <= MAX_BEATS; i++) {
       mods[`Beat${i}_Scene.start`] = 0;
       mods[`Beat${i}_Scene.duration`] = 0;
+
       mods[`Beat${i}_Group.start`] = 0;
       mods[`Beat${i}_Group.duration`] = 0;
 
@@ -361,7 +450,7 @@ module.exports = async function handler(req, res) {
       }
     }
 
-    // images (proxy) + beat1 forced to PanRight
+    // 6) Beat images (proxy) + Beat 1 forced PanRight
     let lastGood = '';
     for (let i = 1; i <= beatCount; i++) {
       const raw = imageUrls[i - 1] || '';
@@ -385,7 +474,11 @@ module.exports = async function handler(req, res) {
       }
     }
 
-    const payload = { template_id, modifications: mods, output_format: 'mp4' };
+    const payload = {
+      template_id,
+      modifications: mods,
+      output_format: 'mp4',
+    };
 
     const resp = await postJSON(
       'https://api.creatomate.com/v1/renders',
