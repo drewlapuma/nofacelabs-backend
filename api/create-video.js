@@ -89,6 +89,8 @@ function splitLongSentence(sentence, maxWords) {
   }
   return out.filter(Boolean);
 }
+
+// Sentence-aware beats
 function splitNarrationIntoBeats(narration, beatCount) {
   const text = (narration || '').trim();
   if (!text || beatCount <= 0) return [];
@@ -163,10 +165,7 @@ async function createKreaJob(prompt, aspectRatio) {
 
   const resp = await fetch(KREA_GENERATE_URL, {
     method: 'POST',
-    headers: {
-      Authorization: `Bearer ${KREA_API_KEY}`,
-      'Content-Type': 'application/json',
-    },
+    headers: { Authorization: `Bearer ${KREA_API_KEY}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   });
 
@@ -201,22 +200,14 @@ async function pollKreaJob(jobId) {
     }
 
     const status = String(data?.status || '').toLowerCase();
-
     if (status === 'completed' || status === 'complete' || status === 'succeeded') {
       const urls = data?.result?.urls || data?.urls || [];
       const imageUrl = Array.isArray(urls) ? urls[0] : null;
-      if (!imageUrl) {
-        console.error('[KREA_JOB_ERROR] Completed but no result urls', data);
-        throw new Error('KREA_JOB_NO_RESULT_URL');
-      }
+      if (!imageUrl) throw new Error('KREA_JOB_NO_RESULT_URL');
       return imageUrl;
     }
 
-    if (status === 'failed' || status === 'error') {
-      console.error('[KREA_JOB_ERROR] Job failed', data);
-      throw new Error('KREA_JOB_FAILED');
-    }
-
+    if (status === 'failed' || status === 'error') throw new Error('KREA_JOB_FAILED');
     await new Promise((r) => setTimeout(r, 2500));
   }
 
@@ -340,7 +331,6 @@ module.exports = async function handler(req, res) {
     const beatTexts = splitNarrationIntoBeats(narration, beatCount);
     const timing = buildBeatTiming(beatTexts);
 
-    // Images
     let imageUrls = [];
     if (IMAGE_PROVIDER === 'krea') {
       imageUrls = await generateKreaImageUrlsForBeats({
@@ -354,71 +344,68 @@ module.exports = async function handler(req, res) {
 
     const variantSequence = buildVariantSequence(beatCount);
 
-    // Mods
     const mods = {
       Narration: narration,
       VoiceLabel: voice,
       LanguageLabel: language,
       StoryTypeLabel: storyType,
 
-      // Use Creatomate Voiceover (no external)
+      // ✅ Use Creatomate voice
       Voiceover: narration,
       VoiceUrl: null,
 
       'Captions_JSON.text': '',
     };
 
-    // Dynamic group timing (requires Time + Duration set Dynamic in Creatomate)
+    // ✅ CRITICAL FIX: set Scene + Group time/duration
     for (let i = 1; i <= beatCount; i++) {
-      mods[`Beat${i}_Group.time`] = timing.starts[i - 1];
-      mods[`Beat${i}_Group.duration`] = timing.durations[i - 1];
+      const start = timing.starts[i - 1];
+      const dur = timing.durations[i - 1];
+
+      mods[`Beat${i}_Scene.time`] = start;
+      mods[`Beat${i}_Scene.duration`] = dur;
+
+      mods[`Beat${i}_Group.time`] = start;
+      mods[`Beat${i}_Group.duration`] = dur;
     }
     for (let i = beatCount + 1; i <= MAX_BEATS; i++) {
+      mods[`Beat${i}_Scene.time`] = 0;
+      mods[`Beat${i}_Scene.duration`] = 0;
+
       mods[`Beat${i}_Group.time`] = 0;
       mods[`Beat${i}_Group.duration`] = 0;
     }
 
-    // ✅ KEY FIX: hide non-selected variants so they can't cover the selected image with black
+    // Images (proxy URL)
     let lastGoodProxied = '';
     for (let i = 1; i <= beatCount; i++) {
       const raw = imageUrls[i - 1] || '';
       let proxied = raw ? `${baseUrl}/api/krea-image?url=${encodeURIComponent(raw)}` : '';
-
-      // fallback: if somehow empty, reuse last good
       if (!proxied && lastGoodProxied) proxied = lastGoodProxied;
       if (proxied) lastGoodProxied = proxied;
 
       const chosenVariant = variantSequence[i - 1];
 
-      if (i <= 3 || i === 14) {
-        console.log('[BEAT_MEDIA_DEBUG]', {
-          beat: i,
-          chosenVariant,
-          proxied: proxied ? proxied.slice(0, 160) : '',
-        });
-      }
-
       for (const variant of ANIMATION_VARIANTS) {
         const layer = `Beat${i}_${variant}_Image`;
-
-        // Always set media source only for chosen
         mods[`${layer}.source`] = (variant === chosenVariant) ? proxied : '';
-
-        // Force visibility/opacity so empty layers don't show as black
-        mods[`${layer}.visible`] = (variant === chosenVariant);
-        mods[`${layer}.opacity`] = (variant === chosenVariant) ? 100 : 0;
       }
     }
-
-    // Clear unused beats completely
     for (let i = beatCount + 1; i <= MAX_BEATS; i++) {
       for (const variant of ANIMATION_VARIANTS) {
-        const layer = `Beat${i}_${variant}_Image`;
-        mods[`${layer}.source`] = '';
-        mods[`${layer}.visible`] = false;
-        mods[`${layer}.opacity`] = 0;
+        mods[`Beat${i}_${variant}_Image.source`] = '';
       }
     }
+
+    console.log('[CREATE_VIDEO] CHECK', {
+      beatCount,
+      beat1: {
+        sceneT: mods['Beat1_Scene.time'],
+        sceneD: mods['Beat1_Scene.duration'],
+        groupT: mods['Beat1_Group.time'],
+        groupD: mods['Beat1_Group.duration'],
+      },
+    });
 
     const payload = { template_id, modifications: mods, output_format: 'mp4' };
 
