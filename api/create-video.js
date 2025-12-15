@@ -90,7 +90,7 @@ function splitLongSentence(sentence, maxWords) {
   return out.filter(Boolean);
 }
 
-// Sentence-aware beats (no cut-off sentences)
+// Sentence-aware beats
 function splitNarrationIntoBeats(narration, beatCount) {
   const text = (narration || '').trim();
   if (!text || beatCount <= 0) return [];
@@ -267,7 +267,7 @@ module.exports = async function handler(req, res) {
       storyType = 'Random AI story',
       artStyle = 'Scary toon',
       language = 'English',
-      voice = 'Adam', // label only
+      voice = 'Adam',
       aspectRatio = '9:16',
       customPrompt = '',
       durationRange = '60-90',
@@ -329,15 +329,15 @@ module.exports = async function handler(req, res) {
       LanguageLabel: language,
       StoryTypeLabel: storyType,
 
-      // ✅ Use Creatomate voice layer only
+      // Creatomate voice only
       Voiceover: narration,
       VoiceUrl: null,
 
       'Captions_JSON.text': '',
     };
 
-    // ✅ CORRECT TIMING:
-    // Scene is absolute. Group is RELATIVE inside the scene.
+    // ✅ Correct timing:
+    // Scene is absolute, group is relative inside scene (start at 0)
     for (let i = 1; i <= beatCount; i++) {
       const start = timing.starts[i - 1];
       const dur = timing.durations[i - 1];
@@ -349,6 +349,7 @@ module.exports = async function handler(req, res) {
       mods[`Beat${i}_Group.duration`] = dur;
     }
 
+    // clear unused
     for (let i = beatCount + 1; i <= MAX_BEATS; i++) {
       mods[`Beat${i}_Scene.time`] = 0;
       mods[`Beat${i}_Scene.duration`] = 0;
@@ -361,7 +362,7 @@ module.exports = async function handler(req, res) {
       }
     }
 
-    // images (proxy)
+    // images (proxy) + ✅ Beat 1 forced to PanRight
     let lastGood = '';
     for (let i = 1; i <= beatCount; i++) {
       const raw = imageUrls[i - 1] || '';
@@ -369,27 +370,21 @@ module.exports = async function handler(req, res) {
       if (!proxied && lastGood) proxied = lastGood;
       if (proxied) lastGood = proxied;
 
-      const chosen = variantSequence[i - 1];
+      const chosen = (i === 1) ? 'PanRight' : variantSequence[i - 1];
+
+      if (i === 1) {
+        console.log('[BEAT1_DEBUG]', {
+          raw: raw ? raw.slice(0, 140) : '',
+          proxied: proxied ? proxied.slice(0, 180) : '',
+          chosen,
+          key: `Beat1_${chosen}_Image.source`,
+        });
+      }
 
       for (const variant of ANIMATION_VARIANTS) {
         mods[`Beat${i}_${variant}_Image.source`] = (variant === chosen) ? proxied : '';
       }
     }
-
-    console.log('[TIMING_CHECK]', {
-      beat1: {
-        sceneT: mods['Beat1_Scene.time'],
-        sceneD: mods['Beat1_Scene.duration'],
-        groupT: mods['Beat1_Group.time'],
-        groupD: mods['Beat1_Group.duration'],
-      },
-      beat2: {
-        sceneT: mods['Beat2_Scene.time'],
-        sceneD: mods['Beat2_Scene.duration'],
-        groupT: mods['Beat2_Group.time'],
-        groupD: mods['Beat2_Group.duration'],
-      },
-    });
 
     const payload = { template_id, modifications: mods, output_format: 'mp4' };
 
