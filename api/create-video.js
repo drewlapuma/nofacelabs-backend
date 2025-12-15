@@ -10,7 +10,8 @@ const KREA_GENERATE_URL =
   process.env.KREA_GENERATE_URL || 'https://api.krea.ai/generate/image/bfl/flux-1-dev';
 const KREA_JOB_URL_BASE = process.env.KREA_JOB_URL_BASE || 'https://api.krea.ai/jobs';
 
-const KREA_STYLE_ID = (process.env.KREA_STYLE_ID || '').trim(); // optional now
+// ✅ Always use style id (do not allow it to silently disappear)
+const KREA_STYLE_ID = (process.env.KREA_STYLE_ID || 'tvjlqsab9').trim();
 const KREA_STYLE_STRENGTH = Number(process.env.KREA_STYLE_STRENGTH || 0.85);
 
 // ---------- Beats ----------
@@ -153,31 +154,29 @@ function buildBeatTiming(beatTexts) {
   return { durations, starts, total: t };
 }
 
-// ---------- PROMPT BUILDER (UPDATED) ----------
-// Removes: Scene # / Story type / Art style
-// Uses: beat text as visual description + consistent cinematic tail
+// ---------- PROMPT BUILDER (UPDATED, STYLE-SAFE) ----------
+// No "Scene #", no "story type", no "art style", no "cinematic", no "realistic".
 function buildPromptForBeat({ beatText }) {
   const t = (beatText || '').trim();
   return `
 ${t}
 
-A precise, highly detailed visual depiction of the described moment.
-Environment and objects clearly visible.
-Cinematic composition, realistic perspective, natural shadows.
-Soft volumetric lighting where appropriate, floating dust or haze if mentioned.
-High detail, sharp textures, high quality.
+Clear environment and object details.
+Specific lighting sources and shadows.
+Consistent perspective.
 `.trim();
 }
 
 // ---------- Krea ----------
 async function createKreaJob(prompt, aspectRatio) {
   if (!KREA_API_KEY) throw new Error('KREA_API_KEY not set');
+  if (!KREA_STYLE_ID) throw new Error('KREA_STYLE_ID not set');
 
   const payload = {
     prompt,
     aspect_ratio: aspectRatio,
-    // keep optional style support if you want it, but it's not required
-    styles: KREA_STYLE_ID ? [{ id: KREA_STYLE_ID, strength: KREA_STYLE_STRENGTH }] : undefined,
+    // ✅ Apply your Krea style via style ID (not via prompt words)
+    styles: [{ id: KREA_STYLE_ID, strength: KREA_STYLE_STRENGTH }],
   };
 
   const resp = await fetch(KREA_GENERATE_URL, {
@@ -193,11 +192,7 @@ async function createKreaJob(prompt, aspectRatio) {
   }
 
   const jobId = data?.job_id || data?.id;
-  if (!jobId) {
-    console.error('[KREA_GENERATE_ERROR] Missing job_id', data);
-    throw new Error('KREA_MISSING_JOB_ID');
-  }
-
+  if (!jobId) throw new Error('KREA_MISSING_JOB_ID');
   return jobId;
 }
 
@@ -217,6 +212,7 @@ async function pollKreaJob(jobId) {
     }
 
     const status = String(data?.status || '').toLowerCase();
+
     if (status === 'completed' || status === 'complete' || status === 'succeeded') {
       const urls = data?.result?.urls || data?.urls || [];
       const imageUrl = Array.isArray(urls) ? urls[0] : null;
@@ -233,6 +229,8 @@ async function pollKreaJob(jobId) {
 
 async function generateKreaImageUrlsForBeats({ beatCount, beatTexts, aspectRatio }) {
   const urls = [];
+
+  console.log('[KREA] STYLE', { styleId: KREA_STYLE_ID, strength: KREA_STYLE_STRENGTH });
 
   for (let i = 1; i <= beatCount; i++) {
     const beatText = beatTexts[i - 1] || '';
@@ -340,7 +338,7 @@ module.exports = async function handler(req, res) {
       'Captions_JSON.text': '',
     };
 
-    // timing keys
+    // timing keys (.start)
     for (let i = 1; i <= beatCount; i++) {
       const start = timing.starts[i - 1];
       const dur = timing.durations[i - 1];
@@ -350,15 +348,6 @@ module.exports = async function handler(req, res) {
 
       mods[`Beat${i}_Group.start`] = 0;
       mods[`Beat${i}_Group.duration`] = dur;
-
-      if (i === 1) {
-        console.log('[BEAT1_TIMING_KEYS]', {
-          sceneStart: mods['Beat1_Scene.start'],
-          sceneDuration: mods['Beat1_Scene.duration'],
-          groupStart: mods['Beat1_Group.start'],
-          groupDuration: mods['Beat1_Group.duration'],
-        });
-      }
     }
 
     for (let i = beatCount + 1; i <= MAX_BEATS; i++) {
