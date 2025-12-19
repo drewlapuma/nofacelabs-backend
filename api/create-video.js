@@ -1,8 +1,42 @@
 // api/create-video.js (CommonJS, Node 18)
 const https = require('https');
+const jwt = require('jsonwebtoken');
+const { createClient } = require('@supabase/supabase-js');
 
 const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN || '*';
 const IMAGE_PROVIDER = (process.env.IMAGE_PROVIDER || 'krea').toLowerCase();
+
+// ---------- Supabase ----------
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+const supabase =
+  SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY
+    ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } })
+    : null;
+
+// ---------- Memberstack auth ----------
+const MEMBERSTACK_JWT_PUBLIC_KEY = process.env.MEMBERSTACK_JWT_PUBLIC_KEY;
+
+function getBearerToken(req) {
+  const h = req.headers.authorization || req.headers.Authorization || '';
+  const m = String(h).match(/^Bearer\s+(.+)$/i);
+  return m ? m[1] : null;
+}
+
+function verifyMemberstack(req) {
+  const token = getBearerToken(req);
+  if (!token) throw new Error('MISSING_AUTH');
+
+  if (!MEMBERSTACK_JWT_PUBLIC_KEY) throw new Error('MISSING_MEMBERSTACK_PUBLIC_KEY');
+
+  const decoded = jwt.verify(token, MEMBERSTACK_JWT_PUBLIC_KEY, { algorithms: ['RS256'] });
+
+  const memberId = decoded?.id || decoded?.member_id || decoded?.sub || decoded?.data?.id;
+  if (!memberId) throw new Error('MISSING_MEMBER_ID');
+
+  return { memberId, decoded };
+}
 
 // ---------- OpenAI prompt expander ----------
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
@@ -32,7 +66,8 @@ const ANIMATION_VARIANTS = ['PanRight', 'PanLeft', 'PanUp', 'PanDown', 'Zoom'];
 function setCors(res) {
   res.setHeader('Access-Control-Allow-Origin', ALLOW_ORIGIN);
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  // ✅ allow Authorization for Memberstack JWT
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 }
 
 // ---------- HTTPS JSON helper (Creatomate) ----------
@@ -167,7 +202,6 @@ async function expandBeatToVisualPrompt(beatText) {
   const text = String(beatText || '').trim();
   if (!text) return '';
 
-  // feature off or missing key -> just return beat text
   if (!OPENAI_API_KEY || PROMPT_EXPANDER !== 'openai') return text;
 
   const instruction = `
@@ -213,7 +247,6 @@ Narration line:
   const out = String(data?.choices?.[0]?.message?.content || '').trim();
   if (!out) return text;
 
-  // lightweight safety: keep output from becoming huge
   const maxChars = 900;
   return out.length > maxChars ? out.slice(0, maxChars).trim() : out;
 }
@@ -346,6 +379,9 @@ module.exports = async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'METHOD_NOT_ALLOWED' });
 
   try {
+    // ✅ require logged-in user
+    const { memberId } = verifyMemberstack(req);
+
     const body = typeof req.body === 'string' ? JSON.parse(req.body || '{}') : (req.body || {});
     const {
       storyType = 'Random AI story',
@@ -359,6 +395,10 @@ module.exports = async function handler(req, res) {
 
     if (!process.env.CREATOMATE_API_KEY) {
       return res.status(500).json({ error: 'MISSING_CREATOMATE_API_KEY' });
+    }
+
+    if (!supabase) {
+      return res.status(500).json({ error: 'MISSING_SUPABASE_ENV_VARS' });
     }
 
     const templateMap = {
@@ -493,9 +533,38 @@ module.exports = async function handler(req, res) {
     const job_id = Array.isArray(resp.json) ? resp.json[0]?.id : resp.json?.id;
     if (!job_id) return res.status(502).json({ error: 'NO_JOB_ID_IN_RESPONSE', details: resp.json });
 
-    return res.status(200).json({ ok: true, job_id });
+    // ✅ Insert render row into Supabase for this member
+    const choices = { storyType, artStyle, language, voice, aspectRatio, customPrompt, durationRange };
+
+    const { data: row, error: dbErr } = await supabase
+      .from('renders')
+      .insert([
+        {
+          member_id: String(memberId),
+          render_id: String(job_id),
+          status: 'rendering',
+          video_url: null,
+          choices,
+          error: null,
+        },
+      ])
+      .select('id')
+      .single();
+
+    if (dbErr) {
+      console.error('[CREATE_VIDEO] DB_INSERT_FAILED', dbErr);
+      return res.status(500).json({ error: 'DB_INSERT_FAILED', details: dbErr });
+    }
+
+    return res.status(200).json({ ok: true, job_id, db_id: row.id });
   } catch (err) {
+    // Auth errors -> 401
+    const msg = String(err?.message || err);
+    if (msg.includes('MISSING_AUTH') || msg.includes('MISSING_MEMBER') || msg.includes('jwt')) {
+      return res.status(401).json({ error: 'UNAUTHORIZED', message: msg });
+    }
+
     console.error('[CREATE_VIDEO] SERVER_ERROR', err);
-    return res.status(500).json({ error: 'SERVER_ERROR', message: String(err?.message || err) });
+    return res.status(500).json({ error: 'SERVER_ERROR', message: msg });
   }
 };
