@@ -33,9 +33,9 @@ function buildStyleHints(mode) {
   switch (mode) {
     case 'scary':
       return [
-        'Write a creepy but TikTok-safe horror story with suspense and a twist.',
+        'Write a creepy horror story with suspense and a twist.',
         'Tell the story as a sequence of very visual moments the viewer could actually see.',
-        'In most sentences, describe concrete things in the scene: environment, lighting, objects, shadows, silhouettes, motion.',
+        'In most sentences, describe concrete things in the scene: environment, lighting, objects, silhouettes, .',
         'Avoid vague lines like "it felt scary" unless attached to a clear visual detail.',
         'Do NOT default to the same tropes (alley, streetlamp, abandoned house, 3:00 AM, static on TV) unless explicitly requested.',
       ].join(' ');
