@@ -1,7 +1,7 @@
 // api/create-video.js (CommonJS, Node 18)
 const https = require('https');
-const jwt = require('jsonwebtoken');
 const { createClient } = require('@supabase/supabase-js');
+const memberstackAdmin = require('@memberstack/admin');
 
 const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN || '*';
 const IMAGE_PROVIDER = (process.env.IMAGE_PROVIDER || 'krea').toLowerCase();
@@ -15,8 +15,9 @@ const supabase =
     ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } })
     : null;
 
-// ---------- Memberstack auth ----------
-const MEMBERSTACK_JWT_PUBLIC_KEY = process.env.MEMBERSTACK_JWT_PUBLIC_KEY;
+// ---------- Memberstack auth (Admin SDK verify) ----------
+const MEMBERSTACK_SECRET_KEY = process.env.MEMBERSTACK_SECRET_KEY;
+const ms = MEMBERSTACK_SECRET_KEY ? memberstackAdmin.init(MEMBERSTACK_SECRET_KEY) : null;
 
 function getBearerToken(req) {
   const h = req.headers.authorization || req.headers.Authorization || '';
@@ -24,18 +25,16 @@ function getBearerToken(req) {
   return m ? m[1] : null;
 }
 
-function verifyMemberstack(req) {
+async function requireMemberId(req) {
   const token = getBearerToken(req);
   if (!token) throw new Error('MISSING_AUTH');
 
-  if (!MEMBERSTACK_JWT_PUBLIC_KEY) throw new Error('MISSING_MEMBERSTACK_PUBLIC_KEY');
+  if (!ms) throw new Error('MISSING_MEMBERSTACK_SECRET_KEY');
 
-  const decoded = jwt.verify(token, MEMBERSTACK_JWT_PUBLIC_KEY, { algorithms: ['RS256'] });
+  const { id } = await ms.verifyToken({ token });
+  if (!id) throw new Error('INVALID_MEMBER_TOKEN');
 
-  const memberId = decoded?.id || decoded?.member_id || decoded?.sub || decoded?.data?.id;
-  if (!memberId) throw new Error('MISSING_MEMBER_ID');
-
-  return { memberId, decoded };
+  return id; // member_id
 }
 
 // ---------- OpenAI prompt expander ----------
@@ -43,7 +42,7 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4.1-mini';
 const PROMPT_EXPANDER = (process.env.PROMPT_EXPANDER || 'openai').toLowerCase(); // 'openai' | 'off'
 const EXPAND_SHORT_BEATS_ONLY = String(process.env.EXPAND_SHORT_BEATS_ONLY || 'true').toLowerCase() !== 'false';
-const EXPAND_WORD_THRESHOLD = Number(process.env.EXPAND_WORD_THRESHOLD || 14); // beats with < 14 words get expanded
+const EXPAND_WORD_THRESHOLD = Number(process.env.EXPAND_WORD_THRESHOLD || 14);
 
 // ---------- Krea ----------
 const KREA_API_KEY = process.env.KREA_API_KEY;
@@ -51,7 +50,6 @@ const KREA_GENERATE_URL =
   process.env.KREA_GENERATE_URL || 'https://api.krea.ai/generate/image/bfl/flux-1-dev';
 const KREA_JOB_URL_BASE = process.env.KREA_JOB_URL_BASE || 'https://api.krea.ai/jobs';
 
-// ✅ Always apply your style id (do not silently drop it)
 const KREA_STYLE_ID = (process.env.KREA_STYLE_ID || 'tvjlqsab9').trim();
 const KREA_STYLE_STRENGTH = Number(process.env.KREA_STYLE_STRENGTH || 0.85);
 
@@ -66,20 +64,19 @@ const ANIMATION_VARIANTS = ['PanRight', 'PanLeft', 'PanUp', 'PanDown', 'Zoom'];
 function setCors(res) {
   res.setHeader('Access-Control-Allow-Origin', ALLOW_ORIGIN);
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  // ✅ allow Authorization for Memberstack JWT
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 }
 
 // ---------- HTTPS JSON helper (Creatomate) ----------
 function postJSON(url, headers, bodyObj) {
   return new Promise((resolve, reject) => {
-    const { hostname, pathname } = new URL(url);
+    const u = new URL(url);
     const data = JSON.stringify(bodyObj);
 
     const req = https.request(
       {
-        hostname,
-        path: pathname,
+        hostname: u.hostname,
+        path: u.pathname + (u.search || ''),
         method: 'POST',
         headers: {
           Authorization: headers.Authorization,
@@ -114,8 +111,7 @@ function countWords(text) {
 function estimateSpeechSeconds(narration) {
   const text = (narration || '').trim();
   if (!text) return 0;
-  const words = countWords(text);
-  return words / 2.5; // ~150 wpm
+  return countWords(text) / 2.5;
 }
 function splitIntoSentences(text) {
   const t = (text || '').trim();
@@ -133,7 +129,6 @@ function splitLongSentence(sentence, maxWords) {
   return out.filter(Boolean);
 }
 
-// Sentence-aware beats (no cut-off sentences)
 function splitNarrationIntoBeats(narration, beatCount) {
   const text = (narration || '').trim();
   if (!text || beatCount <= 0) return [];
@@ -161,7 +156,6 @@ function splitNarrationIntoBeats(narration, beatCount) {
   }
   if (current.trim()) beats.push(current.trim());
 
-  // Merge if too many
   while (beats.length > beatCount) {
     let bestIdx = 0;
     let bestLen = Infinity;
@@ -201,7 +195,6 @@ function buildBeatTiming(beatTexts) {
 async function expandBeatToVisualPrompt(beatText) {
   const text = String(beatText || '').trim();
   if (!text) return '';
-
   if (!OPENAI_API_KEY || PROMPT_EXPANDER !== 'openai') return text;
 
   const instruction = `
@@ -290,10 +283,7 @@ async function pollKreaJob(jobId) {
   const url = `${KREA_JOB_URL_BASE}/${encodeURIComponent(jobId)}`;
 
   for (let i = 0; i < 90; i++) {
-    const resp = await fetch(url, {
-      method: 'GET',
-      headers: { Authorization: `Bearer ${KREA_API_KEY}` },
-    });
+    const resp = await fetch(url, { method: 'GET', headers: { Authorization: `Bearer ${KREA_API_KEY}` } });
     const data = await resp.json().catch(() => ({}));
 
     if (!resp.ok) {
@@ -327,31 +317,16 @@ async function pollKreaJob(jobId) {
 async function generateKreaImageUrlsForBeats({ beatCount, beatTexts, aspectRatio }) {
   const urls = [];
 
-  console.log('[KREA] STYLE', { styleId: KREA_STYLE_ID, strength: KREA_STYLE_STRENGTH });
-  console.log('[PROMPT_EXPANDER] CONFIG', {
-    enabled: PROMPT_EXPANDER === 'openai' && !!OPENAI_API_KEY,
-    shortBeatsOnly: EXPAND_SHORT_BEATS_ONLY,
-    threshold: EXPAND_WORD_THRESHOLD,
-    model: OPENAI_MODEL,
-  });
-
   for (let i = 1; i <= beatCount; i++) {
     const beatText = beatTexts[i - 1] || '';
+    const needsExpand = !EXPAND_SHORT_BEATS_ONLY ? true : (countWords(beatText) < EXPAND_WORD_THRESHOLD);
 
-    const needsExpand =
-      !EXPAND_SHORT_BEATS_ONLY ? true : (countWords(beatText) < EXPAND_WORD_THRESHOLD);
+    const prompt = needsExpand ? await expandBeatToVisualPrompt(beatText) : beatText.trim();
 
-    const prompt = needsExpand
-      ? await expandBeatToVisualPrompt(beatText)
-      : beatText.trim();
-
-    console.log('[KREA] BEAT_TEXT', { beat: i, beatText });
     console.log('[KREA] PROMPT', { beat: i, expanded: needsExpand, prompt });
 
     const jobId = await createKreaJob(prompt, aspectRatio);
     const imageUrl = await pollKreaJob(jobId);
-
-    console.log('[KREA] IMAGE', { beat: i, imageUrl });
 
     urls.push(imageUrl);
   }
@@ -379,27 +354,21 @@ module.exports = async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'METHOD_NOT_ALLOWED' });
 
   try {
-    // ✅ require logged-in user
-    const { memberId } = verifyMemberstack(req);
+    const memberId = await requireMemberId(req);
 
     const body = typeof req.body === 'string' ? JSON.parse(req.body || '{}') : (req.body || {});
     const {
       storyType = 'Random AI story',
       artStyle = 'Scary toon',
       language = 'English',
-      voice = 'Adam', // label only
+      voice = 'Adam',
       aspectRatio = '9:16',
       customPrompt = '',
       durationRange = '60-90',
     } = body;
 
-    if (!process.env.CREATOMATE_API_KEY) {
-      return res.status(500).json({ error: 'MISSING_CREATOMATE_API_KEY' });
-    }
-
-    if (!supabase) {
-      return res.status(500).json({ error: 'MISSING_SUPABASE_ENV_VARS' });
-    }
+    if (!process.env.CREATOMATE_API_KEY) return res.status(500).json({ error: 'MISSING_CREATOMATE_API_KEY' });
+    if (!supabase) return res.status(500).json({ error: 'MISSING_SUPABASE_ENV_VARS' });
 
     const templateMap = {
       '9:16': process.env.CREATO_TEMPLATE_916,
@@ -408,6 +377,22 @@ module.exports = async function handler(req, res) {
     };
     const template_id = (templateMap[aspectRatio] || '').trim();
     if (!template_id) return res.status(400).json({ error: 'NO_TEMPLATE_FOR_ASPECT', aspectRatio });
+
+    const choices = { storyType, artStyle, language, voice, aspectRatio, customPrompt, durationRange };
+
+    // ✅ Create DB row first (always)
+    const { data: row, error: insErr } = await supabase
+      .from('renders')
+      .insert([{ member_id: String(memberId), status: 'rendering', video_url: null, render_id: '', choices, error: null }])
+      .select('id')
+      .single();
+
+    if (insErr) {
+      console.error('[CREATE_VIDEO] DB_INSERT_FAILED', insErr);
+      return res.status(500).json({ error: 'DB_INSERT_FAILED', details: insErr });
+    }
+
+    const db_id = row.id;
 
     // 1) Get narration
     const baseUrl = `https://${req.headers.host}`;
@@ -419,6 +404,7 @@ module.exports = async function handler(req, res) {
 
     const narration = (scriptResp && scriptResp.narration) || '';
     if (!narration.trim()) {
+      await supabase.from('renders').update({ status: 'failed', error: 'SCRIPT_EMPTY' }).eq('id', db_id);
       return res.status(502).json({ error: 'SCRIPT_EMPTY', details: scriptResp });
     }
 
@@ -437,14 +423,10 @@ module.exports = async function handler(req, res) {
     const beatTexts = splitNarrationIntoBeats(narration, beatCount);
     const timing = buildBeatTiming(beatTexts);
 
-    // 3) Images (Krea)
+    // 3) Images
     let imageUrls = [];
     if (IMAGE_PROVIDER === 'krea') {
-      imageUrls = await generateKreaImageUrlsForBeats({
-        beatCount,
-        beatTexts,
-        aspectRatio,
-      });
+      imageUrls = await generateKreaImageUrlsForBeats({ beatCount, beatTexts, aspectRatio });
     }
 
     // 4) Animation sequence
@@ -456,16 +438,11 @@ module.exports = async function handler(req, res) {
       VoiceLabel: voice,
       LanguageLabel: language,
       StoryTypeLabel: storyType,
-
-      // ✅ Use Creatomate voice layer only
       Voiceover: narration,
       VoiceUrl: null,
-
-      // captions not used in this version
       'Captions_JSON.text': '',
     };
 
-    // ✅ Timing: Scene absolute, Group relative
     for (let i = 1; i <= beatCount; i++) {
       const start = timing.starts[i - 1];
       const dur = timing.durations[i - 1];
@@ -477,20 +454,15 @@ module.exports = async function handler(req, res) {
       mods[`Beat${i}_Group.duration`] = dur;
     }
 
-    // Clear unused beats
     for (let i = beatCount + 1; i <= MAX_BEATS; i++) {
       mods[`Beat${i}_Scene.start`] = 0;
       mods[`Beat${i}_Scene.duration`] = 0;
-
       mods[`Beat${i}_Group.start`] = 0;
       mods[`Beat${i}_Group.duration`] = 0;
-
-      for (const variant of ANIMATION_VARIANTS) {
-        mods[`Beat${i}_${variant}_Image.source`] = '';
-      }
+      for (const variant of ANIMATION_VARIANTS) mods[`Beat${i}_${variant}_Image.source`] = '';
     }
 
-    // 6) Beat images (proxy) + Beat 1 forced PanRight
+    // Beat images via proxy
     let lastGood = '';
     for (let i = 1; i <= beatCount; i++) {
       const raw = imageUrls[i - 1] || '';
@@ -500,25 +472,12 @@ module.exports = async function handler(req, res) {
 
       const chosen = (i === 1) ? 'PanRight' : variantSequence[i - 1];
 
-      if (i === 1) {
-        console.log('[BEAT1_DEBUG]', {
-          raw: raw ? raw.slice(0, 140) : '',
-          proxied: proxied ? proxied.slice(0, 180) : '',
-          chosen,
-          key: `Beat1_${chosen}_Image.source`,
-        });
-      }
-
       for (const variant of ANIMATION_VARIANTS) {
         mods[`Beat${i}_${variant}_Image.source`] = (variant === chosen) ? proxied : '';
       }
     }
 
-    const payload = {
-      template_id,
-      modifications: mods,
-      output_format: 'mp4',
-    };
+    const payload = { template_id, modifications: mods, output_format: 'mp4' };
 
     const resp = await postJSON(
       'https://api.creatomate.com/v1/renders',
@@ -527,43 +486,25 @@ module.exports = async function handler(req, res) {
     );
 
     if (resp.status !== 202 && resp.status !== 200) {
+      await supabase.from('renders').update({ status: 'failed', error: JSON.stringify(resp.json) }).eq('id', db_id);
       return res.status(resp.status).json({ error: 'CREATOMATE_ERROR', details: resp.json });
     }
 
     const job_id = Array.isArray(resp.json) ? resp.json[0]?.id : resp.json?.id;
-    if (!job_id) return res.status(502).json({ error: 'NO_JOB_ID_IN_RESPONSE', details: resp.json });
-
-    // ✅ Insert render row into Supabase for this member
-    const choices = { storyType, artStyle, language, voice, aspectRatio, customPrompt, durationRange };
-
-    const { data: row, error: dbErr } = await supabase
-      .from('renders')
-      .insert([
-        {
-          member_id: String(memberId),
-          render_id: String(job_id),
-          status: 'rendering',
-          video_url: null,
-          choices,
-          error: null,
-        },
-      ])
-      .select('id')
-      .single();
-
-    if (dbErr) {
-      console.error('[CREATE_VIDEO] DB_INSERT_FAILED', dbErr);
-      return res.status(500).json({ error: 'DB_INSERT_FAILED', details: dbErr });
+    if (!job_id) {
+      await supabase.from('renders').update({ status: 'failed', error: 'NO_JOB_ID' }).eq('id', db_id);
+      return res.status(502).json({ error: 'NO_JOB_ID_IN_RESPONSE', details: resp.json });
     }
 
-    return res.status(200).json({ ok: true, job_id, db_id: row.id });
+    // ✅ Save render_id on the row we already created
+    await supabase.from('renders').update({ render_id: String(job_id) }).eq('id', db_id);
+
+    return res.status(200).json({ ok: true, job_id, db_id });
   } catch (err) {
-    // Auth errors -> 401
     const msg = String(err?.message || err);
-    if (msg.includes('MISSING_AUTH') || msg.includes('MISSING_MEMBER') || msg.includes('jwt')) {
+    if (msg.includes('MISSING_AUTH') || msg.includes('MEMBERSTACK') || msg.includes('INVALID_MEMBER')) {
       return res.status(401).json({ error: 'UNAUTHORIZED', message: msg });
     }
-
     console.error('[CREATE_VIDEO] SERVER_ERROR', err);
     return res.status(500).json({ error: 'SERVER_ERROR', message: msg });
   }
