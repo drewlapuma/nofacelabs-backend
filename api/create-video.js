@@ -1,37 +1,104 @@
-// api/create-video.js (CommonJS, Node 18 / Vercel)
-// ✅ Updated CORS (allowlist + clean OPTIONS)
-// ✅ Lazy-load deps so OPTIONS never crashes
+// api/create-video.js (CommonJS, Node 18)
 
 const https = require("https");
+const { createClient } = require("@supabase/supabase-js");
+const memberstackAdmin = require("@memberstack/admin");
 
-const IMAGE_PROVIDER = (process.env.IMAGE_PROVIDER || "krea").toLowerCase();
+// -------------------- CORS (UPDATED) --------------------
+const ALLOW_ORIGINS_RAW =
+  process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || "*";
 
-// ---------- CORS ----------
-function getAllowedOrigin(req) {
+const ALLOW_ORIGINS = ALLOW_ORIGINS_RAW === "*"
+  ? "*"
+  : ALLOW_ORIGINS_RAW.split(",").map(s => s.trim()).filter(Boolean);
+
+function applyCors(req, res) {
   const origin = req.headers.origin;
-  const allow = (process.env.ALLOW_ORIGINS || "").split(",").map(s => s.trim()).filter(Boolean);
 
-  // If no allowlist provided, fall back to "*" (not recommended for auth)
-  if (!allow.length) return "*";
-
-  if (!origin) return allow[0]; // non-browser request
-  if (allow.includes(origin)) return origin;
-
-  return allow[0]; // default
-}
-
-function setCors(req, res) {
-  const origin = getAllowedOrigin(req);
-
-  res.setHeader("Access-Control-Allow-Origin", origin);
+  // Always vary on Origin so caches don't mix responses
   res.setHeader("Vary", "Origin");
 
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  let allowOriginHeader = "";
+  if (ALLOW_ORIGINS === "*") {
+    allowOriginHeader = "*";
+  } else if (origin && ALLOW_ORIGINS.includes(origin)) {
+    allowOriginHeader = origin;
+  }
 
-  // Only needed if you use cookies; your flow uses Bearer token, so keep false.
-  // res.setHeader("Access-Control-Allow-Credentials", "true");
+  // Only set if we have something to set (or wildcard)
+  if (allowOriginHeader) {
+    res.setHeader("Access-Control-Allow-Origin", allowOriginHeader);
+  }
+
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+
+  // Echo requested headers if present (covers Authorization automatically)
+  const reqHeaders = req.headers["access-control-request-headers"];
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    reqHeaders ? String(reqHeaders) : "Content-Type, Authorization"
+  );
+
+  // Optional: make preflight cacheable
+  res.setHeader("Access-Control-Max-Age", "86400");
 }
+// --------------------------------------------------------
+
+// ---------- Supabase ----------
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+const supabase =
+  SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY
+    ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+        auth: { persistSession: false },
+      })
+    : null;
+
+// ---------- Memberstack auth (Admin SDK verify) ----------
+const MEMBERSTACK_SECRET_KEY = process.env.MEMBERSTACK_SECRET_KEY;
+const ms = MEMBERSTACK_SECRET_KEY
+  ? memberstackAdmin.init(MEMBERSTACK_SECRET_KEY)
+  : null;
+
+function getBearerToken(req) {
+  const h = req.headers.authorization || req.headers.Authorization || "";
+  const m = String(h).match(/^Bearer\s+(.+)$/i);
+  return m ? m[1] : null;
+}
+
+async function requireMemberId(req) {
+  const token = getBearerToken(req);
+  if (!token) throw new Error("MISSING_AUTH");
+  if (!ms) throw new Error("MISSING_MEMBERSTACK_SECRET_KEY");
+
+  const { id } = await ms.verifyToken({ token });
+  if (!id) throw new Error("INVALID_MEMBER_TOKEN");
+  return id;
+}
+
+// ---------- OpenAI prompt expander ----------
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4.1-mini";
+const PROMPT_EXPANDER = (process.env.PROMPT_EXPANDER || "openai").toLowerCase(); // 'openai' | 'off'
+const EXPAND_SHORT_BEATS_ONLY =
+  String(process.env.EXPAND_SHORT_BEATS_ONLY || "true").toLowerCase() !== "false";
+const EXPAND_WORD_THRESHOLD = Number(process.env.EXPAND_WORD_THRESHOLD || 14);
+
+// ---------- Krea ----------
+const IMAGE_PROVIDER = (process.env.IMAGE_PROVIDER || "krea").toLowerCase();
+const KREA_API_KEY = process.env.KREA_API_KEY;
+const KREA_GENERATE_URL =
+  process.env.KREA_GENERATE_URL || "https://api.krea.ai/generate/image/bfl/flux-1-dev";
+const KREA_JOB_URL_BASE = process.env.KREA_JOB_URL_BASE || "https://api.krea.ai/jobs";
+const KREA_STYLE_ID = String(process.env.KREA_STYLE_ID || "tvjlqsab9").trim();
+const KREA_STYLE_STRENGTH = Number(process.env.KREA_STYLE_STRENGTH || 0.85);
+
+// ---------- Beats ----------
+const MIN_BEATS = 8;
+const MAX_BEATS = 24;
+const SECONDS_PER_BEAT_ESTIMATE = 3.0;
+const ANIMATION_VARIANTS = ["PanRight", "PanLeft", "PanUp", "PanDown", "Zoom"];
 
 // ---------- HTTPS JSON helper (Creatomate) ----------
 function postJSON(url, headers, bodyObj) {
@@ -70,13 +137,6 @@ function postJSON(url, headers, bodyObj) {
   });
 }
 
-// ---------- Auth helpers ----------
-function getBearerToken(req) {
-  const h = req.headers.authorization || req.headers.Authorization || "";
-  const m = String(h).match(/^Bearer\s+(.+)$/i);
-  return m ? m[1] : null;
-}
-
 // ---------- Text helpers ----------
 function countWords(text) {
   return (String(text || "").match(/\S+/g) || []).length;
@@ -101,7 +161,6 @@ function splitLongSentence(sentence, maxWords) {
   }
   return out.filter(Boolean);
 }
-
 function splitNarrationIntoBeats(narration, beatCount) {
   const text = (narration || "").trim();
   if (!text || beatCount <= 0) return [];
@@ -164,15 +223,60 @@ function buildBeatTiming(beatTexts) {
   return { durations, starts, total: t };
 }
 
+// ---------- OpenAI prompt expander (style-safe) ----------
+async function expandBeatToVisualPrompt(beatText) {
+  const text = String(beatText || "").trim();
+  if (!text) return "";
+  if (!OPENAI_API_KEY || PROMPT_EXPANDER !== "openai") return text;
+
+  const instruction = `
+Turn the following narration line into a single, highly detailed visual scene prompt for image generation.
+
+Rules:
+- Output ONLY the prompt text (no quotes, no bullets, no headings).
+- Describe: environment, key objects, lighting/shadows, mood via visible details, spatial layout.
+- Keep it TikTok-safe (no graphic injury).
+- Do NOT include words like: cinematic, realistic, photorealistic, 8k, ultra, high quality, masterpiece.
+- Do NOT mention "art style" or "story type" or "Scene #".
+- Keep it 2–5 sentences, dense and specific.
+
+Narration line:
+"${text}"
+`.trim();
+
+  const resp = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: OPENAI_MODEL,
+      messages: [
+        { role: "system", content: "You output only the final prompt text. No JSON. No extra text." },
+        { role: "user", content: instruction },
+      ],
+      temperature: 0.7,
+      top_p: 0.95,
+      presence_penalty: 0.3,
+      frequency_penalty: 0.2,
+    }),
+  });
+
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    console.error("[PROMPT_EXPANDER] OpenAI failed", resp.status, data?.error || data);
+    return text;
+  }
+
+  const out = String(data?.choices?.[0]?.message?.content || "").trim();
+  if (!out) return text;
+
+  const maxChars = 900;
+  return out.length > maxChars ? out.slice(0, maxChars).trim() : out;
+}
+
 // ---------- Krea ----------
-const KREA_API_KEY = process.env.KREA_API_KEY;
-const KREA_GENERATE_URL =
-  process.env.KREA_GENERATE_URL || "https://api.krea.ai/generate/image/bfl/flux-1-dev";
-const KREA_JOB_URL_BASE = process.env.KREA_JOB_URL_BASE || "https://api.krea.ai/jobs";
-
-const KREA_STYLE_ID = (process.env.KREA_STYLE_ID || "tvjlqsab9").trim();
-const KREA_STYLE_STRENGTH = Number(process.env.KREA_STYLE_STRENGTH || 0.85);
-
 async function createKreaJob(prompt, aspectRatio) {
   if (!KREA_API_KEY) throw new Error("KREA_API_KEY not set");
   if (!KREA_STYLE_ID) throw new Error("KREA_STYLE_ID not set");
@@ -185,7 +289,10 @@ async function createKreaJob(prompt, aspectRatio) {
 
   const resp = await fetch(KREA_GENERATE_URL, {
     method: "POST",
-    headers: { Authorization: `Bearer ${KREA_API_KEY}`, "Content-Type": "application/json" },
+    headers: {
+      Authorization: `Bearer ${KREA_API_KEY}`,
+      "Content-Type": "application/json",
+    },
     body: JSON.stringify(payload),
   });
 
@@ -196,7 +303,11 @@ async function createKreaJob(prompt, aspectRatio) {
   }
 
   const jobId = data?.job_id || data?.id;
-  if (!jobId) throw new Error("KREA_MISSING_JOB_ID");
+  if (!jobId) {
+    console.error("[KREA_GENERATE_ERROR] Missing job_id", data);
+    throw new Error("KREA_MISSING_JOB_ID");
+  }
+
   return jobId;
 }
 
@@ -216,14 +327,22 @@ async function pollKreaJob(jobId) {
     }
 
     const status = String(data?.status || "").toLowerCase();
+
     if (status === "completed" || status === "complete" || status === "succeeded") {
       const urls = data?.result?.urls || data?.urls || [];
       const imageUrl = Array.isArray(urls) ? urls[0] : null;
-      if (!imageUrl) throw new Error("KREA_JOB_NO_RESULT_URL");
+      if (!imageUrl) {
+        console.error("[KREA_JOB_ERROR] Completed but no result urls", data);
+        throw new Error("KREA_JOB_NO_RESULT_URL");
+      }
       return imageUrl;
     }
 
-    if (status === "failed" || status === "error") throw new Error("KREA_JOB_FAILED");
+    if (status === "failed" || status === "error") {
+      console.error("[KREA_JOB_ERROR] Job failed", data);
+      throw new Error("KREA_JOB_FAILED");
+    }
+
     await new Promise((r) => setTimeout(r, 2500));
   }
 
@@ -232,74 +351,52 @@ async function pollKreaJob(jobId) {
 
 async function generateKreaImageUrlsForBeats({ beatCount, beatTexts, aspectRatio }) {
   const urls = [];
+
   for (let i = 1; i <= beatCount; i++) {
-    const prompt = (beatTexts[i - 1] || "").trim();
+    const beatText = beatTexts[i - 1] || "";
+    const needsExpand = !EXPAND_SHORT_BEATS_ONLY
+      ? true
+      : countWords(beatText) < EXPAND_WORD_THRESHOLD;
+
+    const prompt = needsExpand ? await expandBeatToVisualPrompt(beatText) : beatText.trim();
+
+    console.log("[KREA] PROMPT", { beat: i, expanded: needsExpand, prompt });
+
     const jobId = await createKreaJob(prompt, aspectRatio);
     const imageUrl = await pollKreaJob(jobId);
+
     urls.push(imageUrl);
   }
+
   return urls;
+}
+
+// ---------- Variants ----------
+function buildVariantSequence(beatCount) {
+  const seq = [];
+  let last = null;
+  for (let i = 0; i < beatCount; i++) {
+    const available = ANIMATION_VARIANTS.filter((v) => v !== last);
+    const chosen = available[i % available.length];
+    seq.push(chosen);
+    last = chosen;
+  }
+  return seq;
 }
 
 // ---------- MAIN ----------
 module.exports = async function handler(req, res) {
-  setCors(req, res);
+  // ✅ Apply CORS to EVERY response (including errors)
+  applyCors(req, res);
 
-  // ✅ Preflight must succeed every time
-  if (req.method === "OPTIONS") {
-    return res.status(204).end();
-  }
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "METHOD_NOT_ALLOWED" });
-  }
-
-  // ✅ Lazy-load deps AFTER OPTIONS so preflight never crashes
-  let createClient, memberstackAdmin;
-  try {
-    ({ createClient } = require("@supabase/supabase-js"));
-    memberstackAdmin = require("@memberstack/admin");
-  } catch (e) {
-    console.error("[BOOT] Missing dependency:", e?.message || e);
-    return res.status(500).json({
-      error: "MISSING_DEPENDENCY",
-      message: "Missing server dependency. Check Vercel logs for 'Cannot find module ...' and add it to package.json dependencies.",
-      details: String(e?.message || e),
-    });
-  }
-
-  // ---------- Supabase ----------
-  const SUPABASE_URL = process.env.SUPABASE_URL;
-  const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
-  const supabase =
-    SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY
-      ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } })
-      : null;
-
-  // ---------- Memberstack auth (Admin SDK verify) ----------
-  const MEMBERSTACK_SECRET_KEY = process.env.MEMBERSTACK_SECRET_KEY;
-  const ms = MEMBERSTACK_SECRET_KEY ? memberstackAdmin.init(MEMBERSTACK_SECRET_KEY) : null;
-
-  async function requireMemberId(req) {
-    const token = getBearerToken(req);
-    if (!token) throw new Error("MISSING_AUTH");
-    if (!ms) throw new Error("MISSING_MEMBERSTACK_SECRET_KEY");
-
-    const { id } = await ms.verifyToken({ token });
-    if (!id) throw new Error("INVALID_MEMBER_TOKEN");
-    return id;
-  }
-
-  // ---------- Beats ----------
-  const MIN_BEATS = 8;
-  const MAX_BEATS = 24;
-  const SECONDS_PER_BEAT_ESTIMATE = 3.0;
-  const ANIMATION_VARIANTS = ["PanRight", "PanLeft", "PanUp", "PanDown", "Zoom"];
+  // ✅ Handle preflight BEFORE auth/logic
+  if (req.method === "OPTIONS") return res.status(204).end();
+  if (req.method !== "POST") return res.status(405).json({ error: "METHOD_NOT_ALLOWED" });
 
   try {
     const memberId = await requireMemberId(req);
 
-    const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : req.body || {};
+    const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {});
     const {
       storyType = "Random AI story",
       artStyle = "Scary toon",
@@ -318,15 +415,24 @@ module.exports = async function handler(req, res) {
       "1:1": process.env.CREATO_TEMPLATE_11,
       "16:9": process.env.CREATO_TEMPLATE_169,
     };
-    const template_id = (templateMap[aspectRatio] || "").trim();
+    const template_id = String(templateMap[aspectRatio] || "").trim();
     if (!template_id) return res.status(400).json({ error: "NO_TEMPLATE_FOR_ASPECT", aspectRatio });
 
     const choices = { storyType, artStyle, language, voice, aspectRatio, customPrompt, durationRange };
 
-    // ✅ Create DB row first
+    // Create DB row first
     const { data: row, error: insErr } = await supabase
       .from("renders")
-      .insert([{ member_id: String(memberId), status: "rendering", video_url: null, render_id: "", choices, error: null }])
+      .insert([
+        {
+          member_id: String(memberId),
+          status: "rendering",
+          video_url: null,
+          render_id: "",
+          choices,
+          error: null,
+        },
+      ])
       .select("id")
       .single();
 
@@ -337,7 +443,7 @@ module.exports = async function handler(req, res) {
 
     const db_id = row.id;
 
-    // 1) Get narration (from same backend)
+    // Generate script
     const baseUrl = `https://${req.headers.host}`;
     const scriptResp = await fetch(`${baseUrl}/api/generate-script`, {
       method: "POST",
@@ -351,13 +457,11 @@ module.exports = async function handler(req, res) {
       return res.status(502).json({ error: "SCRIPT_EMPTY", details: scriptResp });
     }
 
-    // 2) Beats + timing
+    // Beats + timing
     const speechSec = estimateSpeechSeconds(narration);
     let targetSec = Math.round(speechSec + 2);
-
     let minSec = 60, maxSec = 90;
     if (durationRange === "30-60") { minSec = 30; maxSec = 60; }
-
     if (targetSec < minSec) targetSec = minSec;
     if (targetSec > maxSec) targetSec = maxSec;
 
@@ -368,23 +472,16 @@ module.exports = async function handler(req, res) {
     const beatTexts = splitNarrationIntoBeats(narration, beatCount);
     const timing = buildBeatTiming(beatTexts);
 
-    // 3) Images
+    // Images
     let imageUrls = [];
     if (IMAGE_PROVIDER === "krea") {
       imageUrls = await generateKreaImageUrlsForBeats({ beatCount, beatTexts, aspectRatio });
     }
 
-    // 4) Animation sequence
-    const variantSequence = [];
-    let last = null;
-    for (let i = 0; i < beatCount; i++) {
-      const available = ANIMATION_VARIANTS.filter((v) => v !== last);
-      const chosen = available[i % available.length];
-      variantSequence.push(chosen);
-      last = chosen;
-    }
+    // Animation sequence
+    const variantSequence = buildVariantSequence(beatCount);
 
-    // 5) Creatomate mods
+    // Creatomate mods
     const mods = {
       Narration: narration,
       VoiceLabel: voice,
