@@ -3,7 +3,56 @@ const https = require('https');
 const { createClient } = require('@supabase/supabase-js');
 const memberstackAdmin = require('@memberstack/admin');
 
-const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN || '*';
+// =====================================================
+// ✅ UPDATED CORS (Allowlist + proper OPTIONS preflight)
+// =====================================================
+
+// Comma-separated list, example:
+// ALLOW_ORIGINS="https://nofacelabsai.webflow.io,https://nofacelabs.ai"
+const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || '*')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
+
+function isOriginAllowed(origin) {
+  if (!origin) return false;
+  if (ALLOW_ORIGINS.includes('*')) return true;
+  return ALLOW_ORIGINS.includes(origin);
+}
+
+function setCors(req, res) {
+  const origin = req.headers.origin;
+
+  // Echo back the requesting origin ONLY if allowed
+  if (isOriginAllowed(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  } else if (ALLOW_ORIGINS.includes('*')) {
+    // Fallback (not ideal for auth, but OK if you truly want public)
+    res.setHeader('Access-Control-Allow-Origin', '*');
+  }
+
+  // Important for caching proxies/CDN
+  res.setHeader('Vary', 'Origin');
+
+  // Allow the browser preflight
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader(
+    'Access-Control-Allow-Headers',
+    'Content-Type, Authorization, X-Requested-With'
+  );
+
+  // Optional but nice: cache preflight
+  res.setHeader('Access-Control-Max-Age', '86400');
+
+  // Only enable credentials if you truly need cookies.
+  // You are sending Bearer tokens, so this is not required.
+  // res.setHeader('Access-Control-Allow-Credentials', 'true');
+}
+
+// =====================================================
+// Rest of your file below (unchanged logic)
+// =====================================================
+
 const IMAGE_PROVIDER = (process.env.IMAGE_PROVIDER || 'krea').toLowerCase();
 
 // ---------- Supabase ----------
@@ -59,13 +108,6 @@ const MAX_BEATS = 24;
 const SECONDS_PER_BEAT_ESTIMATE = 3.0;
 
 const ANIMATION_VARIANTS = ['PanRight', 'PanLeft', 'PanUp', 'PanDown', 'Zoom'];
-
-// ---------- CORS ----------
-function setCors(res) {
-  res.setHeader('Access-Control-Allow-Origin', ALLOW_ORIGIN);
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-}
 
 // ---------- HTTPS JSON helper (Creatomate) ----------
 function postJSON(url, headers, bodyObj) {
@@ -349,7 +391,10 @@ function buildVariantSequence(beatCount) {
 
 // ---------- MAIN ----------
 module.exports = async function handler(req, res) {
-  setCors(res);
+  // ✅ Always set CORS first
+  setCors(req, res);
+
+  // ✅ Properly handle preflight
   if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST') return res.status(405).json({ error: 'METHOD_NOT_ALLOWED' });
 
