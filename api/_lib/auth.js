@@ -1,17 +1,25 @@
-// api/_lib/auth.js (CommonJS)
+// api/_lib/auth.// api/_lib/auth.js (CommonJS)
 const memberstackAdmin = require("@memberstack/admin");
 
-const ms = memberstackAdmin.init(process.env.MEMBERSTACK_SECRET_KEY);
+const secret = process.env.MEMBERSTACK_SECRET_KEY;
+const ms = secret ? memberstackAdmin.init(secret) : null;
+
+function getBearerToken(req) {
+  const h = req.headers.authorization || req.headers.Authorization || "";
+  const m = String(h).match(/^Bearer\s+(.+)$/i);
+  return m ? m[1] : null;
+}
 
 async function requireMemberId(req) {
-  const auth = req.headers.authorization || "";
-  const token = auth.startsWith("Bearer ") ? auth.slice(7) : null;
+  const token = getBearerToken(req);
   if (!token) throw new Error("MISSING_AUTH_TOKEN");
+  if (!ms) throw new Error("MISSING_MEMBERSTACK_SECRET_KEY");
 
-  const { id } = await ms.verifyToken({ token });
+  const out = await ms.verifyToken({ token });
+  const id = out?.id;
   if (!id) throw new Error("INVALID_MEMBER_TOKEN");
 
-  return id; // member_id
+  return String(id);
 }
 
 module.exports = { requireMemberId };
