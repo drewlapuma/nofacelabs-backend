@@ -226,10 +226,9 @@ Turn the following narration line into a single, highly detailed visual scene pr
 Rules:
 - Output ONLY the prompt text.
 - Describe: environment, key objects, lighting/shadows, mood via visible details, spatial layout.
-- Keep it TikTok-safe (no graphic injury).
 - Do NOT include words like: cinematic, realistic, photorealistic, 8k, ultra, high quality, masterpiece.
 - Do NOT mention "art style" or "story type" or "Scene #".
-- Keep it 2–5 sentences, dense and specific.
+- Keep it 2–4 sentences, dense and specific.
 
 Narration line:
 "${text}"
