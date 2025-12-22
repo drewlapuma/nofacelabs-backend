@@ -2,16 +2,27 @@
 const { requireMemberId } = require("./_lib/auth");
 const { getAdminSupabase } = require("./_lib/supabase");
 
-const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN || "*";
-function setCors(res) {
-  res.setHeader("Access-Control-Allow-Origin", ALLOW_ORIGIN);
+const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || "*")
+  .split(",").map(s => s.trim()).filter(Boolean);
+
+function setCors(req, res) {
+  const origin = req.headers.origin;
+
+  if (ALLOW_ORIGINS.includes("*")) {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+  } else if (origin && ALLOW_ORIGINS.includes(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+  }
+
   res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader("Access-Control-Max-Age", "86400");
 }
 
 module.exports = async function handler(req, res) {
-  setCors(res);
-  if (req.method === "OPTIONS") return res.status(200).end();
+  setCors(req, res);
+  if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "GET") return res.status(405).json({ error: "METHOD_NOT_ALLOWED" });
 
   try {
@@ -25,13 +36,9 @@ module.exports = async function handler(req, res) {
       .order("created_at", { ascending: false })
       .limit(100);
 
-    if (error) {
-      console.error("[SUPABASE] list error", error);
-      return res.status(500).json({ error: "SUPABASE_LIST_FAILED" });
-    }
-
+    if (error) return res.status(500).json({ ok: false, error: "SUPABASE_LIST_FAILED" });
     return res.status(200).json({ ok: true, items: data || [] });
   } catch (err) {
-    return res.status(401).json({ error: "UNAUTHORIZED" });
+    return res.status(401).json({ ok: false, error: "UNAUTHORIZED", message: String(err.message || err) });
   }
 };
