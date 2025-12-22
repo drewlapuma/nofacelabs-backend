@@ -1,5 +1,4 @@
 // api/create-video.js (CommonJS, Node 18)
-
 // NOTE: Node 18 on Vercel has global fetch.
 
 const https = require("https");
@@ -11,7 +10,7 @@ const memberstackAdmin = require("@memberstack/admin");
 // Example: https://nofacelabsai.webflow.io,https://nofacelabs.ai
 const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || "*")
   .split(",")
-  .map(s => s.trim())
+  .map((s) => s.trim())
   .filter(Boolean);
 
 function setCors(req, res) {
@@ -27,9 +26,13 @@ function setCors(req, res) {
 
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-  // Optional: helps CDNs/cache
   res.setHeader("Access-Control-Max-Age", "86400");
 }
+
+// -------------------- API BASE (IMPORTANT) --------------------
+// This must be the PUBLIC URL that Creatomate can reach for webhook calls.
+// Set in Vercel env: API_BASE=https://nofacelabs-backend.vercel.app
+const API_BASE = (process.env.API_BASE || "").trim();
 
 // -------------------- Your existing env + logic --------------------
 const IMAGE_PROVIDER = (process.env.IMAGE_PROVIDER || "krea").toLowerCase();
@@ -351,6 +354,10 @@ module.exports = async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "METHOD_NOT_ALLOWED" });
 
   try {
+    // ✅ Make sure API_BASE exists for webhook + internal calls
+    // If not set, fallback to request host (works sometimes, but webhook may break)
+    const publicBaseUrl = API_BASE || `https://${req.headers.host}`;
+
     const memberId = await requireMemberId(req);
 
     const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : req.body || {};
@@ -377,19 +384,27 @@ module.exports = async function handler(req, res) {
 
     const choices = { storyType, artStyle, language, voice, aspectRatio, customPrompt, durationRange };
 
-    // Create DB row first
+    // ✅ Create DB row first
     const { data: row, error: insErr } = await supabase
       .from("renders")
-      .insert([{ member_id: String(memberId), status: "rendering", video_url: null, render_id: "", choices, error: null }])
+      .insert([
+        {
+          member_id: String(memberId),
+          status: "rendering",
+          video_url: null,
+          render_id: "",
+          choices,
+          error: null,
+        },
+      ])
       .select("id")
       .single();
 
     if (insErr) return res.status(500).json({ error: "DB_INSERT_FAILED", details: insErr });
     const db_id = row.id;
 
-    // Generate script (calls your /api/generate-script)
-    const baseUrl = `https://${req.headers.host}`;
-    const scriptResp = await fetch(`${baseUrl}/api/generate-script`, {
+    // ✅ Generate script using PUBLIC base URL (consistent)
+    const scriptResp = await fetch(`${publicBaseUrl}/api/generate-script`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ storyType, artStyle, language, customPrompt, durationRange }),
@@ -445,6 +460,7 @@ module.exports = async function handler(req, res) {
 
       mods[`Beat${i}_Scene.start`] = start;
       mods[`Beat${i}_Scene.duration`] = dur;
+
       mods[`Beat${i}_Group.start`] = 0;
       mods[`Beat${i}_Group.duration`] = dur;
     }
@@ -461,7 +477,7 @@ module.exports = async function handler(req, res) {
     let lastGood = "";
     for (let i = 1; i <= beatCount; i++) {
       const raw = imageUrls[i - 1] || "";
-      let proxied = raw ? `${baseUrl}/api/krea-image?url=${encodeURIComponent(raw)}` : "";
+      let proxied = raw ? `${publicBaseUrl}/api/krea-image?url=${encodeURIComponent(raw)}` : "";
       if (!proxied && lastGood) proxied = lastGood;
       if (proxied) lastGood = proxied;
 
@@ -472,7 +488,13 @@ module.exports = async function handler(req, res) {
       }
     }
 
-    const payload = { template_id, modifications: mods, output_format: "mp4" };
+    // ✅ KEY FIX: include webhook_url so Supabase gets video_url
+    const payload = {
+      template_id,
+      modifications: mods,
+      output_format: "mp4",
+      webhook_url: `${publicBaseUrl}/api/creatomate-webhook`,
+    };
 
     const resp = await postJSON(
       "https://api.creatomate.com/v1/renders",
