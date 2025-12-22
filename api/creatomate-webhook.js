@@ -1,63 +1,52 @@
-const { supabase } = require('./_supabase');
+// api/creatomate-webhook.js (CommonJS, Node 18)
+const { getAdminSupabase } = require("./_lib/supabase");
 
-const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN || '*';
+const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN || "*";
+
 function setCors(res) {
-  res.setHeader('Access-Control-Allow-Origin', ALLOW_ORIGIN);
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Webhook-Secret');
+  res.setHeader("Access-Control-Allow-Origin", ALLOW_ORIGIN);
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 }
 
-module.exports = async (req, res) => {
+module.exports = async function handler(req, res) {
   setCors(res);
-  if (req.method === 'OPTIONS') return res.status(200).end();
-  if (req.method !== 'POST') return res.status(405).json({ error: 'METHOD_NOT_ALLOWED' });
+  if (req.method === "OPTIONS") return res.status(200).end();
+  if (req.method !== "POST") return res.status(405).json({ error: "METHOD_NOT_ALLOWED" });
 
   try {
-    // Simple shared-secret auth for webhook
-    const secret = req.headers['x-webhook-secret'];
-    if (!secret || secret !== process.env.CREATOMATE_WEBHOOK_SECRET) {
-      return res.status(401).json({ error: 'INVALID_WEBHOOK_SECRET' });
-    }
+    const sb = getAdminSupabase();
 
-    const body = typeof req.body === 'string' ? JSON.parse(req.body || '{}') : (req.body || {});
-    console.log('[CREATOMATE_WEBHOOK] IN', body);
+    const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {});
 
-    // Creatomate webhook payload varies a bit, so we try common fields:
-    const renderId = body?.id || body?.render_id || body?.data?.id;
-    const statusRaw = body?.status || body?.data?.status || '';
-    const statusLower = String(statusRaw).toLowerCase();
+    // Creatomate typically sends: { id, status, output, ... }
+    const render_id = String(body.id || body.render_id || "");
+    const status = String(body.status || "").toLowerCase();
+    const video_url = body.output || body.video_url || null;
 
-    // video url is often in "url" or "output_url" depending on config
-    const videoUrl = body?.url || body?.output_url || body?.data?.url || body?.data?.output_url || null;
+    if (!render_id) return res.status(400).json({ error: "MISSING_RENDER_ID" });
 
-    if (!renderId) return res.status(400).json({ error: 'MISSING_RENDER_ID', body });
+    const update = {};
+    if (status) update.status = status;
+    if (video_url) update.video_url = video_url;
 
-    let newStatus = 'rendering';
-    if (statusLower === 'succeeded' || statusLower === 'completed' || statusLower === 'complete') newStatus = 'complete';
-    if (statusLower === 'failed' || statusLower === 'error') newStatus = 'failed';
+    // Map statuses if you want:
+    // if (status === "succeeded") update.status = "completed";
+    // if (status === "failed") update.status = "failed";
 
-    const errorMsg =
-      body?.error || body?.message || body?.data?.error || body?.data?.message || null;
-
-    const update = {
-      status: newStatus,
-      video_url: newStatus === 'complete' ? videoUrl : null,
-      error: newStatus === 'failed' ? String(errorMsg || 'Render failed') : null,
-    };
-
-    const { error } = await supabase
-      .from('renders')
+    const { error } = await sb
+      .from("renders")
       .update(update)
-      .eq('render_id', String(renderId));
+      .eq("render_id", render_id);
 
     if (error) {
-      console.error('[CREATOMATE_WEBHOOK] DB_UPDATE_FAILED', error);
-      return res.status(500).json({ error: 'DB_UPDATE_FAILED', details: error });
+      console.error("[WEBHOOK] supabase update error", error);
+      return res.status(500).json({ error: "SUPABASE_UPDATE_FAILED" });
     }
 
     return res.status(200).json({ ok: true });
-  } catch (e) {
-    console.error('[CREATOMATE_WEBHOOK] ERROR', e);
-    return res.status(500).json({ error: 'SERVER_ERROR', message: String(e?.message || e) });
+  } catch (err) {
+    console.error("[WEBHOOK] error", err);
+    return res.status(500).json({ error: "SERVER_ERROR", message: String(err.message || err) });
   }
 };
