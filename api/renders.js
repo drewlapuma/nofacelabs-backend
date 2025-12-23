@@ -23,7 +23,7 @@ function setCors(req, res) {
 module.exports = async function handler(req, res) {
   setCors(req, res);
   if (req.method === "OPTIONS") return res.status(204).end();
-  if (req.method !== "GET") return res.status(405).json({ error: "METHOD_NOT_ALLOWED" });
+  if (req.method !== "GET") return res.status(405).json({ ok: false, error: "METHOD_NOT_ALLOWED" });
 
   try {
     const member_id = await requireMemberId(req);
@@ -31,7 +31,19 @@ module.exports = async function handler(req, res) {
 
     const { data, error } = await sb
       .from("renders")
-      .select("id, created_at, status, video_url, render_id, choices, error")
+      .select(`
+        id,
+        created_at,
+        status,
+        video_url,
+        render_id,
+        choices,
+        error,
+        caption_status,
+        captioned_video_url,
+        caption_error,
+        submagic_project_id
+      `)
       .eq("member_id", member_id)
       .order("created_at", { ascending: false })
       .limit(100);
