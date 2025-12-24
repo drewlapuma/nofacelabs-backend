@@ -1,4 +1,4 @@
-// api/renders.js (CommonJS) — COMBINED list + single
+// api/renders.js (CommonJS) — COMBINED list + single (schema-tolerant)
 // GET /api/renders              => list
 // GET /api/renders?id=<uuid>    => single
 
@@ -25,6 +25,43 @@ function setCors(req, res) {
   res.setHeader("Access-Control-Max-Age", "86400");
 }
 
+// ✅ Normalize DB row fields to the names your frontend expects
+function normalizeRow(r) {
+  const row = r || {};
+
+  // Submagic project id (try multiple possible column spellings)
+  const submagic_project_id =
+    row.submagic_project_id ??
+    row.submagic_proj_id ??
+    row.submagic_proj ??
+    row.submagic_proi ?? // seen in truncated UI earlier
+    row.gic_project_id ?? // what the UI shows when truncated
+    null;
+
+  // Captioned video url
+  const captioned_video_url =
+    row.captioned_video_url ??
+    row.captioned_vide ?? // truncated-looking name
+    row.captioned_video ??
+    null;
+
+  // Caption template id
+  const caption_template_id =
+    row.caption_template_id ??
+    row.caption_templ ?? // truncated-looking name
+    row.caption_template ??
+    null;
+
+  return {
+    ...row,
+
+    // overwrite / provide the normalized keys
+    submagic_project_id,
+    captioned_video_url,
+    caption_template_id,
+  };
+}
+
 function sbErrShape(e) {
   if (!e) return null;
   return { message: e.message, details: e.details, hint: e.hint, code: e.code };
@@ -41,30 +78,11 @@ module.exports = async function handler(req, res) {
 
     const id = String(req.query?.id || "").trim();
 
-    // ✅ Real column names from your Supabase table
-    const selectCols = [
-      "id",
-      "member_id",
-      "created_at",
-      "status",
-      "video_url",
-      "render_id",
-      "choices",
-      "error",
-
-      // captions
-      "caption_status",
-      "caption_error",
-      "captioned_video_url",
-      "caption_template_id",
-      "submagic_project_id",
-    ].join(", ");
-
     // ✅ single (replaces /api/render)
     if (id) {
       const { data, error: dbErr } = await sb
         .from("renders")
-        .select(selectCols)
+        .select("*")
         .eq("id", id)
         .eq("member_id", member_id)
         .single();
@@ -74,13 +92,13 @@ module.exports = async function handler(req, res) {
         return res.status(404).json({ ok: false, error: "NOT_FOUND", supabase: sbErrShape(dbErr) });
       }
 
-      return res.status(200).json({ ok: true, item: data });
+      return res.status(200).json({ ok: true, item: normalizeRow(data) });
     }
 
-    // ✅ list (same as old /api/renders)
+    // ✅ list
     const { data, error } = await sb
       .from("renders")
-      .select(selectCols)
+      .select("*")
       .eq("member_id", member_id)
       .order("created_at", { ascending: false })
       .limit(100);
@@ -90,7 +108,7 @@ module.exports = async function handler(req, res) {
       return res.status(500).json({ ok: false, error: "SUPABASE_LIST_FAILED", supabase: sbErrShape(error) });
     }
 
-    return res.status(200).json({ ok: true, items: data || [] });
+    return res.status(200).json({ ok: true, items: (data || []).map(normalizeRow) });
   } catch (err) {
     const msg = String(err?.message || err);
     console.error("[RENDERS] ERROR:", err);
