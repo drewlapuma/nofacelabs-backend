@@ -1,133 +1,147 @@
 // api/captions-start.js (CommonJS, Node 18)
-// Starts Submagic captions for a render row, using a template chosen by the user (or env fallback).
-const { requireMemberId } = require("./_lib/auth");
-const { getAdminSupabase } = require("./_lib/supabase");
 
-const SUBMAGIC_API_KEY = (process.env.SUBMAGIC_API_KEY || "").trim();
-const API_BASE = (process.env.API_BASE || "").trim();
-const SUBMAGIC_BASE = "https://api.submagic.co/v1";
+const { createClient } = require("@supabase/supabase-js");
+const memberstackAdmin = require("@memberstack/admin");
 
-const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || "*")
-  .split(",")
-  .map((s) => s.trim())
-  .filter(Boolean);
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-function setCors(req, res) {
-  const origin = req.headers.origin;
+const MEMBERSTACK_SECRET_KEY = process.env.MEMBERSTACK_SECRET_KEY;
+const ms = MEMBERSTACK_SECRET_KEY ? memberstackAdmin.init(MEMBERSTACK_SECRET_KEY) : null;
 
-  if (ALLOW_ORIGINS.includes("*")) {
-    res.setHeader("Access-Control-Allow-Origin", "*");
-  } else if (origin && ALLOW_ORIGINS.includes(origin)) {
-    res.setHeader("Access-Control-Allow-Origin", origin);
-    res.setHeader("Vary", "Origin");
-  }
+const SUBMAGIC_API_KEY = process.env.SUBMAGIC_API_KEY;
+const SUBMAGIC_BASE = process.env.SUBMAGIC_BASE || "https://api.submagic.co"; // adjust if yours differs
+const SUBMAGIC_DEFAULT_TEMPLATE = (process.env.SUBMAGIC_DEFAULT_TEMPLATE || "").trim();
 
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-  res.setHeader("Access-Control-Max-Age", "86400");
+const supabase =
+  SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY
+    ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } })
+    : null;
+
+function getBearerToken(req) {
+  const h = req.headers.authorization || req.headers.Authorization || "";
+  const m = String(h).match(/^Bearer\s+(.+)$/i);
+  return m ? m[1] : null;
 }
 
-async function smFetch(path, opts = {}) {
-  const r = await fetch(`${SUBMAGIC_BASE}${path}`, {
-    ...opts,
-    headers: {
-      "x-api-key": SUBMAGIC_API_KEY,
-      ...(opts.headers || {}),
-    },
-  });
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(j?.message || j?.error || `SUBMAGIC_${r.status}`);
-  return j;
+async function requireMemberId(req) {
+  const token = getBearerToken(req);
+  if (!token) throw new Error("MISSING_AUTH");
+  if (!ms) throw new Error("MISSING_MEMBERSTACK_SECRET_KEY");
+  const { id } = await ms.verifyToken({ token });
+  if (!id) throw new Error("INVALID_MEMBER_TOKEN");
+  return id;
 }
 
 module.exports = async function handler(req, res) {
-  setCors(req, res);
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "POST") return res.status(405).json({ ok: false, error: "METHOD_NOT_ALLOWED" });
 
   try {
+    if (!supabase) return res.status(500).json({ ok: false, error: "MISSING_SUPABASE_ENV_VARS" });
     if (!SUBMAGIC_API_KEY) return res.status(500).json({ ok: false, error: "MISSING_SUBMAGIC_API_KEY" });
-    if (!API_BASE) return res.status(500).json({ ok: false, error: "MISSING_API_BASE" });
 
-    const member_id = await requireMemberId(req);
-    const sb = getAdminSupabase();
+    const memberId = await requireMemberId(req);
 
     const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {});
-    const id = String(body?.id || "").trim();
-    if (!id) return res.status(400).json({ ok: false, error: "MISSING_ID" });
+    const dbId = String(body.id || "").trim();
+    if (!dbId) return res.status(400).json({ ok: false, error: "MISSING_ID" });
 
-    const { data: row, error } = await sb
+    // accept MANY key names
+    const chosen =
+      String(
+        body.templateId ||
+          body.template_id ||
+          body.templateName ||
+          body.template_name ||
+          body.template ||
+          body.style ||
+          body.preset ||
+          ""
+      ).trim();
+
+    const templateToUse = chosen || SUBMAGIC_DEFAULT_TEMPLATE || "";
+
+    // Load render + verify ownership
+    const { data: render, error: rErr } = await supabase
       .from("renders")
-      .select("id, member_id, status, video_url, caption_status, submagic_project_id, choices")
-      .eq("id", id)
-      .eq("member_id", member_id)
+      .select("id, member_id, video_url, caption_status, caption_project_id, captioned_video_url")
+      .eq("id", dbId)
       .single();
 
-    if (error || !row) return res.status(404).json({ ok: false, error: "NOT_FOUND" });
-    if (!row.video_url) return res.status(400).json({ ok: false, error: "VIDEO_NOT_READY" });
+    if (rErr || !render) return res.status(404).json({ ok: false, error: "RENDER_NOT_FOUND" });
+    if (String(render.member_id) !== String(memberId)) return res.status(403).json({ ok: false, error: "FORBIDDEN" });
+    if (!render.video_url) return res.status(400).json({ ok: false, error: "VIDEO_NOT_READY" });
 
-    const capStatus = String(row.caption_status || "").toLowerCase();
-    if (row.submagic_project_id || capStatus.includes("caption")) {
-      return res.status(200).json({ ok: true, already: true, projectId: row.submagic_project_id || null });
+    // If already done, return immediately
+    if (render.captioned_video_url) {
+      return res.status(200).json({
+        ok: true,
+        already: true,
+        status: "completed",
+        captioned_video_url: render.captioned_video_url,
+      });
     }
 
-    // ✅ template: allow from client OR fallback to env
-    const templateFromBody = String(body?.templateId || body?.templateName || "").trim();
-    const TEMPLATE_ID = templateFromBody || String(process.env.SUBMAGIC_TEMPLATE_ID || "").trim();
-    if (!TEMPLATE_ID) return res.status(500).json({ ok: false, error: "MISSING_SUBMAGIC_TEMPLATE_ID" });
+    // If already captioning, return immediately (DO NOT POLL HERE)
+    const currentStatus = String(render.caption_status || "").toLowerCase();
+    if (currentStatus === "captioning" && render.caption_project_id) {
+      return res.status(200).json({
+        ok: true,
+        already: true,
+        status: "captioning",
+        projectId: render.caption_project_id,
+      });
+    }
 
-    const choices = row.choices || {};
-    const title = choices.storyType || choices.customPrompt || "NofaceLabs Video";
-
-    // Map language if you want (default en)
-    const language = String(choices.language || "en").toLowerCase().startsWith("en") ? "en" : "en";
-
-    // 1) Create project
-    const created = await smFetch(`/projects`, {
+    // Create / start Submagic project (FAST)
+    // NOTE: replace this endpoint/payload with your actual Submagic call
+    const startResp = await fetch(`${SUBMAGIC_BASE}/projects`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        Authorization: `Bearer ${SUBMAGIC_API_KEY}`,
+        "Content-Type": "application/json",
+      },
       body: JSON.stringify({
-        title,
-        language,
-        templateId: TEMPLATE_ID, // ✅ uses chosen template
+        video_url: render.video_url,
+        template: templateToUse || undefined,
+        template_name: templateToUse || undefined,
       }),
     });
 
-    const projectId = created?.id || created?.projectId;
-    if (!projectId) throw new Error("SUBMAGIC_NO_PROJECT_ID");
+    const startJson = await startResp.json().catch(() => ({}));
+    if (!startResp.ok) {
+      await supabase
+        .from("renders")
+        .update({ caption_status: "failed", caption_error: JSON.stringify(startJson) })
+        .eq("id", dbId);
 
-    // 2) Upload video (URL ingest)
-    const fd = new FormData();
-    fd.append("videoUrl", row.video_url);
+      return res.status(502).json({ ok: false, error: "SUBMAGIC_START_FAILED", details: startJson });
+    }
 
-    await smFetch(`/projects/${encodeURIComponent(projectId)}/upload`, {
-      method: "POST",
-      body: fd,
-    });
+    const projectId = startJson.projectId || startJson.id || startJson.project_id || null;
 
-    // 3) Export with webhook back to your API
-    await smFetch(`/projects/${encodeURIComponent(projectId)}/export`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        webhookUrl: `${API_BASE}/api/submagic-webhook?id=${encodeURIComponent(row.id)}`,
-      }),
-    });
-
-    // ✅ persist status + chosen template
-    await sb
+    // Save captioning state and return immediately
+    await supabase
       .from("renders")
       .update({
         caption_status: "captioning",
-        submagic_project_id: projectId,
+        caption_project_id: projectId,
+        caption_template: templateToUse || null,
         caption_error: null,
-        // optional: store what they picked
-        caption_template_id: TEMPLATE_ID,
       })
-      .eq("id", row.id);
+      .eq("id", dbId);
 
-    return res.status(200).json({ ok: true, projectId, templateId: TEMPLATE_ID });
-  } catch (e) {
-    return res.status(500).json({ ok: false, error: "SERVER_ERROR", message: String(e?.message || e) });
+    return res.status(200).json({
+      ok: true,
+      already: false,
+      status: "captioning",
+      projectId,
+      template: templateToUse || null,
+    });
+  } catch (err) {
+    const msg = String(err?.message || err);
+    const code = msg.includes("MISSING_AUTH") || msg.includes("INVALID_MEMBER") ? 401 : 500;
+    return res.status(code).json({ ok: false, error: code === 401 ? "UNAUTHORIZED" : "SERVER_ERROR", message: msg });
   }
 };
