@@ -25,6 +25,16 @@ function setCors(req, res) {
   res.setHeader("Access-Control-Max-Age", "86400");
 }
 
+function sbErrShape(e) {
+  if (!e) return null;
+  return {
+    message: e.message,
+    details: e.details,
+    hint: e.hint,
+    code: e.code,
+  };
+}
+
 module.exports = async function handler(req, res) {
   setCors(req, res);
   if (req.method === "OPTIONS") return res.status(204).end();
@@ -36,6 +46,7 @@ module.exports = async function handler(req, res) {
 
     const id = String(req.query?.id || "").trim();
 
+    // ✅ keep this list EXACTLY matching your table column names
     const selectCols = [
       "id",
       "created_at",
@@ -45,7 +56,7 @@ module.exports = async function handler(req, res) {
       "choices",
       "error",
 
-      // ✅ captions columns (match your Supabase table)
+      // captions columns (from your screenshot)
       "caption_status",
       "caption_error",
       "submagic_proj",
@@ -53,7 +64,6 @@ module.exports = async function handler(req, res) {
       "caption_templ",
     ].join(", ");
 
-    // ---- Single ----
     if (id) {
       const { data, error: dbErr } = await sb
         .from("renders")
@@ -63,14 +73,13 @@ module.exports = async function handler(req, res) {
         .single();
 
       if (dbErr || !data) {
-        // Helpful debug without leaking secrets
-        return res.status(404).json({ ok: false, error: "NOT_FOUND" });
+        console.error("[RENDERS_SINGLE] supabase error:", dbErr);
+        return res.status(404).json({ ok: false, error: "NOT_FOUND", supabase: sbErrShape(dbErr) });
       }
 
       return res.status(200).json({ ok: true, item: data });
     }
 
-    // ---- List ----
     const { data, error } = await sb
       .from("renders")
       .select(selectCols)
@@ -80,19 +89,26 @@ module.exports = async function handler(req, res) {
 
     if (error) {
       console.error("[RENDERS_LIST] supabase error:", error);
-      return res.status(500).json({ ok: false, error: "SUPABASE_LIST_FAILED" });
+      return res.status(500).json({
+        ok: false,
+        error: "SUPABASE_LIST_FAILED",
+        supabase: sbErrShape(error),
+        env: {
+          hasUrl: !!process.env.SUPABASE_URL,
+          hasServiceRole: !!process.env.SUPABASE_SERVICE_ROLE_KEY,
+        },
+      });
     }
 
     return res.status(200).json({ ok: true, items: data || [] });
   } catch (err) {
     const msg = String(err?.message || err);
+    console.error("[RENDERS] AUTH/SERVER_ERROR:", err);
 
-    // keep consistent with your other endpoints
     if (msg.includes("MISSING_AUTH") || msg.includes("MEMBERSTACK") || msg.includes("INVALID_MEMBER")) {
       return res.status(401).json({ ok: false, error: "UNAUTHORIZED", message: msg });
     }
 
-    console.error("[RENDERS] SERVER_ERROR", err);
     return res.status(500).json({ ok: false, error: "SERVER_ERROR", message: msg });
   }
 };
