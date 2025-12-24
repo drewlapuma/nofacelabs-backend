@@ -6,6 +6,26 @@ const { getAdminSupabase } = require("./_lib/supabase");
 const SUBMAGIC_API_KEY = (process.env.SUBMAGIC_API_KEY || "").trim();
 const SUBMAGIC_BASE = "https://api.submagic.co/v1";
 
+const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || "*")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+function setCors(req, res) {
+  const origin = req.headers.origin;
+
+  if (ALLOW_ORIGINS.includes("*")) {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+  } else if (origin && ALLOW_ORIGINS.includes(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+  }
+
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader("Access-Control-Max-Age", "86400");
+}
+
 function pickTemplate(body) {
   return String(
     body?.templateId ||
@@ -20,8 +40,6 @@ function pickTemplate(body) {
 }
 
 async function smCreateProject({ templateName, videoUrl, title, language = "en" }) {
-  // You previously had 2 different header styles in your code.
-  // This one matches your submagic-templates.js: Bearer token.
   const r = await fetch(`${SUBMAGIC_BASE}/projects`, {
     method: "POST",
     headers: {
@@ -32,7 +50,8 @@ async function smCreateProject({ templateName, videoUrl, title, language = "en" 
       title,
       language,
       videoUrl,
-      templateName, // Submagic template name string
+      // Submagic expects a template name string in your setup
+      ...(templateName ? { templateName } : {}),
     }),
   });
 
@@ -42,6 +61,7 @@ async function smCreateProject({ templateName, videoUrl, title, language = "en" 
 }
 
 module.exports = async function handler(req, res) {
+  setCors(req, res);
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "POST") return res.status(405).json({ ok: false, error: "METHOD_NOT_ALLOWED" });
 
@@ -57,9 +77,20 @@ module.exports = async function handler(req, res) {
 
     const templateName = pickTemplate(body);
 
+    // ✅ USE REAL COLUMN NAMES
     const { data: row, error } = await sb
       .from("renders")
-      .select("id, member_id, video_url, choices, caption_status, submagic_proj, captioned_vide")
+      .select([
+        "id",
+        "member_id",
+        "video_url",
+        "choices",
+        "caption_status",
+        "caption_error",
+        "caption_template_id",
+        "captioned_video_url",
+        "submagic_project_id",
+      ].join(", "))
       .eq("id", id)
       .eq("member_id", member_id)
       .single();
@@ -67,24 +98,41 @@ module.exports = async function handler(req, res) {
     if (error || !row) return res.status(404).json({ ok: false, error: "NOT_FOUND" });
     if (!row.video_url) return res.status(400).json({ ok: false, error: "VIDEO_NOT_READY" });
 
-    // If already completed
-    if (row.captioned_vide) {
-      return res.status(200).json({ ok: true, already: true, status: "completed", captioned: row.captioned_vide });
+    // ✅ If already completed
+    if (row.captioned_video_url) {
+      return res.status(200).json({
+        ok: true,
+        already: true,
+        status: "completed",
+        captioned_video_url: row.captioned_video_url,
+      });
     }
 
-    // If already started, don't create a new one
-    if (row.submagic_proj) {
-      return res.status(200).json({ ok: true, already: true, projectId: row.submagic_proj, status: row.caption_status || "captioning" });
+    // ✅ If already started, don't create a new one
+    if (row.submagic_project_id) {
+      return res.status(200).json({
+        ok: true,
+        already: true,
+        projectId: row.submagic_project_id,
+        status: row.caption_status || "captioning",
+      });
     }
 
-    // Mark started immediately (prevents double clicks)
-    await sb.from("renders").update({
+    // ✅ Mark started immediately (prevents double clicks)
+    const startUpdate = {
       caption_status: "captioning",
       caption_error: null,
-      caption_templ: templateName || null,
-    }).eq("id", row.id);
+      // store the chosen template in your REAL column
+      caption_template_id: templateName || null,
+    };
+
+    const { error: startErr } = await sb.from("renders").update(startUpdate).eq("id", row.id);
+    if (startErr) {
+      return res.status(500).json({ ok: false, error: "SUPABASE_UPDATE_FAILED", details: String(startErr.message || startErr) });
+    }
 
     const title = row?.choices?.storyType || row?.choices?.customPrompt || "NofaceLabs Video";
+
     const created = await smCreateProject({
       templateName: templateName || undefined,
       videoUrl: row.video_url,
@@ -95,13 +143,18 @@ module.exports = async function handler(req, res) {
     const projectId = created?.id || created?.projectId || created?.project_id;
     if (!projectId) throw new Error("SUBMAGIC_NO_PROJECT_ID");
 
-    await sb.from("renders").update({
-      submagic_proj: String(projectId),
+    // ✅ Save project id under the REAL column name
+    const finishUpdate = {
+      submagic_project_id: String(projectId),
       caption_status: String(created?.status || "captioning"),
       caption_error: null,
-    }).eq("id", row.id);
+    };
 
-    // ✅ Return immediately (NO waiting/polling here)
+    const { error: finishErr } = await sb.from("renders").update(finishUpdate).eq("id", row.id);
+    if (finishErr) {
+      return res.status(500).json({ ok: false, error: "SUPABASE_UPDATE_FAILED", details: String(finishErr.message || finishErr) });
+    }
+
     return res.status(200).json({ ok: true, already: false, projectId: String(projectId) });
   } catch (e) {
     return res.status(500).json({ ok: false, error: "SERVER_ERROR", message: String(e?.message || e) });
