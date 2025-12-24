@@ -36,65 +36,63 @@ module.exports = async function handler(req, res) {
 
     const id = String(req.query?.id || "").trim();
 
-    // ✅ If id provided => return single item (replaces /api/render)
+    const selectCols = [
+      "id",
+      "created_at",
+      "status",
+      "video_url",
+      "render_id",
+      "choices",
+      "error",
+
+      // ✅ captions columns (match your Supabase table)
+      "caption_status",
+      "caption_error",
+      "submagic_proj",
+      "captioned_vide",
+      "caption_templ",
+    ].join(", ");
+
+    // ---- Single ----
     if (id) {
       const { data, error: dbErr } = await sb
         .from("renders")
-        .select(
-          [
-            "id",
-            "created_at",
-            "status",
-            "video_url",
-            "render_id",
-            "choices",
-            "error",
-
-            // ✅ your REAL caption columns from Supabase screenshot
-            "caption_status",
-            "caption_error",
-            "submagic_proj",
-            "captioned_vide",
-            "caption_templ",
-          ].join(", ")
-        )
+        .select(selectCols)
         .eq("id", id)
         .eq("member_id", member_id)
         .single();
 
-      if (dbErr || !data) return res.status(404).json({ ok: false, error: "NOT_FOUND" });
+      if (dbErr || !data) {
+        // Helpful debug without leaking secrets
+        return res.status(404).json({ ok: false, error: "NOT_FOUND" });
+      }
 
       return res.status(200).json({ ok: true, item: data });
     }
 
-    // ✅ Otherwise => list (same as old /api/renders)
+    // ---- List ----
     const { data, error } = await sb
       .from("renders")
-      .select(
-        [
-          "id",
-          "created_at",
-          "status",
-          "video_url",
-          "render_id",
-          "choices",
-          "error",
-
-          "caption_status",
-          "caption_error",
-          "submagic_proj",
-          "captioned_vide",
-          "caption_templ",
-        ].join(", ")
-      )
+      .select(selectCols)
       .eq("member_id", member_id)
       .order("created_at", { ascending: false })
       .limit(100);
 
-    if (error) return res.status(500).json({ ok: false, error: "SUPABASE_LIST_FAILED" });
+    if (error) {
+      console.error("[RENDERS_LIST] supabase error:", error);
+      return res.status(500).json({ ok: false, error: "SUPABASE_LIST_FAILED" });
+    }
 
     return res.status(200).json({ ok: true, items: data || [] });
   } catch (err) {
-    return res.status(401).json({ ok: false, error: "UNAUTHORIZED", message: String(err?.message || err) });
+    const msg = String(err?.message || err);
+
+    // keep consistent with your other endpoints
+    if (msg.includes("MISSING_AUTH") || msg.includes("MEMBERSTACK") || msg.includes("INVALID_MEMBER")) {
+      return res.status(401).json({ ok: false, error: "UNAUTHORIZED", message: msg });
+    }
+
+    console.error("[RENDERS] SERVER_ERROR", err);
+    return res.status(500).json({ ok: false, error: "SERVER_ERROR", message: msg });
   }
 };
