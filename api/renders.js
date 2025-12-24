@@ -27,12 +27,7 @@ function setCors(req, res) {
 
 function sbErrShape(e) {
   if (!e) return null;
-  return {
-    message: e.message,
-    details: e.details,
-    hint: e.hint,
-    code: e.code,
-  };
+  return { message: e.message, details: e.details, hint: e.hint, code: e.code };
 }
 
 module.exports = async function handler(req, res) {
@@ -46,9 +41,10 @@ module.exports = async function handler(req, res) {
 
     const id = String(req.query?.id || "").trim();
 
-    // ✅ keep this list EXACTLY matching your table column names
+    // ✅ Real column names from your Supabase table
     const selectCols = [
       "id",
+      "member_id",
       "created_at",
       "status",
       "video_url",
@@ -56,14 +52,15 @@ module.exports = async function handler(req, res) {
       "choices",
       "error",
 
-      // captions columns (from your screenshot)
+      // captions
       "caption_status",
       "caption_error",
-      "submagic_proj",
-      "captioned_vide",
-      "caption_templ",
+      "captioned_video_url",
+      "caption_template_id",
+      "submagic_project_id",
     ].join(", ");
 
+    // ✅ single (replaces /api/render)
     if (id) {
       const { data, error: dbErr } = await sb
         .from("renders")
@@ -80,6 +77,7 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ ok: true, item: data });
     }
 
+    // ✅ list (same as old /api/renders)
     const { data, error } = await sb
       .from("renders")
       .select(selectCols)
@@ -89,21 +87,13 @@ module.exports = async function handler(req, res) {
 
     if (error) {
       console.error("[RENDERS_LIST] supabase error:", error);
-      return res.status(500).json({
-        ok: false,
-        error: "SUPABASE_LIST_FAILED",
-        supabase: sbErrShape(error),
-        env: {
-          hasUrl: !!process.env.SUPABASE_URL,
-          hasServiceRole: !!process.env.SUPABASE_SERVICE_ROLE_KEY,
-        },
-      });
+      return res.status(500).json({ ok: false, error: "SUPABASE_LIST_FAILED", supabase: sbErrShape(error) });
     }
 
     return res.status(200).json({ ok: true, items: data || [] });
   } catch (err) {
     const msg = String(err?.message || err);
-    console.error("[RENDERS] AUTH/SERVER_ERROR:", err);
+    console.error("[RENDERS] ERROR:", err);
 
     if (msg.includes("MISSING_AUTH") || msg.includes("MEMBERSTACK") || msg.includes("INVALID_MEMBER")) {
       return res.status(401).json({ ok: false, error: "UNAUTHORIZED", message: msg });
