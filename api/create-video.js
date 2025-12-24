@@ -1,13 +1,14 @@
 // api/create-video.js (CommonJS, Node 18)
-// NOTE: Node 18 on Vercel has global fetch.
+// ✅ Updates:
+// - Better Krea failure logging (shows real reason instead of just KREA_JOB_FAILED)
+// - Retries per-beat Krea generation (optional but included)
+// - Safer error messages + less “mystery” failures in Vercel logs
 
 const https = require("https");
 const { createClient } = require("@supabase/supabase-js");
 const memberstackAdmin = require("@memberstack/admin");
 
-// -------------------- CORS (FIXED) --------------------
-// Use ALLOW_ORIGINS for comma-separated allowlist.
-// Example: https://nofacelabsai.webflow.io,https://nofacelabs.ai
+// -------------------- CORS --------------------
 const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || "*")
   .split(",")
   .map((s) => s.trim())
@@ -16,7 +17,6 @@ const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || 
 function setCors(req, res) {
   const origin = req.headers.origin;
 
-  // If "*" allow all (no credentials). Best for simple Bearer auth.
   if (ALLOW_ORIGINS.includes("*")) {
     res.setHeader("Access-Control-Allow-Origin", "*");
   } else if (origin && ALLOW_ORIGINS.includes(origin)) {
@@ -29,12 +29,10 @@ function setCors(req, res) {
   res.setHeader("Access-Control-Max-Age", "86400");
 }
 
-// -------------------- API BASE (IMPORTANT) --------------------
-// This must be the PUBLIC URL that Creatomate can reach for webhook calls.
-// Set in Vercel env: API_BASE=https://nofacelabs-backend.vercel.app
+// -------------------- API BASE --------------------
 const API_BASE = (process.env.API_BASE || "").trim();
 
-// -------------------- Your existing env + logic --------------------
+// -------------------- Providers --------------------
 const IMAGE_PROVIDER = (process.env.IMAGE_PROVIDER || "krea").toLowerCase();
 
 // ---------- Supabase ----------
@@ -48,7 +46,7 @@ const supabase =
       })
     : null;
 
-// ---------- Memberstack auth (Admin SDK verify) ----------
+// ---------- Memberstack auth ----------
 const MEMBERSTACK_SECRET_KEY = process.env.MEMBERSTACK_SECRET_KEY;
 const ms = MEMBERSTACK_SECRET_KEY ? memberstackAdmin.init(MEMBERSTACK_SECRET_KEY) : null;
 
@@ -84,6 +82,11 @@ const KREA_GENERATE_URL =
 const KREA_JOB_URL_BASE = process.env.KREA_JOB_URL_BASE || "https://api.krea.ai/jobs";
 const KREA_STYLE_ID = (process.env.KREA_STYLE_ID || "tvjlqsab9").trim();
 const KREA_STYLE_STRENGTH = Number(process.env.KREA_STYLE_STRENGTH || 0.85);
+
+// ✅ retry controls (tweak as you like)
+const KREA_PER_BEAT_RETRIES = Number(process.env.KREA_PER_BEAT_RETRIES || 2); // total attempts per beat
+const KREA_POLL_TRIES = Number(process.env.KREA_POLL_TRIES || 90);
+const KREA_POLL_DELAY_MS = Number(process.env.KREA_POLL_DELAY_MS || 2500);
 
 // ---------- Beats ----------
 const MIN_BEATS = 8;
@@ -263,7 +266,7 @@ Narration line:
   return out || text;
 }
 
-// ---------- Krea ----------
+// ---------- Krea (UPDATED LOGGING) ----------
 async function createKreaJob(prompt, aspectRatio) {
   if (!KREA_API_KEY) throw new Error("KREA_API_KEY not set");
   if (!KREA_STYLE_ID) throw new Error("KREA_STYLE_ID not set");
@@ -285,49 +288,106 @@ async function createKreaJob(prompt, aspectRatio) {
 
   const data = await resp.json().catch(() => ({}));
   if (!resp.ok) {
-    console.error("[KREA_GENERATE_ERROR]", data);
-    throw new Error("KREA_GENERATE_FAILED");
+    console.error("[KREA_GENERATE_ERROR]", {
+      status: resp.status,
+      data,
+      // keep logs readable:
+      payload: { ...payload, prompt: String(prompt).slice(0, 160) + (String(prompt).length > 160 ? "..." : "") },
+    });
+    throw new Error(`KREA_GENERATE_FAILED (${resp.status})`);
   }
 
   const jobId = data?.job_id || data?.id;
-  if (!jobId) throw new Error("KREA_MISSING_JOB_ID");
+  if (!jobId) {
+    console.error("[KREA_MISSING_JOB_ID]", data);
+    throw new Error("KREA_MISSING_JOB_ID");
+  }
   return jobId;
 }
 
 async function pollKreaJob(jobId) {
   const url = `${KREA_JOB_URL_BASE}/${encodeURIComponent(jobId)}`;
 
-  for (let i = 0; i < 90; i++) {
-    const resp = await fetch(url, { method: "GET", headers: { Authorization: `Bearer ${KREA_API_KEY}` } });
+  for (let i = 0; i < KREA_POLL_TRIES; i++) {
+    const resp = await fetch(url, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${KREA_API_KEY}` },
+    });
+
     const data = await resp.json().catch(() => ({}));
 
-    if (!resp.ok) throw new Error("KREA_JOB_LOOKUP_FAILED");
+    if (!resp.ok) {
+      console.error("[KREA_JOB_LOOKUP_FAILED]", { status: resp.status, data });
+      throw new Error(`KREA_JOB_LOOKUP_FAILED (${resp.status})`);
+    }
 
     const status = String(data?.status || "").toLowerCase();
+
     if (status === "completed" || status === "complete" || status === "succeeded") {
       const urls = data?.result?.urls || data?.urls || [];
       const imageUrl = Array.isArray(urls) ? urls[0] : null;
-      if (!imageUrl) throw new Error("KREA_JOB_NO_RESULT_URL");
+
+      if (!imageUrl) {
+        console.error("[KREA_JOB_NO_RESULT_URL]", data);
+        throw new Error("KREA_JOB_NO_RESULT_URL");
+      }
       return imageUrl;
     }
-    if (status === "failed" || status === "error") throw new Error("KREA_JOB_FAILED");
 
-    await new Promise((r) => setTimeout(r, 2500));
+    if (status === "failed" || status === "error") {
+      const reason =
+        data?.error?.message ||
+        data?.error ||
+        data?.message ||
+        data?.detail ||
+        (typeof data === "string" ? data : JSON.stringify(data));
+
+      console.error("[KREA_JOB_FAILED]", { jobId, reason, data });
+      throw new Error(`KREA_JOB_FAILED: ${reason}`);
+    }
+
+    await new Promise((r) => setTimeout(r, KREA_POLL_DELAY_MS));
   }
+
   throw new Error("KREA_JOB_TIMEOUT");
+}
+
+async function generateOneImageWithRetry({ prompt, aspectRatio, beatIndex }) {
+  let lastErr = null;
+
+  for (let attempt = 1; attempt <= Math.max(1, KREA_PER_BEAT_RETRIES); attempt++) {
+    try {
+      const jobId = await createKreaJob(prompt, aspectRatio);
+      const imageUrl = await pollKreaJob(jobId);
+      return imageUrl;
+    } catch (e) {
+      lastErr = e;
+      console.error("[KREA_RETRY]", {
+        beat: beatIndex,
+        attempt,
+        maxAttempts: KREA_PER_BEAT_RETRIES,
+        message: String(e?.message || e),
+      });
+      // small backoff
+      await new Promise((r) => setTimeout(r, 1200 * attempt));
+    }
+  }
+
+  throw lastErr || new Error("KREA_FAILED_AFTER_RETRIES");
 }
 
 async function generateKreaImageUrlsForBeats({ beatCount, beatTexts, aspectRatio }) {
   const urls = [];
+
   for (let i = 1; i <= beatCount; i++) {
     const beatText = beatTexts[i - 1] || "";
     const needsExpand = !EXPAND_SHORT_BEATS_ONLY ? true : countWords(beatText) < EXPAND_WORD_THRESHOLD;
     const prompt = needsExpand ? await expandBeatToVisualPrompt(beatText) : beatText.trim();
 
-    const jobId = await createKreaJob(prompt, aspectRatio);
-    const imageUrl = await pollKreaJob(jobId);
+    const imageUrl = await generateOneImageWithRetry({ prompt, aspectRatio, beatIndex: i });
     urls.push(imageUrl);
   }
+
   return urls;
 }
 
@@ -348,15 +408,11 @@ function buildVariantSequence(beatCount) {
 module.exports = async function handler(req, res) {
   setCors(req, res);
 
-  // IMPORTANT: respond to preflight BEFORE any auth/module work
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "POST") return res.status(405).json({ error: "METHOD_NOT_ALLOWED" });
 
   try {
-    // ✅ Make sure API_BASE exists for webhook + internal calls
-    // If not set, fallback to request host (works sometimes, but webhook may break)
     const publicBaseUrl = API_BASE || `https://${req.headers.host}`;
-
     const memberId = await requireMemberId(req);
 
     const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : req.body || {};
@@ -383,7 +439,7 @@ module.exports = async function handler(req, res) {
 
     const choices = { storyType, artStyle, language, voice, aspectRatio, customPrompt, durationRange };
 
-    // ✅ Create DB row first
+    // Create DB row first
     const { data: row, error: insErr } = await supabase
       .from("renders")
       .insert([
@@ -402,7 +458,7 @@ module.exports = async function handler(req, res) {
     if (insErr) return res.status(500).json({ error: "DB_INSERT_FAILED", details: insErr });
     const db_id = row.id;
 
-    // ✅ Generate script using PUBLIC base URL (consistent)
+    // Generate script
     const scriptResp = await fetch(`${publicBaseUrl}/api/generate-script`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -420,6 +476,7 @@ module.exports = async function handler(req, res) {
     let targetSec = Math.round(speechSec + 2);
     let minSec = 60,
       maxSec = 90;
+
     if (durationRange === "30-60") {
       minSec = 30;
       maxSec = 60;
@@ -487,7 +544,7 @@ module.exports = async function handler(req, res) {
       }
     }
 
-    // ✅ KEY FIX: include webhook_url so Supabase gets video_url
+    // Creatomate render request
     const payload = {
       template_id,
       modifications: mods,
