@@ -1,5 +1,7 @@
 // api/submagic-templates.js (CommonJS, Node 18)
-// Returns Submagic caption templates with correct auth header (x-api-key) + optional mapping.
+
+const SUBMAGIC_BASE = "https://api.submagic.co/v1";
+
 const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || "*")
   .split(",")
   .map((s) => s.trim())
@@ -20,38 +22,59 @@ function setCors(req, res) {
   res.setHeader("Access-Control-Max-Age", "86400");
 }
 
+function normalizeTemplates(raw) {
+  // Submagic might return { templates: [...] } or just [...]
+  const arr =
+    Array.isArray(raw) ? raw :
+    Array.isArray(raw?.templates) ? raw.templates :
+    Array.isArray(raw?.data) ? raw.data :
+    [];
+
+  return arr
+    .map((t) => ({
+      id: String(t?.id || t?.templateId || t?.slug || t?.name || "").trim(),
+      name: String(t?.name || t?.title || t?.displayName || t?.slug || t?.id || "Template").trim(),
+      // optional extras if they exist (won't break anything)
+      preview: t?.preview || t?.thumbnail || t?.cover || "",
+      category: t?.category || "",
+    }))
+    .filter((t) => t.id);
+}
+
 module.exports = async function handler(req, res) {
   setCors(req, res);
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "GET") return res.status(405).json({ ok: false, error: "METHOD_NOT_ALLOWED" });
 
   try {
-    const SUBMAGIC_API_KEY = (process.env.SUBMAGIC_API_KEY || "").trim();
-    if (!SUBMAGIC_API_KEY) return res.status(500).json({ ok: false, error: "MISSING_SUBMAGIC_API_KEY" });
+    const key = String(process.env.SUBMAGIC_API_KEY || "").trim();
+    if (!key) return res.status(500).json({ ok: false, error: "MISSING_SUBMAGIC_API_KEY" });
 
-    const r = await fetch("https://api.submagic.co/v1/templates", {
+    const r = await fetch(`${SUBMAGIC_BASE}/templates`, {
       headers: {
-        // ✅ FIX: Submagic uses x-api-key (matching your other Submagic calls)
-        "x-api-key": SUBMAGIC_API_KEY,
+        // ✅ correct header
+        "x-api-key": key,
+        "Accept": "application/json",
       },
     });
 
     const j = await r.json().catch(() => ({}));
-    if (!r.ok) return res.status(r.status).json({ ok: false, error: "SUBMAGIC_TEMPLATES_FAILED", details: j });
+    if (!r.ok) {
+      return res.status(r.status).json({
+        ok: false,
+        error: "SUBMAGIC_TEMPLATES_FAILED",
+        status: r.status,
+        details: j,
+      });
+    }
 
-    // ✅ Return both raw + a normalized list (helps your Webflow dropdown)
-    const raw = Array.isArray(j) ? j : (j?.templates && Array.isArray(j.templates) ? j.templates : j);
-
-    const templates = (Array.isArray(raw) ? raw : []).map((t) => {
-      const id = t?.id || t?.templateId || t?.template_id || t?.slug || t?.key || t?.name || t?.title || "";
-      const name = t?.name || t?.title || t?.label || t?.displayName || t?.slug || id || "Template";
-      return { id: String(id), name: String(name), raw: t };
-    }).filter(x => x.id);
+    const templates = normalizeTemplates(j);
 
     return res.status(200).json({
       ok: true,
-      templates,     // normalized: [{id, name, raw}]
-      raw: j,        // full response in case you need extra fields later
+      templates,       // ✅ [{id,name,preview,category}]
+      rawCount: Array.isArray(j) ? j.length : (j?.templates?.length || j?.data?.length || null),
+      count: templates.length,
     });
   } catch (e) {
     return res.status(500).json({ ok: false, error: "SERVER_ERROR", message: String(e?.message || e) });
