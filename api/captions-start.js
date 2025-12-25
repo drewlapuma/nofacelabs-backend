@@ -3,39 +3,19 @@
 const { requireMemberId } = require("./_lib/auth");
 const { getAdminSupabase } = require("./_lib/supabase");
 
-const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || "*")
-  .split(",")
-  .map((s) => s.trim())
-  .filter(Boolean);
-
-function setCors(req, res) {
-  const origin = req.headers.origin;
-
-  if (ALLOW_ORIGINS.includes("*")) {
-    res.setHeader("Access-Control-Allow-Origin", "*");
-  } else if (origin && ALLOW_ORIGINS.includes(origin)) {
-    res.setHeader("Access-Control-Allow-Origin", origin);
-    res.setHeader("Vary", "Origin");
-  }
-
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-  res.setHeader("Access-Control-Max-Age", "86400");
-}
-
 const SUBMAGIC_API_KEY = (process.env.SUBMAGIC_API_KEY || "").trim();
 const SUBMAGIC_BASE = "https://api.submagic.co/v1";
 
 function pickTemplate(body) {
   return String(
     body?.templateId ||
-      body?.template_id ||
-      body?.templateName ||
-      body?.template_name ||
-      body?.template ||
-      body?.style ||
-      body?.preset ||
-      ""
+    body?.template_id ||
+    body?.templateName ||
+    body?.template_name ||
+    body?.template ||
+    body?.style ||
+    body?.preset ||
+    ""
   ).trim();
 }
 
@@ -50,24 +30,16 @@ async function smCreateProject({ templateName, videoUrl, title, language = "en" 
       title,
       language,
       videoUrl,
-      templateName, // string template name
+      templateName: templateName || undefined,
     }),
   });
 
   const j = await r.json().catch(() => ({}));
-  if (!r.ok) {
-    const msg = j?.message || j?.error || `SUBMAGIC_CREATE_FAILED (${r.status})`;
-    const err = new Error(msg);
-    err.status = r.status;
-    err.details = j;
-    throw err;
-  }
-  return j; // expect { id, status, ... }
+  if (!r.ok) throw new Error(j?.message || j?.error || `SUBMAGIC_CREATE_FAILED (${r.status})`);
+  return j;
 }
 
 module.exports = async function handler(req, res) {
-  setCors(req, res);
-
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "POST") return res.status(405).json({ ok: false, error: "METHOD_NOT_ALLOWED" });
 
@@ -82,63 +54,63 @@ module.exports = async function handler(req, res) {
     if (!id) return res.status(400).json({ ok: false, error: "MISSING_ID" });
 
     const templateName = pickTemplate(body);
-    if (!templateName) return res.status(400).json({ ok: false, error: "MISSING_TEMPLATE" });
 
-    const { data: row, error: selErr } = await sb
+    // ✅ Fetch by id only
+    const { data: row, error } = await sb
       .from("renders")
-      .select([
-        "id",
-        "member_id",
-        "video_url",
-        "choices",
-        "caption_status",
-        "caption_error",
-        "submagic_project_id",
-        "captioned_video_url",
-        "caption_template_id",
-      ].join(","))
+      .select("id, member_id, video_url, choices, caption_status, caption_error, submagic_proj, captioned_vide, caption_templ")
       .eq("id", id)
-      .eq("member_id", member_id)
       .single();
 
-    if (selErr || !row) return res.status(404).json({ ok: false, error: "NOT_FOUND" });
+    if (error || !row) return res.status(404).json({ ok: false, error: "NOT_FOUND" });
+
+    // ✅ Enforce access
+    if (row.member_id && row.member_id !== member_id) {
+      return res.status(403).json({ ok: false, error: "FORBIDDEN" });
+    }
+
+    // ✅ Backfill member_id once if missing
+    if (!row.member_id) {
+      await sb.from("renders").update({ member_id }).eq("id", row.id);
+      row.member_id = member_id;
+    }
+
     if (!row.video_url) return res.status(400).json({ ok: false, error: "VIDEO_NOT_READY" });
 
-    // already done
-    if (row.captioned_video_url) {
+    // Already completed
+    if (row.captioned_vide) {
       return res.status(200).json({
         ok: true,
         already: true,
         status: "completed",
-        captioned_video_url: row.captioned_video_url,
+        captioned: row.captioned_vide,
       });
     }
 
-    // already started
-    if (row.submagic_project_id) {
+    // Already started
+    if (row.submagic_proj) {
       return res.status(200).json({
         ok: true,
         already: true,
-        projectId: row.submagic_project_id,
+        projectId: row.submagic_proj,
         status: row.caption_status || "captioning",
       });
     }
 
-    // mark started immediately
+    // mark started
     await sb
       .from("renders")
       .update({
         caption_status: "captioning",
         caption_error: null,
-        caption_template_id: templateName, // storing template name
+        caption_templ: templateName || null,
       })
-      .eq("id", row.id)
-      .eq("member_id", member_id);
+      .eq("id", row.id);
 
     const title = row?.choices?.storyType || row?.choices?.customPrompt || "NofaceLabs Video";
 
     const created = await smCreateProject({
-      templateName,
+      templateName: templateName || undefined,
       videoUrl: row.video_url,
       title,
       language: "en",
@@ -150,21 +122,14 @@ module.exports = async function handler(req, res) {
     await sb
       .from("renders")
       .update({
-        submagic_project_id: String(projectId),
+        submagic_proj: String(projectId),
         caption_status: String(created?.status || "captioning"),
         caption_error: null,
       })
-      .eq("id", row.id)
-      .eq("member_id", member_id);
+      .eq("id", row.id);
 
     return res.status(200).json({ ok: true, already: false, projectId: String(projectId) });
   } catch (e) {
-    return res.status(500).json({
-      ok: false,
-      error: "SERVER_ERROR",
-      message: String(e?.message || e),
-      details: e?.details || null,
-      status: e?.status || null,
-    });
+    return res.status(500).json({ ok: false, error: "SERVER_ERROR", message: String(e?.message || e) });
   }
 };
