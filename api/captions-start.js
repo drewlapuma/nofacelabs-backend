@@ -13,14 +13,11 @@ const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || 
 
 function setCors(req, res) {
   const origin = req.headers.origin;
-
-  if (ALLOW_ORIGINS.includes("*")) {
-    res.setHeader("Access-Control-Allow-Origin", "*");
-  } else if (origin && ALLOW_ORIGINS.includes(origin)) {
+  if (ALLOW_ORIGINS.includes("*")) res.setHeader("Access-Control-Allow-Origin", "*");
+  else if (origin && ALLOW_ORIGINS.includes(origin)) {
     res.setHeader("Access-Control-Allow-Origin", origin);
     res.setHeader("Vary", "Origin");
   }
-
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   res.setHeader("Access-Control-Max-Age", "86400");
@@ -40,6 +37,7 @@ function pickTemplate(body) {
 }
 
 async function smCreateProject({ templateName, videoUrl, title, language = "en" }) {
+  // NOTE: If Submagic expects a DIFFERENT auth header than Bearer, change it here.
   const r = await fetch(`${SUBMAGIC_BASE}/projects`, {
     method: "POST",
     headers: {
@@ -50,18 +48,24 @@ async function smCreateProject({ templateName, videoUrl, title, language = "en" 
       title,
       language,
       videoUrl,
-      // Submagic expects a template name string in your setup
-      ...(templateName ? { templateName } : {}),
+      templateName, // style name
     }),
   });
 
   const j = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(j?.message || j?.error || `SUBMAGIC_CREATE_FAILED (${r.status})`);
-  return j; // expect { id, status, ... }
+  if (!r.ok) {
+    const msg = j?.message || j?.error || `SUBMAGIC_CREATE_FAILED (${r.status})`;
+    const err = new Error(msg);
+    err.details = j;
+    err.status = r.status;
+    throw err;
+  }
+  return j;
 }
 
 module.exports = async function handler(req, res) {
   setCors(req, res);
+
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "POST") return res.status(405).json({ ok: false, error: "METHOD_NOT_ALLOWED" });
 
@@ -77,7 +81,7 @@ module.exports = async function handler(req, res) {
 
     const templateName = pickTemplate(body);
 
-    // ✅ USE REAL COLUMN NAMES
+    // ✅ Pull row by id only (then enforce ownership clearly)
     const { data: row, error } = await sb
       .from("renders")
       .select([
@@ -92,23 +96,34 @@ module.exports = async function handler(req, res) {
         "submagic_project_id",
       ].join(", "))
       .eq("id", id)
-      .eq("member_id", member_id)
       .single();
 
     if (error || !row) return res.status(404).json({ ok: false, error: "NOT_FOUND" });
+
+    // ✅ Clear mismatch instead of fake NOT_FOUND
+    if (String(row.member_id) !== String(member_id)) {
+      return res.status(403).json({
+        ok: false,
+        error: "FORBIDDEN_MEMBER_MISMATCH",
+        requested_id: id,
+        token_member_id: String(member_id),
+        row_member_id: String(row.member_id),
+      });
+    }
+
     if (!row.video_url) return res.status(400).json({ ok: false, error: "VIDEO_NOT_READY" });
 
-    // ✅ If already completed
+    // ✅ Already captioned
     if (row.captioned_video_url) {
       return res.status(200).json({
         ok: true,
         already: true,
         status: "completed",
-        captioned_video_url: row.captioned_video_url,
+        captioned: row.captioned_video_url,
       });
     }
 
-    // ✅ If already started, don't create a new one
+    // ✅ Already started
     if (row.submagic_project_id) {
       return res.status(200).json({
         ok: true,
@@ -118,20 +133,20 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    // ✅ Mark started immediately (prevents double clicks)
-    const startUpdate = {
-      caption_status: "captioning",
-      caption_error: null,
-      // store the chosen template in your REAL column
-      caption_template_id: templateName || null,
-    };
+    // ✅ Mark started immediately
+    await sb
+      .from("renders")
+      .update({
+        caption_status: "captioning",
+        caption_error: null,
+        caption_template_id: templateName || null,
+      })
+      .eq("id", row.id);
 
-    const { error: startErr } = await sb.from("renders").update(startUpdate).eq("id", row.id);
-    if (startErr) {
-      return res.status(500).json({ ok: false, error: "SUPABASE_UPDATE_FAILED", details: String(startErr.message || startErr) });
-    }
-
-    const title = row?.choices?.storyType || row?.choices?.customPrompt || "NofaceLabs Video";
+    const title =
+      row?.choices?.storyType ||
+      row?.choices?.customPrompt ||
+      "NofaceLabs Video";
 
     const created = await smCreateProject({
       templateName: templateName || undefined,
@@ -143,20 +158,30 @@ module.exports = async function handler(req, res) {
     const projectId = created?.id || created?.projectId || created?.project_id;
     if (!projectId) throw new Error("SUBMAGIC_NO_PROJECT_ID");
 
-    // ✅ Save project id under the REAL column name
-    const finishUpdate = {
-      submagic_project_id: String(projectId),
-      caption_status: String(created?.status || "captioning"),
-      caption_error: null,
-    };
+    await sb
+      .from("renders")
+      .update({
+        submagic_project_id: String(projectId),
+        caption_status: String(created?.status || "captioning"),
+        caption_error: null,
+      })
+      .eq("id", row.id);
 
-    const { error: finishErr } = await sb.from("renders").update(finishUpdate).eq("id", row.id);
-    if (finishErr) {
-      return res.status(500).json({ ok: false, error: "SUPABASE_UPDATE_FAILED", details: String(finishErr.message || finishErr) });
-    }
+    return res.status(200).json({
+      ok: true,
+      already: false,
+      projectId: String(projectId),
+      status: String(created?.status || "captioning"),
+    });
 
-    return res.status(200).json({ ok: true, already: false, projectId: String(projectId) });
   } catch (e) {
-    return res.status(500).json({ ok: false, error: "SERVER_ERROR", message: String(e?.message || e) });
+    // Bubble useful Submagic info if present
+    const details = e?.details || null;
+    return res.status(500).json({
+      ok: false,
+      error: "SERVER_ERROR",
+      message: String(e?.message || e),
+      details,
+    });
   }
 };
