@@ -3,9 +3,6 @@
 const { requireMemberId } = require("./_lib/auth");
 const { getAdminSupabase } = require("./_lib/supabase");
 
-const SUBMAGIC_API_KEY = (process.env.SUBMAGIC_API_KEY || "").trim();
-const SUBMAGIC_BASE = "https://api.submagic.co/v1";
-
 const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || "*")
   .split(",")
   .map((s) => s.trim())
@@ -25,6 +22,9 @@ function setCors(req, res) {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   res.setHeader("Access-Control-Max-Age", "86400");
 }
+
+const SUBMAGIC_API_KEY = (process.env.SUBMAGIC_API_KEY || "").trim();
+const SUBMAGIC_BASE = "https://api.submagic.co/v1";
 
 function pickTemplate(body) {
   return String(
@@ -50,17 +50,24 @@ async function smCreateProject({ templateName, videoUrl, title, language = "en" 
       title,
       language,
       videoUrl,
-      templateName, // Submagic template name string
+      templateName, // string template name
     }),
   });
 
   const j = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(j?.message || j?.error || `SUBMAGIC_CREATE_FAILED (${r.status})`);
-  return j;
+  if (!r.ok) {
+    const msg = j?.message || j?.error || `SUBMAGIC_CREATE_FAILED (${r.status})`;
+    const err = new Error(msg);
+    err.status = r.status;
+    err.details = j;
+    throw err;
+  }
+  return j; // expect { id, status, ... }
 }
 
 module.exports = async function handler(req, res) {
   setCors(req, res);
+
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "POST") return res.status(405).json({ ok: false, error: "METHOD_NOT_ALLOWED" });
 
@@ -74,9 +81,10 @@ module.exports = async function handler(req, res) {
     const id = String(body?.id || "").trim();
     if (!id) return res.status(400).json({ ok: false, error: "MISSING_ID" });
 
-    const templateName = pickTemplate(body); // template name string like "Daniel"
+    const templateName = pickTemplate(body);
+    if (!templateName) return res.status(400).json({ ok: false, error: "MISSING_TEMPLATE" });
 
-    const { data: row, error } = await sb
+    const { data: row, error: selErr } = await sb
       .from("renders")
       .select([
         "id",
@@ -88,15 +96,15 @@ module.exports = async function handler(req, res) {
         "submagic_project_id",
         "captioned_video_url",
         "caption_template_id",
-      ].join(", "))
+      ].join(","))
       .eq("id", id)
       .eq("member_id", member_id)
       .single();
 
-    if (error || !row) return res.status(404).json({ ok: false, error: "NOT_FOUND" });
+    if (selErr || !row) return res.status(404).json({ ok: false, error: "NOT_FOUND" });
     if (!row.video_url) return res.status(400).json({ ok: false, error: "VIDEO_NOT_READY" });
 
-    // Already completed
+    // already done
     if (row.captioned_video_url) {
       return res.status(200).json({
         ok: true,
@@ -106,7 +114,7 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    // Already started
+    // already started
     if (row.submagic_project_id) {
       return res.status(200).json({
         ok: true,
@@ -116,17 +124,21 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    // Mark started immediately
-    await sb.from("renders").update({
-      caption_status: "captioning",
-      caption_error: null,
-      caption_template_id: templateName || null,
-    }).eq("id", row.id);
+    // mark started immediately
+    await sb
+      .from("renders")
+      .update({
+        caption_status: "captioning",
+        caption_error: null,
+        caption_template_id: templateName, // storing template name
+      })
+      .eq("id", row.id)
+      .eq("member_id", member_id);
 
     const title = row?.choices?.storyType || row?.choices?.customPrompt || "NofaceLabs Video";
 
     const created = await smCreateProject({
-      templateName: templateName || undefined,
+      templateName,
       videoUrl: row.video_url,
       title,
       language: "en",
@@ -135,14 +147,24 @@ module.exports = async function handler(req, res) {
     const projectId = created?.id || created?.projectId || created?.project_id;
     if (!projectId) throw new Error("SUBMAGIC_NO_PROJECT_ID");
 
-    await sb.from("renders").update({
-      submagic_project_id: String(projectId),
-      caption_status: String(created?.status || "captioning"),
-      caption_error: null,
-    }).eq("id", row.id);
+    await sb
+      .from("renders")
+      .update({
+        submagic_project_id: String(projectId),
+        caption_status: String(created?.status || "captioning"),
+        caption_error: null,
+      })
+      .eq("id", row.id)
+      .eq("member_id", member_id);
 
     return res.status(200).json({ ok: true, already: false, projectId: String(projectId) });
   } catch (e) {
-    return res.status(500).json({ ok: false, error: "SERVER_ERROR", message: String(e?.message || e) });
+    return res.status(500).json({
+      ok: false,
+      error: "SERVER_ERROR",
+      message: String(e?.message || e),
+      details: e?.details || null,
+      status: e?.status || null,
+    });
   }
 };
