@@ -1,8 +1,4 @@
-// api/renders.js (CommonJS) — COMBINED
-// GET  /api/renders             => list
-// GET  /api/renders?id=<uuid>   => single
-// POST /api/renders             => actions (captions-start)
-
+// api/renders.js
 const { requireMemberId } = require("./_lib/auth");
 const { getAdminSupabase } = require("./_lib/supabase");
 
@@ -42,52 +38,22 @@ function pickTemplate(body) {
   ).trim();
 }
 
-// Detect which column names exist on THIS database row (tolerant to schema drift)
-function resolveCols(row) {
-  const has = (k) => row && Object.prototype.hasOwnProperty.call(row, k);
-
-  return {
-    submagicProject: has("submagic_project_id") ? "submagic_project_id" : (has("submagic_proj") ? "submagic_proj" : "submagic_project_id"),
-    captionedUrl: has("captioned_video_url") ? "captioned_video_url" : (has("captioned_vide") ? "captioned_vide" : "captioned_video_url"),
-    captionTemplate: has("caption_template_id") ? "caption_template_id" : (has("caption_templ") ? "caption_templ" : "caption_template_id"),
-    captionStatus: has("caption_status") ? "caption_status" : "caption_status",
-    captionError: has("caption_error") ? "caption_error" : "caption_error",
-  };
-}
-
-// Normalize row -> stable API response keys (what your Webflow expects)
-function normalizeRow(row) {
-  const cols = resolveCols(row);
-
-  return {
-    id: row.id,
-    created_at: row.created_at,
-    status: row.status,
-    video_url: row.video_url,
-    render_id: row.render_id,
-    choices: row.choices,
-    error: row.error,
-
-    caption_status: row[cols.captionStatus] ?? null,
-    caption_error: row[cols.captionError] ?? null,
-    submagic_project_id: row[cols.submagicProject] ?? null,      // always return this key to the UI
-    captioned_video_url: row[cols.captionedUrl] ?? null,         // always return this key to the UI
-    caption_template_id: row[cols.captionTemplate] ?? null,      // always return this key to the UI
-  };
-}
-
 async function smCreateProject({ templateName, videoUrl, title, language = "en" }) {
+  if (!SUBMAGIC_API_KEY) throw new Error("MISSING_SUBMAGIC_API_KEY");
+
+  // NOTE: Submagic auth varies by account; your webhook uses x-api-key.
+  // If your create endpoint requires x-api-key too, swap to that.
   const r = await fetch(`${SUBMAGIC_BASE}/projects`, {
     method: "POST",
     headers: {
-      "x-api-key": SUBMAGIC_API_KEY,          // ✅ match webhook auth
+      "x-api-key": SUBMAGIC_API_KEY,            // ✅ matches your webhook style
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
       title,
       language,
       videoUrl,
-      templateName,
+      templateName: templateName || undefined,
     }),
   });
 
@@ -96,133 +62,116 @@ async function smCreateProject({ templateName, videoUrl, title, language = "en" 
   return j;
 }
 
-}
-
 module.exports = async function handler(req, res) {
-  setCors(req, res);
-  if (req.method === "OPTIONS") return res.status(204).end();
+  // ✅ CORS MUST BE FIRST
+  try {
+    setCors(req, res);
 
-  // ---------------- GET (list / single) ----------------
-  if (req.method === "GET") {
-    try {
-      const member_id = await requireMemberId(req);
-      const sb = getAdminSupabase();
+    // ✅ Preflight must succeed
+    if (req.method === "OPTIONS") return res.status(204).end();
 
-      const id = String(req.query?.id || "").trim();
+    const sb = getAdminSupabase();
 
-      if (id) {
+    // ---------------- GET ----------------
+    if (req.method === "GET") {
+      try {
+        const member_id = await requireMemberId(req);
+        const id = String(req.query?.id || "").trim();
+
+        if (id) {
+          const { data, error } = await sb
+            .from("renders")
+            .select("*")
+            .eq("id", id)
+            .eq("member_id", member_id)
+            .single();
+
+          if (error || !data) return res.status(404).json({ ok: false, error: "NOT_FOUND" });
+          return res.status(200).json({ ok: true, item: data });
+        }
+
         const { data, error } = await sb
           .from("renders")
-          .select("*")                 // ✅ prevents “column does not exist” failures
+          .select("*")
+          .eq("member_id", member_id)
+          .order("created_at", { ascending: false })
+          .limit(100);
+
+        if (error) return res.status(500).json({ ok: false, error: "SUPABASE_LIST_FAILED" });
+        return res.status(200).json({ ok: true, items: data || [] });
+      } catch (e) {
+        return res.status(401).json({ ok: false, error: "UNAUTHORIZED", message: String(e?.message || e) });
+      }
+    }
+
+    // ---------------- POST (captions-start) ----------------
+    if (req.method === "POST") {
+      try {
+        const member_id = await requireMemberId(req);
+
+        const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {});
+        const action = String(body?.action || "").trim();
+        if (action !== "captions-start") return res.status(400).json({ ok: false, error: "BAD_ACTION" });
+
+        const id = String(body?.id || "").trim();
+        if (!id) return res.status(400).json({ ok: false, error: "MISSING_ID" });
+
+        const templateName = pickTemplate(body);
+
+        const { data: row, error } = await sb
+          .from("renders")
+          .select("*")
           .eq("id", id)
           .eq("member_id", member_id)
           .single();
 
-        if (error || !data) return res.status(404).json({ ok: false, error: "NOT_FOUND" });
-        return res.status(200).json({ ok: true, item: normalizeRow(data) });
-      }
+        if (error || !row) return res.status(404).json({ ok: false, error: "NOT_FOUND" });
+        if (!row.video_url) return res.status(400).json({ ok: false, error: "VIDEO_NOT_READY" });
 
-      const { data, error } = await sb
-        .from("renders")
-        .select("*")                   // ✅ prevents “column does not exist” failures
-        .eq("member_id", member_id)
-        .order("created_at", { ascending: false })
-        .limit(100);
+        // already created
+        if (row.submagic_project_id) {
+          return res.status(200).json({
+            ok: true,
+            already: true,
+            projectId: row.submagic_project_id,
+            status: row.caption_status || "captioning",
+          });
+        }
 
-      if (error) return res.status(500).json({ ok: false, error: "SUPABASE_LIST_FAILED" });
+        // mark started
+        await sb.from("renders").update({
+          caption_status: "captioning",
+          caption_error: null,
+          caption_template_id: templateName || null,
+        }).eq("id", row.id);
 
-      return res.status(200).json({ ok: true, items: (data || []).map(normalizeRow) });
-    } catch (err) {
-      return res.status(401).json({ ok: false, error: "UNAUTHORIZED", message: String(err?.message || err) });
-    }
-  }
+        const title = row?.choices?.storyType || row?.choices?.customPrompt || "NofaceLabs Video";
 
-  // ---------------- POST (actions) ----------------
-  if (req.method === "POST") {
-    try {
-      const member_id = await requireMemberId(req);
-      const sb = getAdminSupabase();
-
-      const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {});
-      const action = String(body?.action || "").trim();
-
-      if (action !== "captions-start") {
-        return res.status(400).json({ ok: false, error: "BAD_ACTION" });
-      }
-
-      if (!SUBMAGIC_API_KEY) return res.status(500).json({ ok: false, error: "MISSING_SUBMAGIC_API_KEY" });
-
-      const id = String(body?.id || "").trim();
-      if (!id) return res.status(400).json({ ok: false, error: "MISSING_ID" });
-
-      const templateName = pickTemplate(body);
-
-      const { data: row, error } = await sb
-        .from("renders")
-        .select("*") // ✅ tolerant
-        .eq("id", id)
-        .eq("member_id", member_id)
-        .single();
-
-      if (error || !row) return res.status(404).json({ ok: false, error: "NOT_FOUND" });
-      if (!row.video_url) return res.status(400).json({ ok: false, error: "VIDEO_NOT_READY" });
-
-      const cols = resolveCols(row);
-
-      // Already captioned
-      if (row[cols.captionedUrl]) {
-        return res.status(200).json({
-          ok: true,
-          already: true,
-          status: "completed",
-          captioned_video_url: row[cols.captionedUrl],
+        const created = await smCreateProject({
+          templateName,
+          videoUrl: row.video_url,
+          title,
+          language: "en",
         });
+
+        const projectId = created?.id || created?.projectId || created?.project_id;
+        if (!projectId) throw new Error("SUBMAGIC_NO_PROJECT_ID");
+
+        await sb.from("renders").update({
+          submagic_project_id: String(projectId),
+          caption_status: String(created?.status || "captioning"),
+          caption_error: null,
+        }).eq("id", row.id);
+
+        return res.status(200).json({ ok: true, already: false, projectId: String(projectId) });
+      } catch (e) {
+        return res.status(500).json({ ok: false, error: "SERVER_ERROR", message: String(e?.message || e) });
       }
-
-      // Already started
-      if (row[cols.submagicProject]) {
-        return res.status(200).json({
-          ok: true,
-          already: true,
-          projectId: row[cols.submagicProject],
-          status: row[cols.captionStatus] || "captioning",
-        });
-      }
-
-      // Mark started (schema-tolerant update)
-      const startUpdate = {
-        [cols.captionStatus]: "captioning",
-        [cols.captionError]: null,
-        [cols.captionTemplate]: templateName || null,
-      };
-
-      await sb.from("renders").update(startUpdate).eq("id", row.id);
-
-      const title = row?.choices?.storyType || row?.choices?.customPrompt || "NofaceLabs Video";
-
-      const created = await smCreateProject({
-        templateName: templateName || undefined,
-        videoUrl: row.video_url,
-        title,
-        language: "en",
-      });
-
-      const projectId = created?.id || created?.projectId || created?.project_id;
-      if (!projectId) throw new Error("SUBMAGIC_NO_PROJECT_ID");
-
-      const finishUpdate = {
-        [cols.submagicProject]: String(projectId),
-        [cols.captionStatus]: String(created?.status || "captioning"),
-        [cols.captionError]: null,
-      };
-
-      await sb.from("renders").update(finishUpdate).eq("id", row.id);
-
-      return res.status(200).json({ ok: true, already: false, projectId: String(projectId) });
-    } catch (e) {
-      return res.status(500).json({ ok: false, error: "SERVER_ERROR", message: String(e?.message || e) });
     }
-  }
 
-  return res.status(405).json({ ok: false, error: "METHOD_NOT_ALLOWED" });
+    return res.status(405).json({ ok: false, error: "METHOD_NOT_ALLOWED" });
+  } catch (fatal) {
+    // ✅ even fatal errors should still have CORS headers (setCors ran)
+    return res.status(500).json({ ok: false, error: "FATAL", message: String(fatal?.message || fatal) });
+  }
 };
