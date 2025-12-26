@@ -1,4 +1,5 @@
 // api/submagic-webhook.js (CommonJS)
+
 const { getAdminSupabase } = require("./_lib/supabase");
 
 const SUBMAGIC_API_KEY = (process.env.SUBMAGIC_API_KEY || "").trim();
@@ -13,63 +14,85 @@ async function smGetProject(projectId) {
   return j;
 }
 
-module.exports = async function handler(req, res) {
-  // Submagic will POST. Allow OPTIONS.
-  if (req.method === "OPTIONS") return res.status(200).end();
-  if (req.method !== "POST") return res.status(405).json({ ok: false, error: "METHOD_NOT_ALLOWED" });
-
-  try {
-    if (!SUBMAGIC_API_KEY) return res.status(500).json({ ok: false, error: "MISSING_SUBMAGIC_API_KEY" });
-
-    // Body may arrive as string
-    const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {});
-
-    // Try to find project id in common places
-    const projectId =
-      body?.projectId ||
+function pickProjectId(body) {
+  // Different webhook payloads put the id in different places.
+  return String(
+    body?.projectId ||
       body?.project_id ||
       body?.id ||
       body?.data?.projectId ||
       body?.data?.project_id ||
       body?.data?.id ||
-      "";
+      ""
+  ).trim();
+}
+
+module.exports = async function handler(req, res) {
+  if (req.method === "OPTIONS") return res.status(200).end();
+  if (req.method !== "POST") return res.status(405).json({ ok: false, error: "METHOD_NOT_ALLOWED" });
+
+  const sb = getAdminSupabase();
+
+  try {
+    if (!SUBMAGIC_API_KEY) return res.status(500).json({ ok: false, error: "MISSING_SUBMAGIC_API_KEY" });
+
+    const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {});
+    const projectId = pickProjectId(body);
 
     if (!projectId) return res.status(400).json({ ok: false, error: "MISSING_PROJECT_ID" });
 
-    const sb = getAdminSupabase();
-
-    // Find render row by submagic_project_id
-    const { data: row, error: findErr } = await sb
+    // Find render by submagic project id
+    const { data: row } = await sb
       .from("renders")
-      .select("*")
-      .eq("submagic_project_id", String(projectId))
+      .select("id, submagic_project_id")
+      .eq("submagic_project_id", projectId)
       .single();
 
-    if (findErr || !row) {
+    if (!row?.id) {
       // Return 200 so Submagic doesn't retry forever
       return res.status(200).json({ ok: true, ignored: true, reason: "NO_MATCHING_RENDER" });
     }
 
     const proj = await smGetProject(projectId);
 
-    // Prefer downloadUrl/directUrl once export is done
-    const downloadUrl = proj?.downloadUrl || proj?.directUrl || "";
+    const downloadUrl = String(proj?.downloadUrl || proj?.directUrl || "").trim();
+    const status = String(proj?.status || "captioning").trim();
 
     if (downloadUrl) {
       await sb.from("renders").update({
         caption_status: "completed",
-        captioned_video_url: String(downloadUrl),
+        captioned_video_url: downloadUrl,
         caption_error: null,
       }).eq("id", row.id);
     } else {
       await sb.from("renders").update({
-        caption_status: String(proj?.status || "captioning"),
+        caption_status: status || "captioning",
       }).eq("id", row.id);
     }
 
     return res.status(200).json({ ok: true });
   } catch (e) {
-    // Don't spam retries
-    return res.status(200).json({ ok: true, error: String(e?.message || e) });
+    // Do NOT cause retries. Log error into the row if we can.
+    try {
+      const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {});
+      const projectId = pickProjectId(body);
+
+      if (projectId) {
+        const { data: row } = await sb
+          .from("renders")
+          .select("id")
+          .eq("submagic_project_id", projectId)
+          .single();
+
+        if (row?.id) {
+          await sb.from("renders").update({
+            caption_status: "failed",
+            caption_error: String(e?.message || e),
+          }).eq("id", row.id);
+        }
+      }
+    } catch (_) {}
+
+    return res.status(200).json({ ok: true });
   }
 };
