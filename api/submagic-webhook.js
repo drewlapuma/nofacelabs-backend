@@ -1,110 +1,75 @@
-// api/submagic-webhook.js (CommonJS, Node 18)
-
+// api/submagic-webhook.js (CommonJS)
 const { getAdminSupabase } = require("./_lib/supabase");
 
 const SUBMAGIC_API_KEY = (process.env.SUBMAGIC_API_KEY || "").trim();
 const SUBMAGIC_BASE = "https://api.submagic.co/v1";
 
-const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || "*")
-  .split(",")
-  .map((s) => s.trim())
-  .filter(Boolean);
-
-function setCors(req, res) {
-  const origin = req.headers.origin;
-
-  if (ALLOW_ORIGINS.includes("*")) {
-    res.setHeader("Access-Control-Allow-Origin", "*");
-  } else if (origin && ALLOW_ORIGINS.includes(origin)) {
-    res.setHeader("Access-Control-Allow-Origin", origin);
-    res.setHeader("Vary", "Origin");
-  }
-
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-  res.setHeader("Access-Control-Max-Age", "86400");
-}
-
 async function smGetProject(projectId) {
   const r = await fetch(`${SUBMAGIC_BASE}/projects/${encodeURIComponent(projectId)}`, {
-    method: "GET",
-    headers: {
-      Authorization: `Bearer ${SUBMAGIC_API_KEY}`,
-      "Content-Type": "application/json",
-    },
+    headers: { Authorization: `Bearer ${SUBMAGIC_API_KEY}` },
   });
-
   const j = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(j?.message || j?.error || `SUBMAGIC_GET_FAILED (${r.status})`);
+  if (!r.ok) throw new Error(j?.message || j?.error || `SUBMAGIC_${r.status}`);
   return j;
 }
 
 module.exports = async function handler(req, res) {
-  setCors(req, res);
-
+  // Submagic will POST. Allow OPTIONS.
   if (req.method === "OPTIONS") return res.status(200).end();
   if (req.method !== "POST") return res.status(405).json({ ok: false, error: "METHOD_NOT_ALLOWED" });
 
-  const dbId = String(req.query?.id || "").trim();
-  if (!dbId) return res.status(400).json({ ok: false, error: "MISSING_DB_ID" });
-
-  const sb = getAdminSupabase();
-
   try {
-    if (!SUBMAGIC_API_KEY) {
-      return res.status(500).json({ ok: false, error: "MISSING_SUBMAGIC_API_KEY" });
-    }
+    if (!SUBMAGIC_API_KEY) return res.status(500).json({ ok: false, error: "MISSING_SUBMAGIC_API_KEY" });
 
-    // Pull the render row
-    const { data: row, error } = await sb
+    // Body may arrive as string
+    const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {});
+
+    // Try to find project id in common places
+    const projectId =
+      body?.projectId ||
+      body?.project_id ||
+      body?.id ||
+      body?.data?.projectId ||
+      body?.data?.project_id ||
+      body?.data?.id ||
+      "";
+
+    if (!projectId) return res.status(400).json({ ok: false, error: "MISSING_PROJECT_ID" });
+
+    const sb = getAdminSupabase();
+
+    // Find render row by submagic_project_id
+    const { data: row, error: findErr } = await sb
       .from("renders")
-      .select("id, submagic_project_id, caption_status, caption_error, captioned_video_url")
-      .eq("id", dbId)
+      .select("*")
+      .eq("submagic_project_id", String(projectId))
       .single();
 
-    if (error || !row) return res.status(404).json({ ok: false, error: "NOT_FOUND" });
-    if (!row.submagic_project_id) return res.status(400).json({ ok: false, error: "NO_SUBMAGIC_PROJECT" });
-
-    const proj = await smGetProject(row.submagic_project_id);
-
-    // Submagic commonly returns one of these when export finishes
-    const downloadUrl = proj?.downloadUrl || proj?.directUrl || proj?.url || "";
-
-    if (downloadUrl) {
-      await sb
-        .from("renders")
-        .update({
-          caption_status: "completed",
-          captioned_video_url: String(downloadUrl),
-          caption_error: null,
-        })
-        .eq("id", dbId);
-
-      return res.status(200).json({ ok: true, status: "completed" });
+    if (findErr || !row) {
+      // Return 200 so Submagic doesn't retry forever
+      return res.status(200).json({ ok: true, ignored: true, reason: "NO_MATCHING_RENDER" });
     }
 
-    // Not ready yet → update status only
-    await sb
-      .from("renders")
-      .update({
-        caption_status: String(proj?.status || "captioning"),
-        caption_error: null,
-      })
-      .eq("id", dbId);
+    const proj = await smGetProject(projectId);
 
-    return res.status(200).json({ ok: true, status: String(proj?.status || "captioning") });
-  } catch (e) {
-    // Try to write failure state, but still return 200 to avoid webhook retry spam
-    try {
-      await sb
-        .from("renders")
-        .update({
-          caption_status: "failed",
-          caption_error: String(e?.message || e),
-        })
-        .eq("id", dbId);
-    } catch {}
+    // Prefer downloadUrl/directUrl once export is done
+    const downloadUrl = proj?.downloadUrl || proj?.directUrl || "";
+
+    if (downloadUrl) {
+      await sb.from("renders").update({
+        caption_status: "completed",
+        captioned_video_url: String(downloadUrl),
+        caption_error: null,
+      }).eq("id", row.id);
+    } else {
+      await sb.from("renders").update({
+        caption_status: String(proj?.status || "captioning"),
+      }).eq("id", row.id);
+    }
 
     return res.status(200).json({ ok: true });
+  } catch (e) {
+    // Don't spam retries
+    return res.status(200).json({ ok: true, error: String(e?.message || e) });
   }
 };
