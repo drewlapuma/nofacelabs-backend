@@ -1,4 +1,8 @@
-// api/renders.js
+// api/renders.js (CommonJS) — with Submagic “lazy poll” so captions stop spinning
+// GET  /api/renders             => list
+// GET  /api/renders?id=<uuid>   => single (auto-polls Submagic when captioning)
+// POST /api/renders             => { action:"captions-start", id, templateName/templateId... }
+
 const { requireMemberId } = require("./_lib/auth");
 const { getAdminSupabase } = require("./_lib/supabase");
 
@@ -41,12 +45,10 @@ function pickTemplate(body) {
 async function smCreateProject({ templateName, videoUrl, title, language = "en" }) {
   if (!SUBMAGIC_API_KEY) throw new Error("MISSING_SUBMAGIC_API_KEY");
 
-  // NOTE: Submagic auth varies by account; your webhook uses x-api-key.
-  // If your create endpoint requires x-api-key too, swap to that.
   const r = await fetch(`${SUBMAGIC_BASE}/projects`, {
     method: "POST",
     headers: {
-      "x-api-key": SUBMAGIC_API_KEY,            // ✅ matches your webhook style
+      "x-api-key": SUBMAGIC_API_KEY, // ✅ matches your webhook style
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
@@ -59,6 +61,18 @@ async function smCreateProject({ templateName, videoUrl, title, language = "en" 
 
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(j?.message || j?.error || `SUBMAGIC_CREATE_FAILED (${r.status})`);
+  return j;
+}
+
+async function smGetProject(projectId) {
+  if (!SUBMAGIC_API_KEY) throw new Error("MISSING_SUBMAGIC_API_KEY");
+
+  const r = await fetch(`${SUBMAGIC_BASE}/projects/${encodeURIComponent(projectId)}`, {
+    headers: { "x-api-key": SUBMAGIC_API_KEY },
+  });
+
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j?.message || j?.error || `SUBMAGIC_GET_FAILED (${r.status})`);
   return j;
 }
 
@@ -78,8 +92,9 @@ module.exports = async function handler(req, res) {
         const member_id = await requireMemberId(req);
         const id = String(req.query?.id || "").trim();
 
+        // ---- single ----
         if (id) {
-          const { data, error } = await sb
+          let { data, error } = await sb
             .from("renders")
             .select("*")
             .eq("id", id)
@@ -87,9 +102,59 @@ module.exports = async function handler(req, res) {
             .single();
 
           if (error || !data) return res.status(404).json({ ok: false, error: "NOT_FOUND" });
+
+          // ✅ LAZY POLL: if captioning & we have a project id but no captioned url, ask Submagic and update DB
+          try {
+            const isCaptioning =
+              String(data.caption_status || "").toLowerCase() === "captioning" ||
+              String(data.caption_status || "").toLowerCase() === "processing" ||
+              String(data.caption_status || "").toLowerCase() === "queued";
+
+            if (data.submagic_project_id && !data.captioned_video_url && isCaptioning) {
+              const proj = await smGetProject(data.submagic_project_id);
+
+              const downloadUrl = proj?.downloadUrl || proj?.directUrl || "";
+              const projStatus = String(proj?.status || "captioning");
+
+              if (downloadUrl) {
+                const { data: updated } = await sb
+                  .from("renders")
+                  .update({
+                    caption_status: "completed",
+                    captioned_video_url: String(downloadUrl),
+                    caption_error: null,
+                  })
+                  .eq("id", data.id)
+                  .select("*")
+                  .single();
+
+                if (updated) data = updated;
+              } else {
+                // keep DB status in sync (optional)
+                await sb
+                  .from("renders")
+                  .update({ caption_status: projStatus })
+                  .eq("id", data.id);
+              }
+            }
+          } catch (pollErr) {
+            // Don’t blow up GET; mark as failed so UI stops spinning + shows error
+            await sb
+              .from("renders")
+              .update({
+                caption_status: "failed",
+                caption_error: String(pollErr?.message || pollErr),
+              })
+              .eq("id", data.id);
+
+            data.caption_status = "failed";
+            data.caption_error = String(pollErr?.message || pollErr);
+          }
+
           return res.status(200).json({ ok: true, item: data });
         }
 
+        // ---- list ----
         const { data, error } = await sb
           .from("renders")
           .select("*")
@@ -109,7 +174,7 @@ module.exports = async function handler(req, res) {
       try {
         const member_id = await requireMemberId(req);
 
-        const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {});
+        const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : req.body || {};
         const action = String(body?.action || "").trim();
         if (action !== "captions-start") return res.status(400).json({ ok: false, error: "BAD_ACTION" });
 
@@ -128,6 +193,16 @@ module.exports = async function handler(req, res) {
         if (error || !row) return res.status(404).json({ ok: false, error: "NOT_FOUND" });
         if (!row.video_url) return res.status(400).json({ ok: false, error: "VIDEO_NOT_READY" });
 
+        // already captioned
+        if (row.captioned_video_url) {
+          return res.status(200).json({
+            ok: true,
+            already: true,
+            status: "completed",
+            captioned_video_url: row.captioned_video_url,
+          });
+        }
+
         // already created
         if (row.submagic_project_id) {
           return res.status(200).json({
@@ -139,11 +214,14 @@ module.exports = async function handler(req, res) {
         }
 
         // mark started
-        await sb.from("renders").update({
-          caption_status: "captioning",
-          caption_error: null,
-          caption_template_id: templateName || null,
-        }).eq("id", row.id);
+        await sb
+          .from("renders")
+          .update({
+            caption_status: "captioning",
+            caption_error: null,
+            caption_template_id: templateName || null,
+          })
+          .eq("id", row.id);
 
         const title = row?.choices?.storyType || row?.choices?.customPrompt || "NofaceLabs Video";
 
@@ -157,11 +235,14 @@ module.exports = async function handler(req, res) {
         const projectId = created?.id || created?.projectId || created?.project_id;
         if (!projectId) throw new Error("SUBMAGIC_NO_PROJECT_ID");
 
-        await sb.from("renders").update({
-          submagic_project_id: String(projectId),
-          caption_status: String(created?.status || "captioning"),
-          caption_error: null,
-        }).eq("id", row.id);
+        await sb
+          .from("renders")
+          .update({
+            submagic_project_id: String(projectId),
+            caption_status: String(created?.status || "captioning"),
+            caption_error: null,
+          })
+          .eq("id", row.id);
 
         return res.status(200).json({ ok: true, already: false, projectId: String(projectId) });
       } catch (e) {
@@ -171,7 +252,6 @@ module.exports = async function handler(req, res) {
 
     return res.status(405).json({ ok: false, error: "METHOD_NOT_ALLOWED" });
   } catch (fatal) {
-    // ✅ even fatal errors should still have CORS headers (setCors ran)
     return res.status(500).json({ ok: false, error: "FATAL", message: String(fatal?.message || fatal) });
   }
 };
