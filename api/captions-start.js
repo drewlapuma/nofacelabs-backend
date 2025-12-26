@@ -10,12 +10,14 @@ const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || 
 
 function setCors(req, res) {
   const origin = req.headers.origin;
+
   if (ALLOW_ORIGINS.includes("*")) {
     res.setHeader("Access-Control-Allow-Origin", "*");
   } else if (origin && ALLOW_ORIGINS.includes(origin)) {
     res.setHeader("Access-Control-Allow-Origin", origin);
     res.setHeader("Vary", "Origin");
   }
+
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   res.setHeader("Access-Control-Max-Age", "86400");
@@ -38,6 +40,7 @@ function pickTemplate(body) {
 }
 
 async function smCreateProject({ templateName, videoUrl, title, language = "en" }) {
+  // Keep auth style consistent with your templates endpoint (Bearer)
   const r = await fetch(`${SUBMAGIC_BASE}/projects`, {
     method: "POST",
     headers: {
@@ -59,6 +62,7 @@ async function smCreateProject({ templateName, videoUrl, title, language = "en" 
 
 module.exports = async function handler(req, res) {
   setCors(req, res);
+
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "POST") return res.status(405).json({ ok: false, error: "METHOD_NOT_ALLOWED" });
 
@@ -74,43 +78,45 @@ module.exports = async function handler(req, res) {
 
     const templateName = pickTemplate(body);
 
-    // Fetch row by id only (then enforce ownership / backfill)
     const { data: row, error } = await sb
       .from("renders")
-      .select("id, member_id, video_url, choices, caption_status, caption_error, submagic_project_id, captioned_video_url")
+      .select("id, member_id, video_url, choices, caption_status, captioned_video_url, submagic_project_id")
       .eq("id", id)
+      .eq("member_id", member_id)
       .single();
 
     if (error || !row) return res.status(404).json({ ok: false, error: "NOT_FOUND" });
-
-    if (row.member_id && row.member_id !== member_id) {
-      return res.status(403).json({ ok: false, error: "FORBIDDEN" });
-    }
-
-    if (!row.member_id) {
-      await sb.from("renders").update({ member_id }).eq("id", row.id);
-    }
-
     if (!row.video_url) return res.status(400).json({ ok: false, error: "VIDEO_NOT_READY" });
 
+    // already done
     if (row.captioned_video_url) {
       return res.status(200).json({ ok: true, already: true, status: "completed", captioned: row.captioned_video_url });
     }
 
+    // already started
     if (row.submagic_project_id) {
-      return res.status(200).json({ ok: true, already: true, projectId: row.submagic_project_id, status: row.caption_status || "captioning" });
+      return res.status(200).json({
+        ok: true,
+        already: true,
+        projectId: row.submagic_project_id,
+        status: row.caption_status || "captioning",
+      });
     }
 
-    await sb.from("renders").update({
-      caption_status: "captioning",
-      caption_error: null,
-      caption_template_id: templateName || null,
-    }).eq("id", row.id);
+    // mark started first (prevents double-click dupes)
+    await sb
+      .from("renders")
+      .update({
+        caption_status: "captioning",
+        caption_error: null,
+        caption_template: templateName || null,
+      })
+      .eq("id", row.id);
 
     const title = row?.choices?.storyType || row?.choices?.customPrompt || "NofaceLabs Video";
 
     const created = await smCreateProject({
-      templateName: templateName || undefined,
+      templateName,
       videoUrl: row.video_url,
       title,
       language: "en",
@@ -119,11 +125,14 @@ module.exports = async function handler(req, res) {
     const projectId = created?.id || created?.projectId || created?.project_id;
     if (!projectId) throw new Error("SUBMAGIC_NO_PROJECT_ID");
 
-    await sb.from("renders").update({
-      submagic_proj: String(projectId),
-      caption_status: String(created?.status || "captioning"),
-      caption_error: null,
-    }).eq("id", row.id);
+    await sb
+      .from("renders")
+      .update({
+        submagic_project_id: String(projectId),
+        caption_status: String(created?.status || "captioning"),
+        caption_error: null,
+      })
+      .eq("id", row.id);
 
     return res.status(200).json({ ok: true, already: false, projectId: String(projectId) });
   } catch (e) {
