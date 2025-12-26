@@ -80,7 +80,7 @@ async function smCreateProject({ templateName, videoUrl, title, language = "en" 
   const r = await fetch(`${SUBMAGIC_BASE}/projects`, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${SUBMAGIC_API_KEY}`,
+      "x-api-key": SUBMAGIC_API_KEY,          // ✅ match webhook auth
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
@@ -94,6 +94,8 @@ async function smCreateProject({ templateName, videoUrl, title, language = "en" 
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(j?.message || j?.error || `SUBMAGIC_CREATE_FAILED (${r.status})`);
   return j;
+}
+
 }
 
 module.exports = async function handler(req, res) {
