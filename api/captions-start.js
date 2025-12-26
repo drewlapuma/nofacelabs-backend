@@ -77,7 +77,7 @@ module.exports = async function handler(req, res) {
     // Fetch row by id only (then enforce ownership / backfill)
     const { data: row, error } = await sb
       .from("renders")
-      .select("id, member_id, video_url, choices, caption_status, caption_error, submagic_proj, captioned_vide")
+      .select("id, member_id, video_url, choices, caption_status, caption_error, submagic_project_id, captioned_video_url")
       .eq("id", id)
       .single();
 
@@ -93,18 +93,18 @@ module.exports = async function handler(req, res) {
 
     if (!row.video_url) return res.status(400).json({ ok: false, error: "VIDEO_NOT_READY" });
 
-    if (row.captioned_vide) {
-      return res.status(200).json({ ok: true, already: true, status: "completed", captioned: row.captioned_vide });
+    if (row.captioned_video_url) {
+      return res.status(200).json({ ok: true, already: true, status: "completed", captioned: row.captioned_video_url });
     }
 
-    if (row.submagic_proj) {
-      return res.status(200).json({ ok: true, already: true, projectId: row.submagic_proj, status: row.caption_status || "captioning" });
+    if (row.submagic_project_id) {
+      return res.status(200).json({ ok: true, already: true, projectId: row.submagic_project_id, status: row.caption_status || "captioning" });
     }
 
     await sb.from("renders").update({
       caption_status: "captioning",
       caption_error: null,
-      caption_templ: templateName || null,
+      caption_template_id: templateName || null,
     }).eq("id", row.id);
 
     const title = row?.choices?.storyType || row?.choices?.customPrompt || "NofaceLabs Video";
