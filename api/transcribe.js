@@ -47,15 +47,21 @@ module.exports = async function handler(req, res) {
 
     if (!audioUrl) return res.status(400).json({ ok: false, error: "MISSING_AUDIO_URL" });
 
-    // 1) Download the audio file
-    const audioResp = await fetch(audioUrl);
-    if (!audioResp.ok) {
-      return res.status(400).json({
-        ok: false,
-        error: "AUDIO_FETCH_FAILED",
-        status: audioResp.status,
-      });
-    }
+   // 1) Download the audio file
+const audioResp = await fetch(audioUrl, { redirect: "follow" });
+if (!audioResp.ok) {
+  const txt = await audioResp.text().catch(() => "");
+  return res.status(400).json({
+    ok: false,
+    error: "AUDIO_FETCH_FAILED",
+    status: audioResp.status,
+    statusText: audioResp.statusText,
+    hint: "audioUrl must be a direct, public file URL (mp3/wav).",
+    audioUrl,
+    responseBodyPreview: txt.slice(0, 300),
+  });
+}
+
 
     const contentType = audioResp.headers.get("content-type") || "audio/mpeg";
     const buf = await audioResp.arrayBuffer();
