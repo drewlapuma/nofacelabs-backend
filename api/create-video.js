@@ -1,10 +1,13 @@
 // api/create-video.js (CommonJS, Node 18)
+// NOTE: Node 18 on Vercel has global fetch.
 
 const https = require("https");
 const { createClient } = require("@supabase/supabase-js");
 const memberstackAdmin = require("@memberstack/admin");
 
-// -------------------- CORS --------------------
+// -------------------- CORS (FIXED) --------------------
+// Use ALLOW_ORIGINS for comma-separated allowlist.
+// Example: https://nofacelabsai.webflow.io,https://nofacelabs.ai
 const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || "*")
   .split(",")
   .map((s) => s.trim())
@@ -12,19 +15,26 @@ const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || 
 
 function setCors(req, res) {
   const origin = req.headers.origin;
+
+  // If "*" allow all (no credentials). Best for simple Bearer auth.
   if (ALLOW_ORIGINS.includes("*")) {
     res.setHeader("Access-Control-Allow-Origin", "*");
   } else if (origin && ALLOW_ORIGINS.includes(origin)) {
     res.setHeader("Access-Control-Allow-Origin", origin);
     res.setHeader("Vary", "Origin");
   }
+
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   res.setHeader("Access-Control-Max-Age", "86400");
 }
 
-// -------------------- API BASE --------------------
+// -------------------- API BASE (IMPORTANT) --------------------
+// This must be the PUBLIC URL that Creatomate can reach for webhook calls.
+// Set in Vercel env: API_BASE=https://nofacelabs-backend.vercel.app
 const API_BASE = (process.env.API_BASE || "").trim();
+
+// -------------------- Your existing env + logic --------------------
 const IMAGE_PROVIDER = (process.env.IMAGE_PROVIDER || "krea").toLowerCase();
 
 // ---------- Supabase ----------
@@ -38,7 +48,7 @@ const supabase =
       })
     : null;
 
-// ---------- Memberstack ----------
+// ---------- Memberstack auth (Admin SDK verify) ----------
 const MEMBERSTACK_SECRET_KEY = process.env.MEMBERSTACK_SECRET_KEY;
 const ms = MEMBERSTACK_SECRET_KEY ? memberstackAdmin.init(MEMBERSTACK_SECRET_KEY) : null;
 
@@ -52,10 +62,39 @@ async function requireMemberId(req) {
   const token = getBearerToken(req);
   if (!token) throw new Error("MISSING_AUTH");
   if (!ms) throw new Error("MISSING_MEMBERSTACK_SECRET_KEY");
+
   const { id } = await ms.verifyToken({ token });
   if (!id) throw new Error("INVALID_MEMBER_TOKEN");
+
   return id;
 }
+
+// ---------- OpenAI prompt expander ----------
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4.1-mini";
+const PROMPT_EXPANDER = (process.env.PROMPT_EXPANDER || "openai").toLowerCase();
+const EXPAND_SHORT_BEATS_ONLY =
+  String(process.env.EXPAND_SHORT_BEATS_ONLY || "true").toLowerCase() !== "false";
+const EXPAND_WORD_THRESHOLD = Number(process.env.EXPAND_WORD_THRESHOLD || 14);
+
+// ---------- Krea ----------
+const KREA_API_KEY = process.env.KREA_API_KEY;
+const KREA_GENERATE_URL =
+  process.env.KREA_GENERATE_URL || "https://api.krea.ai/generate/image/bfl/flux-1-dev";
+const KREA_JOB_URL_BASE = process.env.KREA_JOB_URL_BASE || "https://api.krea.ai/jobs";
+const KREA_STYLE_ID = (process.env.KREA_STYLE_ID || "tvjlqsab9").trim();
+const KREA_STYLE_STRENGTH = Number(process.env.KREA_STYLE_STRENGTH || 0.85);
+
+// ✅ Krea retry/poll tuning (NEW)
+const KREA_PER_BEAT_RETRIES = Number(process.env.KREA_PER_BEAT_RETRIES || 2);
+const KREA_POLL_TRIES = Number(process.env.KREA_POLL_TRIES || 90);
+const KREA_POLL_DELAY_MS = Number(process.env.KREA_POLL_DELAY_MS || 2500);
+
+// ---------- Beats ----------
+const MIN_BEATS = 8;
+const MAX_BEATS = 24;
+const SECONDS_PER_BEAT_ESTIMATE = 3.0;
+const ANIMATION_VARIANTS = ["PanRight", "PanLeft", "PanUp", "PanDown", "Zoom"];
 
 // ---------- HTTPS JSON helper (Creatomate) ----------
 function postJSON(url, headers, bodyObj) {
@@ -94,14 +133,333 @@ function postJSON(url, headers, bodyObj) {
   });
 }
 
+// ---------- Text helpers ----------
+function countWords(text) {
+  return (String(text || "").match(/\S+/g) || []).length;
+}
+function estimateSpeechSeconds(narration) {
+  const text = (narration || "").trim();
+  if (!text) return 0;
+  return countWords(text) / 2.5;
+}
+function splitIntoSentences(text) {
+  const t = (text || "").trim();
+  if (!t) return [];
+  const parts = t.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [];
+  return parts.map((s) => s.trim()).filter(Boolean);
+}
+function splitLongSentence(sentence, maxWords) {
+  const words = String(sentence || "").split(/\s+/).filter(Boolean);
+  if (words.length <= maxWords) return [String(sentence).trim()];
+  const out = [];
+  for (let i = 0; i < words.length; i += maxWords) {
+    out.push(words.slice(i, i + maxWords).join(" ").trim());
+  }
+  return out.filter(Boolean);
+}
+function splitNarrationIntoBeats(narration, beatCount) {
+  const text = (narration || "").trim();
+  if (!text || beatCount <= 0) return [];
+
+  const totalWords = countWords(text);
+  const targetWordsPerBeat = Math.max(8, Math.round(totalWords / beatCount));
+
+  let sentences = splitIntoSentences(text);
+  const maxSentenceWords = Math.max(18, targetWordsPerBeat * 2);
+  sentences = sentences.flatMap((s) => splitLongSentence(s, maxSentenceWords));
+
+  const beats = [];
+  let current = "";
+  let currentWords = 0;
+
+  for (const s of sentences) {
+    const w = countWords(s);
+    if (current && currentWords + w > targetWordsPerBeat) {
+      beats.push(current.trim());
+      current = "";
+      currentWords = 0;
+    }
+    current += (current ? " " : "") + s;
+    currentWords += w;
+  }
+  if (current.trim()) beats.push(current.trim());
+
+  while (beats.length > beatCount) {
+    let bestIdx = 0;
+    let bestLen = Infinity;
+    for (let i = 0; i < beats.length - 1; i++) {
+      const len = countWords(beats[i]) + countWords(beats[i + 1]);
+      if (len < bestLen) {
+        bestLen = len;
+        bestIdx = i;
+      }
+    }
+    beats.splice(bestIdx, 2, `${beats[bestIdx]} ${beats[bestIdx + 1]}`.trim());
+  }
+
+  while (beats.length < beatCount) beats.push(beats[beats.length - 1] || text);
+  return beats;
+}
+
+// ---------- Timing ----------
+function beatDurationFromText(text) {
+  const words = countWords(text);
+  const speechSeconds = words / 2.5;
+  const padded = speechSeconds + 0.6;
+  return Math.max(2.5, Math.min(7.0, padded));
+}
+function buildBeatTiming(beatTexts) {
+  const durations = beatTexts.map(beatDurationFromText);
+  let t = 0;
+  const starts = durations.map((d) => {
+    const s = t;
+    t += d;
+    return s;
+  });
+  return { durations, starts, total: t };
+}
+
+// ---------- OpenAI prompt expander ----------
+async function expandBeatToVisualPrompt(beatText) {
+  const text = String(beatText || "").trim();
+  if (!text) return "";
+  if (!OPENAI_API_KEY || PROMPT_EXPANDER !== "openai") return text;
+
+  const instruction = `
+Turn the following narration line into a single, highly detailed visual scene prompt for image generation.
+
+Rules:
+- Output ONLY the prompt text.
+- Describe: environment, key objects, lighting/shadows, mood via visible details, spatial layout.
+- Do NOT include words like: cinematic, realistic, photorealistic, 8k, ultra, high quality, masterpiece.
+- Do NOT mention "art style" or "story type" or "Scene #".
+- Keep it 2–4 sentences, dense and specific.
+
+Narration line:
+"${text}"
+  `.trim();
+
+  const resp = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: OPENAI_MODEL,
+      messages: [
+        { role: "system", content: "You output only the final prompt text. No JSON. No extra text." },
+        { role: "user", content: instruction },
+      ],
+      temperature: 0.7,
+      top_p: 0.95,
+      presence_penalty: 0.3,
+      frequency_penalty: 0.2,
+    }),
+  });
+
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    console.error("[PROMPT_EXPANDER] OpenAI failed", resp.status, data?.error || data);
+    return text;
+  }
+
+  const out = String(data?.choices?.[0]?.message?.content || "").trim();
+  return out || text;
+}
+
+// ---------- Krea (UPDATED: style -> fallback to no-style + better logs) ----------
+function shortPrompt(p) {
+  const s = String(p || "").replace(/\s+/g, " ").trim();
+  return s.length > 180 ? s.slice(0, 180) + "..." : s;
+}
+
+async function createKreaJob({ prompt, aspectRatio, useStyle }) {
+  if (!KREA_API_KEY) throw new Error("KREA_API_KEY not set");
+
+  const payload = {
+    prompt,
+    aspect_ratio: aspectRatio,
+  };
+
+  if (useStyle) {
+    if (!KREA_STYLE_ID) throw new Error("KREA_STYLE_ID not set");
+    payload.styles = [{ id: KREA_STYLE_ID, strength: KREA_STYLE_STRENGTH }];
+  }
+
+  const resp = await fetch(KREA_GENERATE_URL, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${KREA_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  const data = await resp.json().catch(() => ({}));
+
+  if (!resp.ok) {
+    console.error("[KREA_GENERATE_ERROR]", {
+      status: resp.status,
+      data,
+      useStyle,
+      aspectRatio,
+      prompt: shortPrompt(prompt),
+      payloadKeys: Object.keys(payload),
+    });
+    throw new Error(`KREA_GENERATE_FAILED (${resp.status})`);
+  }
+
+  const jobId = data?.job_id || data?.id;
+  if (!jobId) {
+    console.error("[KREA_MISSING_JOB_ID]", { data, useStyle, prompt: shortPrompt(prompt) });
+    throw new Error("KREA_MISSING_JOB_ID");
+  }
+
+  return jobId;
+}
+
+async function pollKreaJob(jobId) {
+  const url = `${KREA_JOB_URL_BASE}/${encodeURIComponent(jobId)}`;
+
+  for (let i = 0; i < KREA_POLL_TRIES; i++) {
+    const resp = await fetch(url, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${KREA_API_KEY}` },
+    });
+
+    const data = await resp.json().catch(() => ({}));
+
+    if (!resp.ok) {
+      console.error("[KREA_JOB_LOOKUP_FAILED]", { status: resp.status, data, jobId });
+      throw new Error(`KREA_JOB_LOOKUP_FAILED (${resp.status})`);
+    }
+
+    const status = String(data?.status || "").toLowerCase();
+
+    if (status === "completed" || status === "complete" || status === "succeeded") {
+      const urls = data?.result?.urls || data?.urls || [];
+      const imageUrl = Array.isArray(urls) ? urls[0] : null;
+
+      if (!imageUrl) {
+        console.error("[KREA_JOB_NO_RESULT_URL]", { jobId, data });
+        throw new Error("KREA_JOB_NO_RESULT_URL");
+      }
+      return imageUrl;
+    }
+
+    if (status === "failed" || status === "error") {
+      console.error("[KREA_JOB_FAILED]", { jobId, data });
+      throw new Error(`KREA_JOB_FAILED (${jobId})`);
+    }
+
+    await new Promise((r) => setTimeout(r, KREA_POLL_DELAY_MS));
+  }
+
+  throw new Error("KREA_JOB_TIMEOUT");
+}
+
+async function generateOneImageWithRetry({ prompt, aspectRatio, beatIndex }) {
+  // 1) Try WITH style
+  for (let attempt = 1; attempt <= Math.max(1, KREA_PER_BEAT_RETRIES); attempt++) {
+    try {
+      const jobId = await createKreaJob({ prompt, aspectRatio, useStyle: true });
+      return await pollKreaJob(jobId);
+    } catch (e) {
+      console.error("[KREA_RETRY_STYLE]", {
+        beat: beatIndex,
+        attempt,
+        maxAttempts: KREA_PER_BEAT_RETRIES,
+        aspectRatio,
+        prompt: shortPrompt(prompt),
+        message: String(e?.message || e),
+      });
+      await new Promise((r) => setTimeout(r, 1200 * attempt));
+    }
+  }
+
+  // 2) Try WITHOUT style (fallback)
+  for (let attempt = 1; attempt <= Math.max(1, KREA_PER_BEAT_RETRIES); attempt++) {
+    try {
+      const jobId = await createKreaJob({ prompt, aspectRatio, useStyle: false });
+      return await pollKreaJob(jobId);
+    } catch (e) {
+      console.error("[KREA_RETRY_NO_STYLE]", {
+        beat: beatIndex,
+        attempt,
+        maxAttempts: KREA_PER_BEAT_RETRIES,
+        aspectRatio,
+        prompt: shortPrompt(prompt),
+        message: String(e?.message || e),
+      });
+      await new Promise((r) => setTimeout(r, 1200 * attempt));
+    }
+  }
+
+  throw new Error("KREA_FAILED_AFTER_RETRIES");
+}
+
+async function generateKreaImageUrlsForBeats({ beatCount, beatTexts, aspectRatio }) {
+  const urls = [];
+  for (let i = 1; i <= beatCount; i++) {
+    const beatText = beatTexts[i - 1] || "";
+    const needsExpand = !EXPAND_SHORT_BEATS_ONLY ? true : countWords(beatText) < EXPAND_WORD_THRESHOLD;
+    const prompt = needsExpand ? await expandBeatToVisualPrompt(beatText) : beatText.trim();
+
+    const imageUrl = await generateOneImageWithRetry({ prompt, aspectRatio, beatIndex: i });
+    urls.push(imageUrl);
+  }
+  return urls;
+}
+
+// ---------- Variants ----------
+function buildVariantSequence(beatCount) {
+  const seq = [];
+  let last = null;
+  for (let i = 0; i < beatCount; i++) {
+    const available = ANIMATION_VARIANTS.filter((v) => v !== last);
+    const chosen = available[i % available.length];
+    seq.push(chosen);
+    last = chosen;
+  }
+  return seq;
+}
+
+// ---------- Captions (NEW) ----------
+// Creates default, beat-timed captions so the FIRST mp4 has captions.
+// Later we’ll re-render captions with word timings (from /api/transcribe).
+function buildDefaultCaptionsJson({ captionStyle, beatTexts, timing }) {
+  const segments = [];
+  for (let i = 0; i < beatTexts.length; i++) {
+    const text = String(beatTexts[i] || "").trim();
+    if (!text) continue;
+    const start = Number(timing.starts[i] || 0);
+    const end = start + Number(timing.durations[i] || 0);
+    segments.push({ start, end, text });
+  }
+
+  // Your Creatomate template will read this from Captions_JSON.text
+  return JSON.stringify({
+    v: 1,
+    style: String(captionStyle || "sentence"),
+    // beat-based segments (good enough for default captions)
+    segments,
+    // when true, UI knows you can improve accuracy by using word timings
+    needs_words: captionStyle === "word" || captionStyle === "karaoke",
+  });
+}
+
 // -------------------- MAIN --------------------
 module.exports = async function handler(req, res) {
   setCors(req, res);
 
+  // IMPORTANT: respond to preflight BEFORE any auth/module work
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "POST") return res.status(405).json({ error: "METHOD_NOT_ALLOWED" });
 
   try {
+    // ✅ Make sure API_BASE exists for webhook + internal calls
+    // If not set, fallback to request host (works sometimes, but webhook may break)
     const publicBaseUrl = API_BASE || `https://${req.headers.host}`;
 
     const memberId = await requireMemberId(req);
@@ -115,6 +473,8 @@ module.exports = async function handler(req, res) {
       aspectRatio = "9:16",
       customPrompt = "",
       durationRange = "60-90",
+      // NEW: caption style choice from Webflow
+      captionStyle = "sentence", // "sentence" | "karaoke" | "word" (we’ll map more later)
     } = body;
 
     if (!process.env.CREATOMATE_API_KEY) return res.status(500).json({ error: "MISSING_CREATOMATE_API_KEY" });
@@ -128,14 +488,21 @@ module.exports = async function handler(req, res) {
     const template_id = (templateMap[aspectRatio] || "").trim();
     if (!template_id) return res.status(400).json({ error: "NO_TEMPLATE_FOR_ASPECT", aspectRatio });
 
-    // OPTIONAL: if you have a dedicated audio-only template (recommended)
-    // Create it in Creatomate with just a Voiceover element, no visuals.
-    const audioTemplateId =
-      (process.env.CREATO_AUDIO_TEMPLATE || "").trim() || template_id;
+    // Optional audio-only template (recommended)
+    const audio_template_id = (process.env.CREATO_AUDIO_TEMPLATE || "").trim() || template_id;
 
-    const choices = { storyType, artStyle, language, voice, aspectRatio, customPrompt, durationRange };
+    const choices = {
+      storyType,
+      artStyle,
+      language,
+      voice,
+      aspectRatio,
+      customPrompt,
+      durationRange,
+      captionStyle,
+    };
 
-    // 1) Create DB row first
+    // ✅ Create DB row first
     const { data: row, error: insErr } = await supabase
       .from("renders")
       .insert([
@@ -146,21 +513,18 @@ module.exports = async function handler(req, res) {
           render_id: "",
           choices,
           error: null,
-
-          // captions fields (optional defaults)
-          caption_status: "not_started",
+          // if these columns exist, nice to have:
+          caption_status: "rendering",
           caption_error: null,
-          caption_template_id: "minimal",
-          captioned_video_url: null,
         },
       ])
-      .select("id")
+      .select("id, choices")
       .single();
 
     if (insErr) return res.status(500).json({ error: "DB_INSERT_FAILED", details: insErr });
     const db_id = row.id;
 
-    // 2) Generate script
+    // ✅ Generate script using PUBLIC base URL (consistent)
     const scriptResp = await fetch(`${publicBaseUrl}/api/generate-script`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -173,7 +537,41 @@ module.exports = async function handler(req, res) {
       return res.status(502).json({ error: "SCRIPT_EMPTY", details: scriptResp });
     }
 
-    // 3) Build your existing mods
+    // Beats + timing
+    const speechSec = estimateSpeechSeconds(narration);
+    let targetSec = Math.round(speechSec + 2);
+    let minSec = 60,
+      maxSec = 90;
+    if (durationRange === "30-60") {
+      minSec = 30;
+      maxSec = 60;
+    }
+    if (targetSec < minSec) targetSec = minSec;
+    if (targetSec > maxSec) targetSec = maxSec;
+
+    let beatCount = Math.round(targetSec / SECONDS_PER_BEAT_ESTIMATE);
+    if (!beatCount || !Number.isFinite(beatCount)) beatCount = MIN_BEATS;
+    beatCount = Math.max(MIN_BEATS, Math.min(MAX_BEATS, beatCount));
+
+    const beatTexts = splitNarrationIntoBeats(narration, beatCount);
+    const timing = buildBeatTiming(beatTexts);
+
+    // Images
+    let imageUrls = [];
+    if (IMAGE_PROVIDER === "krea") {
+      imageUrls = await generateKreaImageUrlsForBeats({ beatCount, beatTexts, aspectRatio });
+    }
+
+    const variantSequence = buildVariantSequence(beatCount);
+
+    // NEW: default captions JSON for first render
+    const captionsJsonText = buildDefaultCaptionsJson({
+      captionStyle,
+      beatTexts,
+      timing,
+    });
+
+    // Creatomate mods (VIDEO)
     const mods = {
       Narration: narration,
       VoiceLabel: voice,
@@ -181,83 +579,117 @@ module.exports = async function handler(req, res) {
       StoryTypeLabel: storyType,
       Voiceover: narration,
       VoiceUrl: null,
-      "Captions_JSON.text": "", // still fine
+
+      // ✅ Default captions on FIRST render
+      "Captions_JSON.text": captionsJsonText,
     };
 
-    // NOTE: keep all your beat timing + image assignment code here
-    // (I’m not changing it — paste your existing beat/image loops back in)
-    // --------------------
-    // YOUR EXISTING timing + krea image loops go here
-    // --------------------
+    for (let i = 1; i <= beatCount; i++) {
+      const start = timing.starts[i - 1];
+      const dur = timing.durations[i - 1];
 
-    // 4) Start VIDEO render (mp4)
-    const videoWebhook = `${publicBaseUrl}/api/creatomate-webhook?db_id=${encodeURIComponent(
-      db_id
-    )}&kind=video`;
+      mods[`Beat${i}_Scene.start`] = start;
+      mods[`Beat${i}_Scene.duration`] = dur;
 
-    const videoPayload = {
+      mods[`Beat${i}_Group.start`] = 0;
+      mods[`Beat${i}_Group.duration`] = dur;
+    }
+
+    for (let i = beatCount + 1; i <= MAX_BEATS; i++) {
+      mods[`Beat${i}_Scene.start`] = 0;
+      mods[`Beat${i}_Scene.duration`] = 0;
+      mods[`Beat${i}_Group.start`] = 0;
+      mods[`Beat${i}_Group.duration`] = 0;
+      for (const variant of ANIMATION_VARIANTS) mods[`Beat${i}_${variant}_Image.source`] = "";
+    }
+
+    // Beat images via proxy
+    let lastGood = "";
+    for (let i = 1; i <= beatCount; i++) {
+      const raw = imageUrls[i - 1] || "";
+      let proxied = raw ? `${publicBaseUrl}/api/krea-image?url=${encodeURIComponent(raw)}` : "";
+      if (!proxied && lastGood) proxied = lastGood;
+      if (proxied) lastGood = proxied;
+
+      const chosen = i === 1 ? "PanRight" : variantSequence[i - 1];
+
+      for (const variant of ANIMATION_VARIANTS) {
+        mods[`Beat${i}_${variant}_Image.source`] = variant === chosen ? proxied : "";
+      }
+    }
+
+    // ✅ VIDEO render payload (webhook includes db_id + kind=video)
+    const payloadVideo = {
       template_id,
       modifications: mods,
       output_format: "mp4",
-      webhook_url: videoWebhook,
+      webhook_url: `${publicBaseUrl}/api/creatomate-webhook?db_id=${encodeURIComponent(
+        db_id
+      )}&kind=video`,
     };
 
-    const videoResp = await postJSON(
+    const respVideo = await postJSON(
       "https://api.creatomate.com/v1/renders",
       { Authorization: `Bearer ${process.env.CREATOMATE_API_KEY}` },
-      videoPayload
+      payloadVideo
     );
 
-    if (videoResp.status !== 202 && videoResp.status !== 200) {
-      await supabase.from("renders").update({ status: "failed", error: JSON.stringify(videoResp.json) }).eq("id", db_id);
-      return res.status(videoResp.status).json({ error: "CREATOMATE_VIDEO_ERROR", details: videoResp.json });
+    if (respVideo.status !== 202 && respVideo.status !== 200) {
+      await supabase.from("renders").update({ status: "failed", error: JSON.stringify(respVideo.json) }).eq("id", db_id);
+      return res.status(respVideo.status).json({ error: "CREATOMATE_ERROR", details: respVideo.json });
     }
 
-    const videoJobId = Array.isArray(videoResp.json) ? videoResp.json[0]?.id : videoResp.json?.id;
-    if (!videoJobId) {
-      await supabase.from("renders").update({ status: "failed", error: "NO_VIDEO_JOB_ID" }).eq("id", db_id);
-      return res.status(502).json({ error: "NO_VIDEO_JOB_ID_IN_RESPONSE", details: videoResp.json });
+    const job_id = Array.isArray(respVideo.json) ? respVideo.json[0]?.id : respVideo.json?.id;
+    if (!job_id) {
+      await supabase.from("renders").update({ status: "failed", error: "NO_JOB_ID" }).eq("id", db_id);
+      return res.status(502).json({ error: "NO_JOB_ID_IN_RESPONSE", details: respVideo.json });
     }
 
-    await supabase.from("renders").update({ render_id: String(videoJobId) }).eq("id", db_id);
+    // store main video render id
+    await supabase.from("renders").update({ render_id: String(job_id) }).eq("id", db_id);
 
-    // 5) Start AUDIO render (mp3) — THIS IS THE IMPORTANT NEW PART
-    const audioWebhook = `${publicBaseUrl}/api/creatomate-webhook?db_id=${encodeURIComponent(
-      db_id
-    )}&kind=audio`;
-
-    const audioPayload = {
-      template_id: audioTemplateId,
-      modifications: mods,
+    // -------------------- NEW: AUDIO mp3 render --------------------
+    // We render mp3 so /api/transcribe can pull word timings and you can do karaoke/per-word styles.
+    const payloadAudio = {
+      template_id: audio_template_id,
+      modifications: {
+        // Keep it minimal: voiceover is the important part
+        Voiceover: narration,
+        VoiceLabel: voice,
+        LanguageLabel: language,
+      },
       output_format: "mp3",
-      webhook_url: audioWebhook,
+      webhook_url: `${publicBaseUrl}/api/creatomate-webhook?db_id=${encodeURIComponent(
+        db_id
+      )}&kind=audio`,
     };
 
-    const audioResp = await postJSON(
+    const respAudio = await postJSON(
       "https://api.creatomate.com/v1/renders",
       { Authorization: `Bearer ${process.env.CREATOMATE_API_KEY}` },
-      audioPayload
+      payloadAudio
     );
 
-    let audioJobId = null;
-    if (audioResp.status === 202 || audioResp.status === 200) {
-      audioJobId = Array.isArray(audioResp.json) ? audioResp.json[0]?.id : audioResp.json?.id;
+    let audio_job_id = null;
+    if (respAudio.status === 202 || respAudio.status === 200) {
+      audio_job_id = Array.isArray(respAudio.json) ? respAudio.json[0]?.id : respAudio.json?.id;
     } else {
-      // don’t fail the whole video if audio fails — but log it
-      console.error("[CREATOMATE_AUDIO_ERROR]", audioResp.status, audioResp.json);
+      console.error("[AUDIO_RENDER] Creatomate error", respAudio.status, respAudio.json);
     }
 
-    if (audioJobId) {
-      // store on the row without adding new columns (keeps your schema unchanged)
-      const nextChoices = { ...(choices || {}), audio_render_id: String(audioJobId) };
-      await supabase.from("renders").update({ choices: nextChoices }).eq("id", db_id);
+    // Store audio render id in choices so you can debug later
+    if (audio_job_id) {
+      const { data: cur } = await supabase.from("renders").select("choices").eq("id", db_id).maybeSingle();
+      const mergedChoices = { ...(cur?.choices || choices), audio_render_id: String(audio_job_id) };
+      await supabase.from("renders").update({ choices: mergedChoices }).eq("id", db_id);
     }
 
     return res.status(200).json({
       ok: true,
+      job_id,
       db_id,
-      video_job_id: String(videoJobId),
-      audio_job_id: audioJobId ? String(audioJobId) : null,
+      audio_job_id: audio_job_id || null,
+      captionStyle,
     });
   } catch (err) {
     const msg = String(err?.message || err);
