@@ -425,28 +425,119 @@ function buildVariantSequence(beatCount) {
   return seq;
 }
 
-// ---------- Captions (NEW) ----------
-// Creates default, beat-timed captions so the FIRST mp4 has captions.
-// Later we’ll re-render captions with word timings (from /api/transcribe).
-function buildDefaultCaptionsJson({ captionStyle, beatTexts, timing }) {
-  const segments = [];
+// -------------------- CAPTIONS + STYLES (NEW) --------------------
+// Styles are applied to the `Captions` layer in Creatomate.
+// JSON is injected into `Captions_JSON.text`.
+
+const CAPTION_PRESETS = {
+  sentence: {
+    mode: "sentence",
+    mods: {
+      "Captions.font_family": "Inter",
+      "Captions.font_size": 56,
+      "Captions.font_weight": 900,
+      "Captions.fill_color": "#FFFFFF",
+      "Captions.stroke_color": "#000000",
+      "Captions.stroke_width": 10,
+    },
+  },
+  subtitle: {
+    mode: "sentence",
+    mods: {
+      "Captions.font_family": "Inter",
+      "Captions.font_size": 52,
+      "Captions.font_weight": 800,
+      "Captions.fill_color": "#FFFFFF",
+      "Captions.stroke_color": "#000000",
+      "Captions.stroke_width": 0,
+      // If your Captions layer supports these, keep them. If not, Creatomate ignores unknown props.
+      "Captions.background_color": "rgba(0,0,0,0.55)",
+      "Captions.padding": 20,
+      "Captions.border_radius": 18,
+    },
+  },
+  word: {
+    mode: "word",
+    mods: {
+      "Captions.font_family": "Inter",
+      "Captions.font_size": 72,
+      "Captions.font_weight": 900,
+      "Captions.fill_color": "#FFFFFF",
+      "Captions.stroke_color": "#000000",
+      "Captions.stroke_width": 12,
+    },
+  },
+  karaoke: {
+    // default render still uses beat timing, later you’ll swap to true word timings from /api/transcribe
+    mode: "word",
+    mods: {
+      "Captions.font_family": "Inter",
+      "Captions.font_size": 68,
+      "Captions.font_weight": 900,
+      "Captions.fill_color": "#FFFFFF",
+      "Captions.stroke_color": "#000000",
+      "Captions.stroke_width": 10,
+    },
+  },
+};
+
+function pickCaptionPresetKey(input) {
+  const k = String(input || "").trim().toLowerCase();
+  if (CAPTION_PRESETS[k]) return k;
+  return "sentence";
+}
+
+function chunkWordsToLines(text, maxWordsPerLine = 6, maxLines = 2) {
+  const words = String(text || "").trim().split(/\s+/).filter(Boolean);
+  if (!words.length) return "";
+  const lines = [];
+  for (let i = 0; i < words.length; i += maxWordsPerLine) {
+    lines.push(words.slice(i, i + maxWordsPerLine).join(" "));
+    if (lines.length >= maxLines) break;
+  }
+  return lines.join("\n");
+}
+
+function buildDefaultCaptionsJson({ mode, beatTexts, timing }) {
+  // Creatomate-friendly default schema:
+  // { captions: [ { start, end, text } ] }
+  // - sentence mode: one caption per beat
+  // - word mode: splits each beat into word chunks (approx timing)
+
+  const captions = [];
+
   for (let i = 0; i < beatTexts.length; i++) {
-    const text = String(beatTexts[i] || "").trim();
-    if (!text) continue;
+    const raw = String(beatTexts[i] || "").trim();
+    if (!raw) continue;
+
     const start = Number(timing.starts[i] || 0);
-    const end = start + Number(timing.durations[i] || 0);
-    segments.push({ start, end, text });
+    const dur = Number(timing.durations[i] || 0);
+    const end = start + dur;
+
+    if (mode === "word") {
+      const words = raw.split(/\s+/).filter(Boolean);
+      const n = Math.max(1, words.length);
+      const per = dur / n;
+
+      for (let w = 0; w < words.length; w++) {
+        const ws = start + per * w;
+        const we = w === words.length - 1 ? end : start + per * (w + 1);
+        captions.push({
+          start: Number(ws.toFixed(3)),
+          end: Number(we.toFixed(3)),
+          text: words[w],
+        });
+      }
+    } else {
+      captions.push({
+        start: Number(start.toFixed(3)),
+        end: Number(end.toFixed(3)),
+        text: chunkWordsToLines(raw, 6, 2),
+      });
+    }
   }
 
-  // Your Creatomate template will read this from Captions_JSON.text
-  return JSON.stringify({
-    v: 1,
-    style: String(captionStyle || "sentence"),
-    // beat-based segments (good enough for default captions)
-    segments,
-    // when true, UI knows you can improve accuracy by using word timings
-    needs_words: captionStyle === "word" || captionStyle === "karaoke",
-  });
+  return JSON.stringify({ captions });
 }
 
 // -------------------- MAIN --------------------
@@ -473,8 +564,9 @@ module.exports = async function handler(req, res) {
       aspectRatio = "9:16",
       customPrompt = "",
       durationRange = "60-90",
+
       // NEW: caption style choice from Webflow
-      captionStyle = "sentence", // "sentence" | "karaoke" | "word" (we’ll map more later)
+      captionStyle = "sentence", // sentence | subtitle | word | karaoke
     } = body;
 
     if (!process.env.CREATOMATE_API_KEY) return res.status(500).json({ error: "MISSING_CREATOMATE_API_KEY" });
@@ -489,7 +581,11 @@ module.exports = async function handler(req, res) {
     if (!template_id) return res.status(400).json({ error: "NO_TEMPLATE_FOR_ASPECT", aspectRatio });
 
     // Optional audio-only template (recommended)
+    // If you don't have one, you can reuse template_id and still output mp3.
     const audio_template_id = (process.env.CREATO_AUDIO_TEMPLATE || "").trim() || template_id;
+
+    const presetKey = pickCaptionPresetKey(captionStyle);
+    const preset = CAPTION_PRESETS[presetKey];
 
     const choices = {
       storyType,
@@ -499,7 +595,7 @@ module.exports = async function handler(req, res) {
       aspectRatio,
       customPrompt,
       durationRange,
-      captionStyle,
+      captionStyle: presetKey,
     };
 
     // ✅ Create DB row first
@@ -513,12 +609,14 @@ module.exports = async function handler(req, res) {
           render_id: "",
           choices,
           error: null,
-          // if these columns exist, nice to have:
+
+          // these are safe if the columns exist; if they don't, Supabase will throw.
+          // If your table doesn't have them, remove these two lines:
           caption_status: "rendering",
           caption_error: null,
         },
       ])
-      .select("id, choices")
+      .select("id")
       .single();
 
     if (insErr) return res.status(500).json({ error: "DB_INSERT_FAILED", details: insErr });
@@ -566,7 +664,7 @@ module.exports = async function handler(req, res) {
 
     // NEW: default captions JSON for first render
     const captionsJsonText = buildDefaultCaptionsJson({
-      captionStyle,
+      mode: preset.mode, // sentence or word
       beatTexts,
       timing,
     });
@@ -582,7 +680,13 @@ module.exports = async function handler(req, res) {
 
       // ✅ Default captions on FIRST render
       "Captions_JSON.text": captionsJsonText,
+
+      // helpful debug label if you have it in template (optional)
+      CaptionStyleLabel: presetKey,
     };
+
+    // Apply style mods to the Captions layer
+    Object.assign(mods, preset.mods);
 
     for (let i = 1; i <= beatCount; i++) {
       const start = timing.starts[i - 1];
@@ -607,6 +711,8 @@ module.exports = async function handler(req, res) {
     let lastGood = "";
     for (let i = 1; i <= beatCount; i++) {
       const raw = imageUrls[i - 1] || "";
+
+      // If Krea didn't return anything, keep lastGood so you don't get a blank scene.
       let proxied = raw ? `${publicBaseUrl}/api/krea-image?url=${encodeURIComponent(raw)}` : "";
       if (!proxied && lastGood) proxied = lastGood;
       if (proxied) lastGood = proxied;
@@ -618,14 +724,12 @@ module.exports = async function handler(req, res) {
       }
     }
 
-    // ✅ VIDEO render payload (webhook includes db_id + kind=video)
+    // ✅ VIDEO render payload
     const payloadVideo = {
       template_id,
       modifications: mods,
       output_format: "mp4",
-      webhook_url: `${publicBaseUrl}/api/creatomate-webhook?db_id=${encodeURIComponent(
-        db_id
-      )}&kind=video`,
+      webhook_url: `${publicBaseUrl}/api/creatomate-webhook`,
     };
 
     const respVideo = await postJSON(
@@ -648,20 +752,18 @@ module.exports = async function handler(req, res) {
     // store main video render id
     await supabase.from("renders").update({ render_id: String(job_id) }).eq("id", db_id);
 
-    // -------------------- NEW: AUDIO mp3 render --------------------
-    // We render mp3 so /api/transcribe can pull word timings and you can do karaoke/per-word styles.
+    // -------------------- OPTIONAL: AUDIO mp3 render (kept) --------------------
+    // This creates an mp3 URL later, so /api/transcribe can fetch it for word timings.
+    // If you don't need it yet, you can delete this whole block.
     const payloadAudio = {
       template_id: audio_template_id,
       modifications: {
-        // Keep it minimal: voiceover is the important part
         Voiceover: narration,
         VoiceLabel: voice,
         LanguageLabel: language,
       },
       output_format: "mp3",
-      webhook_url: `${publicBaseUrl}/api/creatomate-webhook?db_id=${encodeURIComponent(
-        db_id
-      )}&kind=audio`,
+      webhook_url: `${publicBaseUrl}/api/creatomate-webhook`,
     };
 
     const respAudio = await postJSON(
@@ -677,7 +779,7 @@ module.exports = async function handler(req, res) {
       console.error("[AUDIO_RENDER] Creatomate error", respAudio.status, respAudio.json);
     }
 
-    // Store audio render id in choices so you can debug later
+    // Store audio render id in choices (debug friendly)
     if (audio_job_id) {
       const { data: cur } = await supabase.from("renders").select("choices").eq("id", db_id).maybeSingle();
       const mergedChoices = { ...(cur?.choices || choices), audio_render_id: String(audio_job_id) };
@@ -689,7 +791,7 @@ module.exports = async function handler(req, res) {
       job_id,
       db_id,
       audio_job_id: audio_job_id || null,
-      captionStyle,
+      captionStyle: presetKey,
     });
   } catch (err) {
     const msg = String(err?.message || err);
