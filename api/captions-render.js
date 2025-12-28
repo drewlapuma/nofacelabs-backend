@@ -1,7 +1,6 @@
 // api/captions-render.js
-// POST /api/captions-render
-// { videoUrl, audioUrl, mode: "sentence"|"word", preset: "minimal"|"bold_pop"|"karaoke" }
-// -> { ok, renderId, status, url? }
+const { requireMemberId } = require("./_lib/auth");
+const { getAdminSupabase } = require("./_lib/supabase");
 
 const CREATOMATE_API_KEY = (process.env.CREATOMATE_API_KEY || "").trim();
 
@@ -10,9 +9,8 @@ const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || 
 
 function setCors(req, res) {
   const origin = req.headers.origin;
-  if (ALLOW_ORIGINS.includes("*")) {
-    res.setHeader("Access-Control-Allow-Origin", "*");
-  } else if (origin && ALLOW_ORIGINS.includes(origin)) {
+  if (ALLOW_ORIGINS.includes("*")) res.setHeader("Access-Control-Allow-Origin", "*");
+  else if (origin && ALLOW_ORIGINS.includes(origin)) {
     res.setHeader("Access-Control-Allow-Origin", origin);
     res.setHeader("Vary", "Origin");
   }
@@ -22,7 +20,6 @@ function setCors(req, res) {
 }
 
 function presetStyle(preset) {
-  // You can tweak these anytime to create “more templates”
   if (preset === "bold_pop") {
     return {
       font_family: "Montserrat",
@@ -37,9 +34,7 @@ function presetStyle(preset) {
       y: "82%",
     };
   }
-
   if (preset === "karaoke") {
-    // sentence line + highlighted word line
     return {
       font_family: "Montserrat",
       font_weight: 800,
@@ -52,11 +47,9 @@ function presetStyle(preset) {
       shadow_opacity: 0.6,
       y_sentence: "78%",
       y_word: "88%",
-      highlight_fill: "#5AC1FF", // your brand
+      highlight_fill: "#5AC1FF",
     };
   }
-
-  // minimal
   return {
     font_family: "Inter",
     font_weight: 800,
@@ -71,15 +64,15 @@ function presetStyle(preset) {
   };
 }
 
-function makeTextElement({ id, text, start, duration, style }) {
+function makeTextElement({ id, text, start, duration, style, yOverride }) {
   return {
     id,
     type: "text",
     text,
     time: start,
-    duration,
+    duration: Math.max(0.01, duration),
     x: "50%",
-    y: style.y,
+    y: yOverride || style.y,
     width: "92%",
     height: "30%",
     font_family: style.font_family,
@@ -96,6 +89,42 @@ function makeTextElement({ id, text, start, duration, style }) {
   };
 }
 
+async function postJSON(url, body) {
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const j = await r.json().catch(() => ({}));
+  return { r, j };
+}
+
+async function creatomateCreateRender(source) {
+  const r = await fetch("https://api.creatomate.com/v1/renders", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${CREATOMATE_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ source }),
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j?.message || "CREATOMATE_CREATE_FAILED");
+  const first = Array.isArray(j) ? j[0] : j;
+  return first;
+}
+
+async function creatomateGetRender(id) {
+  const r = await fetch(`https://api.creatomate.com/v1/renders/${id}`, {
+    headers: { Authorization: `Bearer ${CREATOMATE_API_KEY}` },
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j?.message || "CREATOMATE_GET_FAILED");
+  return j;
+}
+
+async function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
 module.exports = async function handler(req, res) {
   setCors(req, res);
   if (req.method === "OPTIONS") return res.status(204).end();
@@ -104,29 +133,48 @@ module.exports = async function handler(req, res) {
   try {
     if (!CREATOMATE_API_KEY) return res.status(500).json({ ok: false, error: "MISSING_CREATOMATE_API_KEY" });
 
+    const member_id = await requireMemberId(req);
+    const sb = getAdminSupabase();
+
     const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {});
+    const dbId = String(body.dbId || body.id || "").trim();
     const videoUrl = String(body.videoUrl || "").trim();
     const audioUrl = String(body.audioUrl || "").trim();
-    const mode = String(body.mode || "sentence").trim();     // "sentence" | "word"
-    const preset = String(body.preset || "minimal").trim();  // "minimal"|"bold_pop"|"karaoke"
+    const preset = String(body.preset || "minimal").trim();
+    const mode = String(body.mode || "sentence").trim();
 
+    if (!dbId) return res.status(400).json({ ok: false, error: "MISSING_DB_ID" });
     if (!videoUrl) return res.status(400).json({ ok: false, error: "MISSING_VIDEO_URL" });
     if (!audioUrl) return res.status(400).json({ ok: false, error: "MISSING_AUDIO_URL" });
 
-    // 1) Build captions from your own endpoint
+    // verify the row belongs to the member
+    const { data: row } = await sb.from("renders").select("*").eq("id", dbId).eq("member_id", member_id).single();
+    if (!row) return res.status(404).json({ ok: false, error: "NOT_FOUND" });
+
+    // mark captioning
+    await sb.from("renders").update({
+      caption_status: "captioning",
+      caption_error: null,
+      caption_template_id: preset,
+    }).eq("id", dbId);
+
+    // build captions
     const buildUrl = `https://${req.headers.host}/api/captions-build`;
-    const rb = await fetch(buildUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ audioUrl, mode: preset === "karaoke" ? "word" : mode }),
-    });
-    const bj = await rb.json().catch(() => ({}));
-    if (!rb.ok || !bj.ok) return res.status(500).json({ ok: false, error: "CAPTIONS_BUILD_FAILED", detail: bj });
 
-    const items = bj.items || [];
+    // karaoke needs words + segments
+    const wantWords = preset === "karaoke" || mode === "word";
+    const wantSegs = preset === "karaoke" || mode === "sentence";
+
+    const wordsRes = wantWords ? await postJSON(buildUrl, { audioUrl, mode: "word" }) : null;
+    const segsRes  = wantSegs  ? await postJSON(buildUrl, { audioUrl, mode: "sentence" }) : null;
+
+    if (wordsRes && (!wordsRes.r.ok || !wordsRes.j.ok)) throw new Error("CAPTIONS_BUILD_WORD_FAILED");
+    if (segsRes  && (!segsRes.r.ok  || !segsRes.j.ok))  throw new Error("CAPTIONS_BUILD_SENTENCE_FAILED");
+
+    const words = (wordsRes?.j?.items || []);
+    const segs  = (segsRes?.j?.items || []);
+
     const style = presetStyle(preset);
-
-    // 2) Build Creatomate source JSON (post-process overlay)
     const elements = [];
 
     // background video
@@ -141,95 +189,87 @@ module.exports = async function handler(req, res) {
     });
 
     if (preset === "karaoke") {
-      // Karaoke = sentence (segment) + word highlight line under it
-      // We'll create:
-      // - A sentence element using segments (we can approximate by grouping words into a window)
-      // - A current-word element per word
-
-      // Simple approach:
-      // Sentence line = entire transcript chunks by segment size (fallback: just show full text is too much).
-      // If your transcribe endpoint returns segments too, you can pass mode="sentence" and also fetch words.
-      // For now: build sentence from "sentence mode" call:
-      const rb2 = await fetch(buildUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ audioUrl, mode: "sentence" }),
-      });
-      const bj2 = await rb2.json().catch(() => ({}));
-      const segs = (bj2.ok ? bj2.items : []) || [];
-
-      // Sentence elements (segments)
-      for (const seg of segs) {
-        elements.push({
-          ...makeTextElement({
-            id: `s_${seg.id}`,
-            text: seg.text,
-            start: seg.start,
-            duration: seg.duration,
-            style: { ...style, y: style.y_sentence },
-          }),
-        });
+      for (const s of segs) {
+        elements.push(makeTextElement({
+          id: `s_${s.id}`,
+          text: s.text,
+          start: s.start,
+          duration: s.duration,
+          style: { ...style, y: style.y_sentence },
+          yOverride: style.y_sentence,
+        }));
       }
-
-      // Current-word elements (words)
-      for (const w of items) {
-        elements.push({
-          ...makeTextElement({
-            id: `k_${w.id}`,
-            text: w.text,
-            start: w.start,
-            duration: w.duration,
-            style: {
-              ...style,
-              y: style.y_word,
-              font_size: Math.max(70, style.font_size + 8),
-              fill_color: style.highlight_fill,
-            },
-          }),
-        });
+      for (const w of words) {
+        elements.push(makeTextElement({
+          id: `w_${w.id}`,
+          text: w.text,
+          start: w.start,
+          duration: w.duration,
+          style: {
+            ...style,
+            fill_color: style.highlight_fill,
+            font_size: Math.max(70, style.font_size + 8),
+          },
+          yOverride: style.y_word,
+        }));
+      }
+    } else if (mode === "word") {
+      for (const w of words) {
+        elements.push(makeTextElement({
+          id: w.id,
+          text: w.text,
+          start: w.start,
+          duration: w.duration,
+          style,
+        }));
       }
     } else {
-      // Normal = just render items
-      for (const it of items) {
+      for (const s of segs) {
         elements.push(makeTextElement({
-          id: it.id,
-          text: it.text,
-          start: it.start,
-          duration: it.duration,
+          id: s.id,
+          text: s.text,
+          start: s.start,
+          duration: s.duration,
           style,
         }));
       }
     }
 
-    const source = {
-      output_format: "mp4",
-      width: 1080,
-      height: 1920,
-      elements,
-    };
+    const source = { output_format: "mp4", width: 1080, height: 1920, elements };
 
-    // 3) Create render
-    const cr = await fetch("https://api.creatomate.com/v1/renders", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${CREATOMATE_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ source }),
-    });
+    // create render
+    const created = await creatomateCreateRender(source);
+    const renderId = created?.id;
 
-    const cj = await cr.json().catch(() => ({}));
-    if (!cr.ok) return res.status(500).json({ ok: false, error: "CREATOMATE_RENDER_CREATE_FAILED", detail: cj });
+    // poll until done (up to ~70s)
+    let finalUrl = created?.url || created?.result_url || null;
+    let status = created?.status || "processing";
 
-    // Creatomate typically returns an array or object depending on endpoint response
-    const first = Array.isArray(cj) ? cj[0] : cj;
-    return res.status(200).json({
-      ok: true,
-      renderId: first?.id || null,
-      status: first?.status || "processing",
-      url: first?.url || first?.result_url || null,
-      detail: first,
-    });
+    for (let i = 0; i < 14; i++) {
+      if (status === "succeeded" && finalUrl) break;
+      if (status === "failed") break;
+      await sleep(5000);
+      const latest = await creatomateGetRender(renderId);
+      status = latest?.status || status;
+      finalUrl = latest?.url || latest?.result_url || finalUrl;
+    }
+
+    if (status !== "succeeded" || !finalUrl) {
+      await sb.from("renders").update({
+        caption_status: "failed",
+        caption_error: `CREATOMATE_${status || "UNKNOWN"}`,
+      }).eq("id", dbId);
+
+      return res.status(200).json({ ok: false, error: "CAPTION_RENDER_NOT_READY", status, renderId });
+    }
+
+    await sb.from("renders").update({
+      caption_status: "completed",
+      caption_error: null,
+      captioned_video_url: finalUrl,
+    }).eq("id", dbId);
+
+    return res.status(200).json({ ok: true, status: "completed", renderId, url: finalUrl });
   } catch (e) {
     return res.status(500).json({ ok: false, error: "SERVER_ERROR", message: String(e?.message || e) });
   }
