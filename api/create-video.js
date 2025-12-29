@@ -85,7 +85,7 @@ const KREA_JOB_URL_BASE = process.env.KREA_JOB_URL_BASE || "https://api.krea.ai/
 const KREA_STYLE_ID = (process.env.KREA_STYLE_ID || "tvjlqsab9").trim();
 const KREA_STYLE_STRENGTH = Number(process.env.KREA_STYLE_STRENGTH || 0.85);
 
-// ✅ Krea retry/poll tuning (NEW)
+// ✅ Krea retry/poll tuning
 const KREA_PER_BEAT_RETRIES = Number(process.env.KREA_PER_BEAT_RETRIES || 2);
 const KREA_POLL_TRIES = Number(process.env.KREA_POLL_TRIES || 90);
 const KREA_POLL_DELAY_MS = Number(process.env.KREA_POLL_DELAY_MS || 2500);
@@ -268,7 +268,7 @@ Narration line:
   return out || text;
 }
 
-// ---------- Krea (UPDATED: style -> fallback to no-style + better logs) ----------
+// ---------- Krea (style -> fallback to no-style + logs) ----------
 function shortPrompt(p) {
   const s = String(p || "").replace(/\s+/g, " ").trim();
   return s.length > 180 ? s.slice(0, 180) + "..." : s;
@@ -425,119 +425,38 @@ function buildVariantSequence(beatCount) {
   return seq;
 }
 
-// -------------------- CAPTIONS + STYLES (NEW) --------------------
-// Styles are applied to the `Captions` layer in Creatomate.
-// JSON is injected into `Captions_JSON.text`.
+// ---------- Captions (Creatomate layer toggles) ----------
+// Your template screenshot shows: "Subtitles-1" and "Video-DHM".
+// Best practice: duplicate Subtitles-1 into 3 layers:
+// - Subtitles_Sentence
+// - Subtitles_Karaoke
+// - Subtitles_Word
+//
+// This function supports BOTH setups:
+// - If you only have Subtitles-1: we keep it visible always.
+// - If you have the 3-layer setup: we toggle visibility based on captionStyle.
+function subtitleVisibilityMods(captionStyle) {
+  const style = String(captionStyle || "sentence").toLowerCase();
 
-const CAPTION_PRESETS = {
-  sentence: {
-    mode: "sentence",
-    mods: {
-      "Captions.font_family": "Inter",
-      "Captions.font_size": 56,
-      "Captions.font_weight": 900,
-      "Captions.fill_color": "#FFFFFF",
-      "Captions.stroke_color": "#000000",
-      "Captions.stroke_width": 10,
-    },
-  },
-  subtitle: {
-    mode: "sentence",
-    mods: {
-      "Captions.font_family": "Inter",
-      "Captions.font_size": 52,
-      "Captions.font_weight": 800,
-      "Captions.fill_color": "#FFFFFF",
-      "Captions.stroke_color": "#000000",
-      "Captions.stroke_width": 0,
-      // If your Captions layer supports these, keep them. If not, Creatomate ignores unknown props.
-      "Captions.background_color": "rgba(0,0,0,0.55)",
-      "Captions.padding": 20,
-      "Captions.border_radius": 18,
-    },
-  },
-  word: {
-    mode: "word",
-    mods: {
-      "Captions.font_family": "Inter",
-      "Captions.font_size": 72,
-      "Captions.font_weight": 900,
-      "Captions.fill_color": "#FFFFFF",
-      "Captions.stroke_color": "#000000",
-      "Captions.stroke_width": 12,
-    },
-  },
-  karaoke: {
-    // default render still uses beat timing, later you’ll swap to true word timings from /api/transcribe
-    mode: "word",
-    mods: {
-      "Captions.font_family": "Inter",
-      "Captions.font_size": 68,
-      "Captions.font_weight": 900,
-      "Captions.fill_color": "#FFFFFF",
-      "Captions.stroke_color": "#000000",
-      "Captions.stroke_width": 10,
-    },
-  },
-};
+  // 3-layer setup (recommended)
+  const threeLayer = {
+    "Subtitles_Sentence.visible": false,
+    "Subtitles_Karaoke.visible": false,
+    "Subtitles_Word.visible": false,
+  };
 
-function pickCaptionPresetKey(input) {
-  const k = String(input || "").trim().toLowerCase();
-  if (CAPTION_PRESETS[k]) return k;
-  return "sentence";
-}
+  if (style === "word") threeLayer["Subtitles_Word.visible"] = true;
+  else if (style === "karaoke") threeLayer["Subtitles_Karaoke.visible"] = true;
+  else threeLayer["Subtitles_Sentence.visible"] = true; // default
 
-function chunkWordsToLines(text, maxWordsPerLine = 6, maxLines = 2) {
-  const words = String(text || "").trim().split(/\s+/).filter(Boolean);
-  if (!words.length) return "";
-  const lines = [];
-  for (let i = 0; i < words.length; i += maxWordsPerLine) {
-    lines.push(words.slice(i, i + maxWordsPerLine).join(" "));
-    if (lines.length >= maxLines) break;
-  }
-  return lines.join("\n");
-}
+  // single-layer fallback (your current screenshot name)
+  // If you haven't duplicated layers yet, this makes sure captions still show.
+  const singleLayerFallback = {
+    "Subtitles-1.visible": true,
+  };
 
-function buildDefaultCaptionsJson({ mode, beatTexts, timing }) {
-  // Creatomate-friendly default schema:
-  // { captions: [ { start, end, text } ] }
-  // - sentence mode: one caption per beat
-  // - word mode: splits each beat into word chunks (approx timing)
-
-  const captions = [];
-
-  for (let i = 0; i < beatTexts.length; i++) {
-    const raw = String(beatTexts[i] || "").trim();
-    if (!raw) continue;
-
-    const start = Number(timing.starts[i] || 0);
-    const dur = Number(timing.durations[i] || 0);
-    const end = start + dur;
-
-    if (mode === "word") {
-      const words = raw.split(/\s+/).filter(Boolean);
-      const n = Math.max(1, words.length);
-      const per = dur / n;
-
-      for (let w = 0; w < words.length; w++) {
-        const ws = start + per * w;
-        const we = w === words.length - 1 ? end : start + per * (w + 1);
-        captions.push({
-          start: Number(ws.toFixed(3)),
-          end: Number(we.toFixed(3)),
-          text: words[w],
-        });
-      }
-    } else {
-      captions.push({
-        start: Number(start.toFixed(3)),
-        end: Number(end.toFixed(3)),
-        text: chunkWordsToLines(raw, 6, 2),
-      });
-    }
-  }
-
-  return JSON.stringify({ captions });
+  // We include BOTH. Extra keys won't break anything if the layer doesn't exist.
+  return { ...threeLayer, ...singleLayerFallback };
 }
 
 // -------------------- MAIN --------------------
@@ -565,8 +484,9 @@ module.exports = async function handler(req, res) {
       customPrompt = "",
       durationRange = "60-90",
 
-      // NEW: caption style choice from Webflow
-      captionStyle = "sentence", // sentence | subtitle | word | karaoke
+      // ✅ NEW: caption style from Webflow
+      // "sentence" | "karaoke" | "word"
+      captionStyle = "sentence",
     } = body;
 
     if (!process.env.CREATOMATE_API_KEY) return res.status(500).json({ error: "MISSING_CREATOMATE_API_KEY" });
@@ -580,23 +500,7 @@ module.exports = async function handler(req, res) {
     const template_id = (templateMap[aspectRatio] || "").trim();
     if (!template_id) return res.status(400).json({ error: "NO_TEMPLATE_FOR_ASPECT", aspectRatio });
 
-    // Optional audio-only template (recommended)
-    // If you don't have one, you can reuse template_id and still output mp3.
-    const audio_template_id = (process.env.CREATO_AUDIO_TEMPLATE || "").trim() || template_id;
-
-    const presetKey = pickCaptionPresetKey(captionStyle);
-    const preset = CAPTION_PRESETS[presetKey];
-
-    const choices = {
-      storyType,
-      artStyle,
-      language,
-      voice,
-      aspectRatio,
-      customPrompt,
-      durationRange,
-      captionStyle: presetKey,
-    };
+    const choices = { storyType, artStyle, language, voice, aspectRatio, customPrompt, durationRange, captionStyle };
 
     // ✅ Create DB row first
     const { data: row, error: insErr } = await supabase
@@ -609,11 +513,6 @@ module.exports = async function handler(req, res) {
           render_id: "",
           choices,
           error: null,
-
-          // these are safe if the columns exist; if they don't, Supabase will throw.
-          // If your table doesn't have them, remove these two lines:
-          caption_status: "rendering",
-          caption_error: null,
         },
       ])
       .select("id")
@@ -662,14 +561,9 @@ module.exports = async function handler(req, res) {
 
     const variantSequence = buildVariantSequence(beatCount);
 
-    // NEW: default captions JSON for first render
-    const captionsJsonText = buildDefaultCaptionsJson({
-      mode: preset.mode, // sentence or word
-      beatTexts,
-      timing,
-    });
-
-    // Creatomate mods (VIDEO)
+    // Creatomate mods
+    // ✅ IMPORTANT: We are NOT writing subtitle text directly.
+    // Creatomate "Subtitles-1" should auto-transcribe from your video layer (Video-DHM).
     const mods = {
       Narration: narration,
       VoiceLabel: voice,
@@ -678,15 +572,9 @@ module.exports = async function handler(req, res) {
       Voiceover: narration,
       VoiceUrl: null,
 
-      // ✅ Default captions on FIRST render
-      "Captions_JSON.text": captionsJsonText,
-
-      // helpful debug label if you have it in template (optional)
-      CaptionStyleLabel: presetKey,
+      // ✅ caption style selection (layer visibility toggles)
+      ...subtitleVisibilityMods(captionStyle),
     };
-
-    // Apply style mods to the Captions layer
-    Object.assign(mods, preset.mods);
 
     for (let i = 1; i <= beatCount; i++) {
       const start = timing.starts[i - 1];
@@ -711,8 +599,6 @@ module.exports = async function handler(req, res) {
     let lastGood = "";
     for (let i = 1; i <= beatCount; i++) {
       const raw = imageUrls[i - 1] || "";
-
-      // If Krea didn't return anything, keep lastGood so you don't get a blank scene.
       let proxied = raw ? `${publicBaseUrl}/api/krea-image?url=${encodeURIComponent(raw)}` : "";
       if (!proxied && lastGood) proxied = lastGood;
       if (proxied) lastGood = proxied;
@@ -724,75 +610,34 @@ module.exports = async function handler(req, res) {
       }
     }
 
-    // ✅ VIDEO render payload
-    const payloadVideo = {
+    // ✅ KEY: include webhook_url so Supabase gets video_url
+    const payload = {
       template_id,
       modifications: mods,
       output_format: "mp4",
       webhook_url: `${publicBaseUrl}/api/creatomate-webhook`,
     };
 
-    const respVideo = await postJSON(
+    const resp = await postJSON(
       "https://api.creatomate.com/v1/renders",
       { Authorization: `Bearer ${process.env.CREATOMATE_API_KEY}` },
-      payloadVideo
+      payload
     );
 
-    if (respVideo.status !== 202 && respVideo.status !== 200) {
-      await supabase.from("renders").update({ status: "failed", error: JSON.stringify(respVideo.json) }).eq("id", db_id);
-      return res.status(respVideo.status).json({ error: "CREATOMATE_ERROR", details: respVideo.json });
+    if (resp.status !== 202 && resp.status !== 200) {
+      await supabase.from("renders").update({ status: "failed", error: JSON.stringify(resp.json) }).eq("id", db_id);
+      return res.status(resp.status).json({ error: "CREATOMATE_ERROR", details: resp.json });
     }
 
-    const job_id = Array.isArray(respVideo.json) ? respVideo.json[0]?.id : respVideo.json?.id;
+    const job_id = Array.isArray(resp.json) ? resp.json[0]?.id : resp.json?.id;
     if (!job_id) {
       await supabase.from("renders").update({ status: "failed", error: "NO_JOB_ID" }).eq("id", db_id);
-      return res.status(502).json({ error: "NO_JOB_ID_IN_RESPONSE", details: respVideo.json });
+      return res.status(502).json({ error: "NO_JOB_ID_IN_RESPONSE", details: resp.json });
     }
 
-    // store main video render id
     await supabase.from("renders").update({ render_id: String(job_id) }).eq("id", db_id);
 
-    // -------------------- OPTIONAL: AUDIO mp3 render (kept) --------------------
-    // This creates an mp3 URL later, so /api/transcribe can fetch it for word timings.
-    // If you don't need it yet, you can delete this whole block.
-    const payloadAudio = {
-      template_id: audio_template_id,
-      modifications: {
-        Voiceover: narration,
-        VoiceLabel: voice,
-        LanguageLabel: language,
-      },
-      output_format: "mp3",
-      webhook_url: `${publicBaseUrl}/api/creatomate-webhook`,
-    };
-
-    const respAudio = await postJSON(
-      "https://api.creatomate.com/v1/renders",
-      { Authorization: `Bearer ${process.env.CREATOMATE_API_KEY}` },
-      payloadAudio
-    );
-
-    let audio_job_id = null;
-    if (respAudio.status === 202 || respAudio.status === 200) {
-      audio_job_id = Array.isArray(respAudio.json) ? respAudio.json[0]?.id : respAudio.json?.id;
-    } else {
-      console.error("[AUDIO_RENDER] Creatomate error", respAudio.status, respAudio.json);
-    }
-
-    // Store audio render id in choices (debug friendly)
-    if (audio_job_id) {
-      const { data: cur } = await supabase.from("renders").select("choices").eq("id", db_id).maybeSingle();
-      const mergedChoices = { ...(cur?.choices || choices), audio_render_id: String(audio_job_id) };
-      await supabase.from("renders").update({ choices: mergedChoices }).eq("id", db_id);
-    }
-
-    return res.status(200).json({
-      ok: true,
-      job_id,
-      db_id,
-      audio_job_id: audio_job_id || null,
-      captionStyle: presetKey,
-    });
+    return res.status(200).json({ ok: true, job_id, db_id, captionStyle });
   } catch (err) {
     const msg = String(err?.message || err);
     if (msg.includes("MISSING_AUTH") || msg.includes("MEMBERSTACK") || msg.includes("INVALID_MEMBER")) {
