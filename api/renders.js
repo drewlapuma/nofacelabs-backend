@@ -1,7 +1,7 @@
 // api/renders.js (CommonJS)
 // GET  /api/renders             => list
-// GET  /api/renders?id=<uuid>   => single (lazy polls Creatomate caption render OR Submagic)
-// POST /api/renders             => { action:"captions-start" } (Submagic) OR { action:"captions-apply" } (Creatomate captions)
+// GET  /api/renders?id=<uuid>   => single (lazy-polls Creatomate/Submagic when captioning)
+// POST /api/renders             => captions-start (Submagic) OR captions-apply (Creatomate)
 
 const https = require("https");
 const { requireMemberId } = require("./_lib/auth");
@@ -14,13 +14,19 @@ const SUBMAGIC_BASE = "https://api.submagic.co/v1";
 // ---------------- Creatomate captions ----------------
 const CREATOMATE_API_KEY = (process.env.CREATOMATE_API_KEY || "").trim();
 
-// ✅ Your captions template (9:16) — you gave this
-const FORCE_CAPTIONS_TEMPLATE_916 = "f956ac82-b070-4fc7-9056-78bea778a301";
+// ✅ Your template id (hardcoded as requested)
+const CREATO_CAPTIONS_TEMPLATE_916 = "f956ac82-b070-4fc7-9056-78bea778a301";
 
-// Optional env-based templates (if you want to support 1:1 and 16:9 later)
-const CREATO_CAPTIONS_TEMPLATE_916 = (process.env.CREATO_CAPTIONS_TEMPLATE_916 || "").trim();
+// If you later add 1:1 and 16:9, set env vars and this will use them automatically:
 const CREATO_CAPTIONS_TEMPLATE_11 = (process.env.CREATO_CAPTIONS_TEMPLATE_11 || "").trim();
 const CREATO_CAPTIONS_TEMPLATE_169 = (process.env.CREATO_CAPTIONS_TEMPLATE_169 || "").trim();
+
+// ✅ IMPORTANT: The element id you pasted (we can at least blank it out so it stops showing "Your text here")
+const CREATO_CAPTIONS_JSON_ELEMENT_ID =
+  "a06990b5-eb94-4792-984a-2fdf21c29407"; // Captions_JSON.text
+
+// ✅ Your video element name from the template
+const CREATO_VIDEO_ELEMENT_ID = "Video-DHM"; // Video-DHM.source
 
 // ---------------- CORS ----------------
 const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || "*")
@@ -68,19 +74,20 @@ function normStatus(s) {
 
 function pickCaptionsTemplateIdByAspect(aspectRatio) {
   const ar = String(aspectRatio || "").trim();
-
-  // ✅ force 9:16 to your known-good template id
-  if (ar === "9:16") return FORCE_CAPTIONS_TEMPLATE_916;
-
-  // optional support if you set these envs:
-  if (ar === "1:1") return CREATO_CAPTIONS_TEMPLATE_11 || FORCE_CAPTIONS_TEMPLATE_916;
-  if (ar === "16:9") return CREATO_CAPTIONS_TEMPLATE_169 || FORCE_CAPTIONS_TEMPLATE_916;
-
-  // fallback
-  return CREATO_CAPTIONS_TEMPLATE_916 || FORCE_CAPTIONS_TEMPLATE_916;
+  if (ar === "1:1" && CREATO_CAPTIONS_TEMPLATE_11) return CREATO_CAPTIONS_TEMPLATE_11;
+  if (ar === "16:9" && CREATO_CAPTIONS_TEMPLATE_169) return CREATO_CAPTIONS_TEMPLATE_169;
+  return CREATO_CAPTIONS_TEMPLATE_916;
 }
 
-// --- HTTPS JSON helper (Creatomate POST) ---
+function buildWebhookUrl(req, dbId) {
+  // You MUST set PUBLIC_BASE_URL in Vercel to your backend URL:
+  // e.g. https://nofacelabs-backend.vercel.app
+  const base = (process.env.PUBLIC_BASE_URL || "").trim();
+  if (!base) return "";
+  return `${base}/api/creatomate-webhook?id=${encodeURIComponent(dbId)}`;
+}
+
+// --- HTTPS JSON helper ---
 function postJSON(url, headers, bodyObj) {
   return new Promise((resolve, reject) => {
     const u = new URL(url);
@@ -117,22 +124,14 @@ function postJSON(url, headers, bodyObj) {
   });
 }
 
-// ---------------- Submagic helpers ----------------
+// ---------------- Submagic functions (kept) ----------------
 async function smCreateProject({ templateName, videoUrl, title, language = "en" }) {
   if (!SUBMAGIC_API_KEY) throw new Error("MISSING_SUBMAGIC_API_KEY");
 
   const r = await fetch(`${SUBMAGIC_BASE}/projects`, {
     method: "POST",
-    headers: {
-      "x-api-key": SUBMAGIC_API_KEY,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      title,
-      language,
-      videoUrl,
-      templateName: templateName || undefined,
-    }),
+    headers: { "x-api-key": SUBMAGIC_API_KEY, "Content-Type": "application/json" },
+    body: JSON.stringify({ title, language, videoUrl, templateName: templateName || undefined }),
   });
 
   const j = await r.json().catch(() => ({}));
@@ -170,7 +169,9 @@ function extractCreatomateOutputUrl(renderObj) {
     renderObj?.output ||
     renderObj?.url ||
     renderObj?.video_url ||
-    (Array.isArray(renderObj?.outputs) ? (renderObj.outputs[0]?.url || renderObj.outputs[0]?.output) : null) ||
+    (Array.isArray(renderObj?.outputs)
+      ? (renderObj.outputs[0]?.url || renderObj.outputs[0]?.output)
+      : null) ||
     null
   );
 }
@@ -181,9 +182,6 @@ module.exports = async function handler(req, res) {
     if (req.method === "OPTIONS") return res.status(204).end();
 
     const sb = getAdminSupabase();
-
-    // This must be publicly reachable for Creatomate webhooks
-    const publicBaseUrl = (process.env.API_BASE || "").trim() || `https://${req.headers.host}`;
 
     // ---------------- GET ----------------
     if (req.method === "GET") {
@@ -202,22 +200,22 @@ module.exports = async function handler(req, res) {
 
           if (error || !data) return res.status(404).json({ ok: false, error: "NOT_FOUND" });
 
-          // ✅ LAZY POLL (1): Creatomate caption render (if caption_render_id exists)
+          // ✅ LAZY POLL (Creatomate captions)
           try {
             const capStatus = String(data.caption_status || "").toLowerCase();
             const isCaptioning =
               capStatus === "captioning" || capStatus === "processing" || capStatus === "queued" || capStatus === "rendering";
 
             const captionRenderId =
-              String(data.caption_render_id || "").trim() ||
-              String(data?.choices?.caption_render_id || "").trim();
+              String(data.caption_render_id || "") ||
+              String(data?.choices?.caption_render_id || "");
 
             if (captionRenderId && !data.captioned_video_url && isCaptioning) {
               const rObj = await creatomateGetRender(captionRenderId);
               const rStatus = normStatus(rObj?.status || "");
               const outUrl = extractCreatomateOutputUrl(rObj);
 
-              if (outUrl && rStatus === "completed") {
+              if (outUrl && (rStatus === "completed")) {
                 const { data: updated } = await sb
                   .from("renders")
                   .update({
@@ -238,20 +236,17 @@ module.exports = async function handler(req, res) {
           } catch (pollCapErr) {
             await sb
               .from("renders")
-              .update({
-                caption_status: "failed",
-                caption_error: String(pollCapErr?.message || pollCapErr),
-              })
+              .update({ caption_status: "failed", caption_error: String(pollCapErr?.message || pollCapErr) })
               .eq("id", data.id);
-
             data.caption_status = "failed";
             data.caption_error = String(pollCapErr?.message || pollCapErr);
           }
 
-          // ✅ LAZY POLL (2): Submagic (backward compatibility)
+          // ✅ LAZY POLL (Submagic kept)
           try {
             const capStatus2 = String(data.caption_status || "").toLowerCase();
-            const isCaptioning2 = capStatus2 === "captioning" || capStatus2 === "processing" || capStatus2 === "queued";
+            const isCaptioning2 =
+              capStatus2 === "captioning" || capStatus2 === "processing" || capStatus2 === "queued";
 
             if (data.submagic_project_id && !data.captioned_video_url && isCaptioning2) {
               const proj = await smGetProject(data.submagic_project_id);
@@ -278,12 +273,8 @@ module.exports = async function handler(req, res) {
           } catch (pollErr) {
             await sb
               .from("renders")
-              .update({
-                caption_status: "failed",
-                caption_error: String(pollErr?.message || pollErr),
-              })
+              .update({ caption_status: "failed", caption_error: String(pollErr?.message || pollErr) })
               .eq("id", data.id);
-
             data.caption_status = "failed";
             data.caption_error = String(pollErr?.message || pollErr);
           }
@@ -310,7 +301,6 @@ module.exports = async function handler(req, res) {
     if (req.method === "POST") {
       try {
         const member_id = await requireMemberId(req);
-
         const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : req.body || {};
         const action = String(body?.action || "").trim();
 
@@ -334,64 +324,40 @@ module.exports = async function handler(req, res) {
           if (!row.video_url) return res.status(400).json({ ok: false, error: "VIDEO_NOT_READY" });
 
           if (row.captioned_video_url) {
-            return res.status(200).json({
-              ok: true,
-              already: true,
-              status: "completed",
-              captioned_video_url: row.captioned_video_url,
-            });
+            return res.status(200).json({ ok: true, already: true, status: "completed", captioned_video_url: row.captioned_video_url });
           }
 
           if (row.submagic_project_id) {
-            return res.status(200).json({
-              ok: true,
-              already: true,
-              projectId: row.submagic_project_id,
-              status: row.caption_status || "captioning",
-            });
+            return res.status(200).json({ ok: true, already: true, projectId: row.submagic_project_id, status: row.caption_status || "captioning" });
           }
 
           await sb
             .from("renders")
-            .update({
-              caption_status: "captioning",
-              caption_error: null,
-              caption_template_id: templateName || null,
-            })
+            .update({ caption_status: "captioning", caption_error: null, caption_template_id: templateName || null })
             .eq("id", row.id);
 
           const title = row?.choices?.storyType || row?.choices?.customPrompt || "NofaceLabs Video";
-
-          const created = await smCreateProject({
-            templateName,
-            videoUrl: row.video_url,
-            title,
-            language: "en",
-          });
+          const created = await smCreateProject({ templateName, videoUrl: row.video_url, title, language: "en" });
 
           const projectId = created?.id || created?.projectId || created?.project_id;
           if (!projectId) throw new Error("SUBMAGIC_NO_PROJECT_ID");
 
           await sb
             .from("renders")
-            .update({
-              submagic_project_id: String(projectId),
-              caption_status: String(created?.status || "captioning"),
-              caption_error: null,
-            })
+            .update({ submagic_project_id: String(projectId), caption_status: String(created?.status || "captioning"), caption_error: null })
             .eq("id", row.id);
 
           return res.status(200).json({ ok: true, already: false, projectId: String(projectId) });
         }
 
         // =========================================================
-        // ACTION 2: captions-apply (Creatomate captions render)
+        // ACTION 2: captions-apply (Creatomate) ✅ FIXED
         // =========================================================
         if (action === "captions-apply") {
           const id = String(body?.id || "").trim();
           if (!id) return res.status(400).json({ ok: false, error: "MISSING_ID" });
 
-          const style = String(body?.style || "").trim() || "sentence"; // sentence|highlight|karaoke|word
+          const style = String(body?.style || "").trim().toLowerCase() || "sentence"; // sentence|karaoke|word
           if (!CREATOMATE_API_KEY) return res.status(500).json({ ok: false, error: "MISSING_CREATOMATE_API_KEY" });
 
           const { data: row, error } = await sb
@@ -404,56 +370,56 @@ module.exports = async function handler(req, res) {
           if (error || !row) return res.status(404).json({ ok: false, error: "NOT_FOUND" });
           if (!row.video_url) return res.status(400).json({ ok: false, error: "VIDEO_NOT_READY" });
 
-          // If already captioned, return it
-          if (row.captioned_video_url) {
-            return res.status(200).json({
-              ok: true,
-              already: true,
-              status: row.caption_status || "completed",
-              captioned_video_url: row.captioned_video_url,
-            });
+          // ✅ Lock: if captioning already in progress, return existing render id (prevents "3 at once")
+          const existingRenderId =
+            String(row.caption_render_id || "") ||
+            String(row?.choices?.caption_render_id || "");
+          const rowCapStatus = String(row.caption_status || "").toLowerCase();
+
+          if (existingRenderId && (rowCapStatus === "captioning" || rowCapStatus === "queued" || rowCapStatus === "processing" || rowCapStatus === "rendering")) {
+            return res.status(200).json({ ok: true, already: true, caption_render_id: existingRenderId, status: "captioning" });
           }
 
-          // Determine template by aspect ratio (stored in choices)
+          // If already captioned, just return it
+          if (row.captioned_video_url) {
+            return res.status(200).json({ ok: true, already: true, status: row.caption_status || "completed", captioned_video_url: row.captioned_video_url });
+          }
+
           const aspectRatio = row?.choices?.aspectRatio || row?.choices?.aspect_ratio || "9:16";
           const template_id = pickCaptionsTemplateIdByAspect(aspectRatio);
 
           if (!template_id) {
-            return res.status(500).json({
-              ok: false,
-              error: "MISSING_CAPTIONS_TEMPLATE",
-              message: "Missing captions template id.",
-            });
+            return res.status(500).json({ ok: false, error: "MISSING_CAPTIONS_TEMPLATE" });
           }
 
-          // Mark captioning started (also store style so UI can show it)
+          // Mark captioning started (and clear previous caption output)
           await sb
             .from("renders")
             .update({
               caption_status: "captioning",
               caption_error: null,
+              captioned_video_url: null,
               caption_template_id: `creatomate:${template_id}`,
-              // If you have a caption_style column, keep it. If not, this is harmless.
-              caption_style: style,
+              // store style in choices so UI can show it
+              choices: { ...(row.choices || {}), caption_style: style, captionStyle: style },
             })
             .eq("id", row.id);
 
-          // IMPORTANT:
-          // These IDs MUST match your Creatomate captions template element IDs.
-          // From your screenshot: "Subtitles-1" and "Video-DHM"
+          // ✅ Fix: force-remove the "Your text here" layer by blanking that element
+          // (If later you want to drive it with JSON subtitles, set it to the JSON string instead.)
           const mods = {
-            "Video-DHM.source": String(row.video_url),
-
-            // Optional: if you add a dynamic text/layer to drive style, you can pass it here
-            // "CaptionStyle.text": style,
+            [`${CREATO_VIDEO_ELEMENT_ID}.source`]: String(row.video_url),
+            [`${CREATO_CAPTIONS_JSON_ELEMENT_ID}.text`]: "", // removes placeholder text
           };
 
-          // Kick off a Creatomate render (mp4) + webhook that updates the SAME row
+          // ✅ Webhook so DB updates when finished
+          const webhook_url = buildWebhookUrl(req, row.id);
+
           const payload = {
             template_id,
             modifications: mods,
             output_format: "mp4",
-            webhook_url: `${publicBaseUrl}/api/creatomate-webhook?db_id=${encodeURIComponent(row.id)}&kind=captions`,
+            ...(webhook_url ? { webhook_url } : {}),
           };
 
           const resp = await postJSON(
@@ -462,51 +428,32 @@ module.exports = async function handler(req, res) {
             payload
           );
 
-          if (resp.status !== 202 && resp.status !== 200) {
-            await sb
-              .from("renders")
-              .update({
-                caption_status: "failed",
-                caption_error: JSON.stringify(resp.json),
-              })
-              .eq("id", row.id);
+          // Creatomate often returns an ARRAY for bulk renders
+          const created = Array.isArray(resp.json) ? resp.json[0] : resp.json;
 
+          if (resp.status !== 202 && resp.status !== 200) {
+            await sb.from("renders").update({ caption_status: "failed", caption_error: JSON.stringify(resp.json) }).eq("id", row.id);
             return res.status(resp.status).json({ ok: false, error: "CREATOMATE_ERROR", details: resp.json });
           }
 
-          const caption_render_id = Array.isArray(resp.json) ? resp.json[0]?.id : resp.json?.id;
+          const caption_render_id = created?.id;
           if (!caption_render_id) {
-            await sb
-              .from("renders")
-              .update({
-                caption_status: "failed",
-                caption_error: "NO_CAPTION_RENDER_ID",
-              })
-              .eq("id", row.id);
-
+            await sb.from("renders").update({ caption_status: "failed", caption_error: "NO_CAPTION_RENDER_ID" }).eq("id", row.id);
             return res.status(502).json({ ok: false, error: "NO_CAPTION_RENDER_ID", details: resp.json });
           }
 
-          // Store caption render id (column if present; fallback to choices)
+          // Store render id
+          // (If you don't have a column, this still works because we also store in choices)
           try {
             await sb
               .from("renders")
-              .update({
-                caption_render_id: String(caption_render_id),
-                caption_status: "captioning",
-                caption_error: null,
-              })
+              .update({ caption_render_id: String(caption_render_id), caption_status: "captioning", caption_error: null })
               .eq("id", row.id);
           } catch {
-            const merged = {
-              ...(row.choices || {}),
-              caption_render_id: String(caption_render_id),
-              caption_style: style,
-            };
             await sb
               .from("renders")
               .update({
-                choices: merged,
+                choices: { ...(row.choices || {}), caption_render_id: String(caption_render_id), caption_style: style, captionStyle: style },
                 caption_status: "captioning",
                 caption_error: null,
               })
@@ -518,6 +465,7 @@ module.exports = async function handler(req, res) {
             already: false,
             caption_render_id: String(caption_render_id),
             status: "captioning",
+            webhook: !!webhook_url,
           });
         }
 
