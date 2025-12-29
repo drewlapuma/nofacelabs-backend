@@ -1,123 +1,96 @@
 // api/creatomate-webhook.js
+// Creatomate calls this after a render finishes.
+// We use ?id=<renders.id> to know which DB row to update.
+
 const { getAdminSupabase } = require("./_lib/supabase");
 
-// Safely read webhook body (Creatomate may send array)
-function normalizeBody(raw) {
-  const body = typeof raw === "string" ? JSON.parse(raw || "{}") : (raw || {});
-  return Array.isArray(body) ? (body[0] || {}) : body;
+const CREATOMATE_API_KEY = (process.env.CREATOMATE_API_KEY || "").trim();
+
+async function creatomateGetRender(renderId) {
+  if (!CREATOMATE_API_KEY) throw new Error("MISSING_CREATOMATE_API_KEY");
+
+  const r = await fetch(`https://api.creatomate.com/v1/renders/${encodeURIComponent(renderId)}`, {
+    headers: { Authorization: `Bearer ${CREATOMATE_API_KEY}` },
+  });
+
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j?.message || j?.error || `CREATOMATE_GET_FAILED (${r.status})`);
+  return j;
 }
 
-// Creatomate output can appear in multiple shapes
-function extractOutputUrl(body) {
+function extractOutputUrl(renderObj) {
   return (
-    body?.output ||
-    body?.url ||
-    body?.video_url ||
-    (Array.isArray(body?.outputs) ? (body.outputs[0]?.url || body.outputs[0]?.output) : null) ||
+    renderObj?.output ||
+    renderObj?.url ||
+    renderObj?.video_url ||
+    (Array.isArray(renderObj?.outputs) ? (renderObj.outputs[0]?.url || renderObj.outputs[0]?.output) : null) ||
     null
   );
 }
 
+function normStatus(s) {
+  const x = String(s || "").toLowerCase();
+  if (!x) return "";
+  if (x.includes("succeed") || x.includes("complete") || x === "done") return "completed";
+  if (x.includes("fail") || x.includes("error")) return "failed";
+  if (x.includes("queue") || x.includes("process") || x.includes("render")) return "captioning";
+  return x;
+}
+
 module.exports = async function handler(req, res) {
-  // Creatomate may hit OPTIONS sometimes
+  // Creatomate expects 200 quickly
   if (req.method === "OPTIONS") return res.status(200).end();
-  if (req.method !== "POST") return res.status(405).json({ error: "METHOD_NOT_ALLOWED" });
+  if (req.method !== "POST") return res.status(405).json({ ok: false, error: "METHOD_NOT_ALLOWED" });
+
+  const dbId = String(req.query?.id || "").trim();
+  if (!dbId) return res.status(400).json({ ok: false, error: "MISSING_DB_ID" });
+
+  const sb = getAdminSupabase();
 
   try {
-    const sb = getAdminSupabase();
+    // Creatomate webhook body usually includes render id
+    const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {});
+    const renderId = String(body?.id || body?.render_id || "").trim();
 
-    const q = req.query || {};
-    const db_id = String(q.db_id || "").trim();       // passed from webhook_url querystring
-    const kind = String(q.kind || "video").trim();    // "video" or "audio"
-
-    const body = normalizeBody(req.body);
-
-    const render_id = String(body?.id || body?.render_id || "").trim();
-    const statusRaw = String(body?.status || "").toLowerCase();
-    const outputUrl = extractOutputUrl(body);
-
-    if (!render_id) return res.status(400).json({ error: "MISSING_RENDER_ID" });
-
-    // Build update payload
-    const update = {};
-    if (statusRaw) update.status = statusRaw;
-
-    // If this webhook is for the VIDEO render, save video_url + render_id (the main job)
-    if (kind === "video") {
-      if (outputUrl) update.video_url = outputUrl;
-      // Only set render_id if you’re using render_id as “main video render”
-      update.render_id = render_id;
-
-      // If you want captions to be "not_started" by default when video is ready:
-      if (statusRaw === "succeeded" && outputUrl) {
-        update.caption_status = "not_started";
-        update.caption_error = null;
-      }
+    // If webhook didn't include it, try to fetch row and read caption_render_id
+    let finalRenderId = renderId;
+    if (!finalRenderId) {
+      const { data: row } = await sb.from("renders").select("caption_render_id, choices").eq("id", dbId).single();
+      finalRenderId = String(row?.caption_render_id || row?.choices?.caption_render_id || "").trim();
     }
 
-    // If this webhook is for the AUDIO render, store into choices.audio_url
-    // (since you said you don’t store audio elsewhere)
-    let choicesPatch = null;
-    if (kind === "audio" && outputUrl) {
-      // We need the row first so we can merge choices cleanly
-      let row = null;
-      if (db_id) {
-        const { data } = await sb.from("renders").select("id, choices").eq("id", db_id).maybeSingle();
-        row = data || null;
-      } else {
-        // fallback: try match by render_id (less reliable if render_id is the VIDEO id)
-        const { data } = await sb.from("renders").select("id, choices").eq("render_id", render_id).maybeSingle();
-        row = data || null;
-      }
-
-      if (row?.id) {
-        const currentChoices = row.choices || {};
-        choicesPatch = {
-          ...currentChoices,
-          audio_url: outputUrl,
-          audio_render_id: render_id,
-        };
-
-        // update choices on the same row
-        const { error: updChoicesErr } = await sb
-          .from("renders")
-          .update({ choices: choicesPatch })
-          .eq("id", row.id);
-
-        if (updChoicesErr) {
-          console.error("[WEBHOOK] choices update error", updChoicesErr);
-          // still continue; we can also update the video part below if needed
-        }
-      }
+    if (!finalRenderId) {
+      // still return 200 so they don't spam
+      await sb.from("renders").update({ caption_status: "failed", caption_error: "WEBHOOK_NO_RENDER_ID" }).eq("id", dbId);
+      return res.status(200).json({ ok: true });
     }
 
-    // Apply the main update:
-    // Prefer db_id if provided, otherwise fall back to render_id match
-    let updErr = null;
-    if (db_id) {
-      const { error } = await sb.from("renders").update(update).eq("id", db_id);
-      updErr = error;
+    const rObj = await creatomateGetRender(finalRenderId);
+    const status = normStatus(rObj?.status || "");
+    const outUrl = extractOutputUrl(rObj);
+
+    if (status === "completed" && outUrl) {
+      await sb.from("renders").update({
+        caption_status: "completed",
+        captioned_video_url: String(outUrl),
+        caption_error: null,
+      }).eq("id", dbId);
+    } else if (status === "failed") {
+      await sb.from("renders").update({
+        caption_status: "failed",
+        caption_error: JSON.stringify(rObj),
+      }).eq("id", dbId);
     } else {
-      const { error } = await sb.from("renders").update(update).eq("render_id", render_id);
-      updErr = error;
+      await sb.from("renders").update({ caption_status: status || "captioning" }).eq("id", dbId);
     }
 
-    if (updErr) {
-      console.error("[WEBHOOK] supabase update error", updErr);
-      return res.status(500).json({ error: "SUPABASE_UPDATE_FAILED" });
-    }
+    return res.status(200).json({ ok: true });
+  } catch (e) {
+    await sb.from("renders").update({
+      caption_status: "failed",
+      caption_error: String(e?.message || e),
+    }).eq("id", dbId);
 
-    return res.status(200).json({
-      ok: true,
-      kind,
-      render_id,
-      status: statusRaw || null,
-      outputUrl: outputUrl || null,
-      storedAudioInChoices: Boolean(kind === "audio" && outputUrl),
-    });
-  } catch (err) {
-    console.error("[WEBHOOK] error", err);
-    return res.status(500).json({ error: "SERVER_ERROR", message: String(err?.message || err) });
+    return res.status(200).json({ ok: true });
   }
 };
-
