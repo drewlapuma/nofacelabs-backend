@@ -405,11 +405,33 @@ module.exports = async function handler(req, res) {
             })
             .eq("id", row.id);
 
-          // ✅ Fix: force-remove the "Your text here" layer by blanking that element
-          // (If later you want to drive it with JSON subtitles, set it to the JSON string instead.)
-          const mods = {
-            [`${CREATO_VIDEO_ELEMENT_ID}.source`]: String(row.video_url),
-            [`${CREATO_CAPTIONS_JSON_ELEMENT_ID}.text`]: "", // removes placeholder text
+          // ===============================
+// Creatomate caption style switch
+// ===============================
+
+const mods = {
+  // Always set the video source
+  "Video-DHM.source": String(row.video_url),
+
+  // Default: hide all subtitle layers
+  "Subtitles_Sentence.visible": false,
+  "Subtitles_Karaoke.visible": false,
+  "Subtitles_Word.visible": false,
+};
+
+// Enable ONE layer based on style
+if (style === "sentence") {
+  mods["Subtitles_Sentence.visible"] = true;
+}
+
+if (style === "karaoke") {
+  mods["Subtitles_Karaoke.visible"] = true;
+}
+
+if (style === "word") {
+  mods["Subtitles_Word.visible"] = true;
+}
+
           };
 
           // ✅ Webhook so DB updates when finished
