@@ -1,13 +1,10 @@
 // api/creatomate-webhook.js
-// Creatomate calls this after a render finishes.
+// Requires: ?id=<renders.id>&kind=main  OR  ?id=<renders.id>&kind=caption
+// Updates:
+// - MAIN: status + video_url (+ render_id if missing)
+// - CAPTION: caption_status + captioned_video_url
 //
-// Query params:
-//   ?id=<renders.id>&kind=main
-//   ?id=<renders.id>&kind=caption
-//
-// IMPORTANT CHANGE:
-// - We DO NOT always return 200 anymore.
-// - If we cannot find/update the DB row, we return 404/500 so Creatomate retries.
+// IMPORTANT: Return non-200 when DB read/update fails so Creatomate retries.
 
 const { getAdminSupabase } = require("./_lib/supabase");
 
@@ -26,7 +23,6 @@ async function creatomateGetRender(renderId) {
 }
 
 function extractOutputUrl(obj) {
-  // Creatomate commonly uses "output" but we try several shapes.
   const fromOutputs =
     Array.isArray(obj?.outputs) && obj.outputs.length
       ? obj.outputs[0]?.url || obj.outputs[0]?.output
@@ -57,8 +53,6 @@ module.exports = async function handler(req, res) {
 
   const dbId = String(req.query?.id || "").trim();
   const kind = String(req.query?.kind || "").trim().toLowerCase(); // "main" | "caption"
-
-  // No id = nothing to do. Returning 200 is fine.
   if (!dbId) return res.status(200).json({ ok: true, skipped: "MISSING_DB_ID" });
 
   const sb = getAdminSupabase();
@@ -67,7 +61,6 @@ module.exports = async function handler(req, res) {
     const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {});
     const incomingRenderId = String(body?.id || body?.render_id || "").trim();
 
-    // LOG what we got so you can see it in Vercel logs
     console.log("[CREATOMATE_WEBHOOK] incoming", {
       dbId,
       kind,
@@ -77,66 +70,41 @@ module.exports = async function handler(req, res) {
       keys: Object.keys(body || {}),
     });
 
-    // Load DB row
+    // ✅ Only select columns that actually exist in your table
     const { data: row, error: readErr } = await sb
       .from("renders")
-      .select("id, render_id, status, video_url, caption_render_id, caption_status, captioned_video_url")
+      .select("id, render_id, status, video_url, caption_status, captioned_video_url")
       .eq("id", dbId)
       .single();
 
-    // ✅ IMPORTANT: if row isn't there, RETURN NON-200 so Creatomate retries
     if (readErr || !row) {
       console.warn("[CREATOMATE_WEBHOOK] row not found yet, will retry", { dbId, readErr });
       return res.status(404).json({ ok: false, error: "ROW_NOT_FOUND_RETRY" });
     }
 
     const mainId = String(row.render_id || "").trim();
-    const capId = String(row.caption_render_id || "").trim();
 
-    // Choose which render id to inspect
+    // Decide which render ID to fetch
     let renderIdToFetch = incomingRenderId;
-
+    if (!renderIdToFetch) renderIdToFetch = mainId;
     if (!renderIdToFetch) {
-      if (kind === "caption") renderIdToFetch = capId;
-      else renderIdToFetch = mainId;
-    }
-    if (!renderIdToFetch) renderIdToFetch = mainId || capId;
-
-    if (!renderIdToFetch) {
-      console.warn("[CREATOMATE_WEBHOOK] no render id to fetch", { dbId, kind, mainId, capId });
-      // Return 500 so it retries later (we need a render id)
+      console.warn("[CREATOMATE_WEBHOOK] missing render id, retry", { dbId, kind });
       return res.status(500).json({ ok: false, error: "MISSING_RENDER_ID_RETRY" });
     }
 
-    // Prefer Creatomate API for authoritative output/status,
-    // but if that fails, fallback to the webhook body.
+    // Get authoritative info (fallback to body if needed)
     let rObj = null;
     try {
       rObj = await creatomateGetRender(renderIdToFetch);
     } catch (e) {
-      console.warn("[CREATOMATE_WEBHOOK] creatomateGetRender failed, using body fallback", {
-        message: String(e?.message || e),
-      });
+      console.warn("[CREATOMATE_WEBHOOK] creatomateGetRender failed, using body", { message: String(e?.message || e) });
     }
 
     const status = normStatus((rObj?.status ?? body?.status) || "");
-    const outUrl =
-      extractOutputUrl(rObj) ||
-      extractOutputUrl(body) ||
-      String(body?.output || body?.url || body?.video_url || "").trim() ||
-      null;
-
-    const matchesMain = mainId && renderIdToFetch === mainId;
-    const matchesCap = capId && renderIdToFetch === capId;
-
-    const treatAsMain =
-      kind === "main" || matchesMain || (!kind && !matchesCap && !row.video_url);
-
-    const treatAsCaption =
-      kind === "caption" || matchesCap || (!treatAsMain && String(row.caption_status || "").toLowerCase() === "captioning");
+    const outUrl = extractOutputUrl(rObj) || extractOutputUrl(body) || null;
 
     // MAIN update
-    if (treatAsMain) {
+    if (kind === "main") {
       const patch = {
         render_id: mainId || renderIdToFetch,
         status: status || row.status || "rendering",
@@ -161,10 +129,9 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ ok: true });
     }
 
-    // CAPTION update
-    if (treatAsCaption) {
+    // CAPTION update (no caption_render_id column in your DB)
+    if (kind === "caption") {
       const patch = {
-        caption_render_id: capId || renderIdToFetch,
         caption_status: status || row.caption_status || "captioning",
       };
 
@@ -192,12 +159,11 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ ok: true });
     }
 
-    // If we couldn't decide, return 200 but log it.
-    console.log("[CREATOMATE_WEBHOOK] no-op (could not classify)", { dbId, kind, renderIdToFetch });
-    return res.status(200).json({ ok: true, noop: true });
+    // If kind missing, fail so Creatomate retries (forces you to pass kind explicitly)
+    console.warn("[CREATOMATE_WEBHOOK] missing kind, retry", { dbId });
+    return res.status(500).json({ ok: false, error: "MISSING_KIND_RETRY" });
   } catch (e) {
-    console.error("[CREATOMATE_WEBHOOK] fatal error", String(e?.message || e));
-    // Return 500 so Creatomate retries (better than losing the update)
+    console.error("[CREATOMATE_WEBHOOK] fatal", String(e?.message || e));
     return res.status(500).json({ ok: false, error: "WEBHOOK_ERROR_RETRY" });
   }
 };
