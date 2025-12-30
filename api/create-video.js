@@ -468,21 +468,25 @@ module.exports = async function handler(req, res) {
 
     const choices = { storyType, artStyle, language, voice, aspectRatio, customPrompt, durationRange, captionStyle };
 
-    // ✅ Create DB row first (use status "waiting" so it matches Creatomate early states)
-    const { data: row, error: insErr } = await supabase
-      .from("renders")
-      .insert([
-        {
-          member_id: String(memberId),
-          status: "waiting",
-          video_url: null,
-          render_id: null,
-          choices,
-          error: null,
-        },
-      ])
-      .select("id")
-      .single();
+ const { data: row, error: insErr } = await supabase
+  .from("renders")
+  .insert([
+    {
+      member_id: String(memberId),
+      status: "rendering",
+      video_url: null,
+      render_id: null, // ✅ IMPORTANT: don't insert "" (breaks uuid/constraints)
+      choices,
+      error: null,
+    },
+  ])
+  .select("id")
+  .single();
+
+if (insErr) {
+  console.error("[DB_INSERT_FAILED]", insErr); // ✅ see exact Supabase error in Vercel logs
+  return res.status(500).json({ error: "DB_INSERT_FAILED", details: insErr });
+}
 
     if (insErr) return res.status(500).json({ error: "DB_INSERT_FAILED", details: insErr });
     const db_id = row.id;
