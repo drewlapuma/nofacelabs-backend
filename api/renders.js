@@ -270,7 +270,7 @@ module.exports = async function handler(req, res) {
         template_id,
         modifications: mods,
         output_format: "mp4",
-        webhook_url: `${publicBaseUrl}/api/creatomate-webhook?id=${encodeURIComponent(row.id)}`,
+        webhook_url: `${publicBaseUrl}/api/creatomate-webhook?id=${encodeURIComponent(row.id)}&kind=caption`,
       };
 
       const resp = await postJSON(
