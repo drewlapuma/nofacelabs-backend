@@ -577,7 +577,7 @@ if (insErr) {
       template_id,
       modifications: mods,
       output_format: "mp4",
-      webhook_url: `${publicBaseUrl}/api/creatomate-webhook?id=${encodeURIComponent(db_id)}`,
+      webhook_url: `${publicBaseUrl}/api/creatomate-webhook?id=${encodeURIComponent(db_id)}&kind=main`,
     };
 
     const resp = await postJSON(
