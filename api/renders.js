@@ -1,7 +1,7 @@
 // api/renders.js (CommonJS)
-// GET  /api/renders             => list
-// GET  /api/renders?id=<uuid>   => single
-// POST /api/renders             => captions-start OR captions-apply
+// GET  /api/renders             => list (lazy-polls MAIN Creatomate renders that are stuck)
+// GET  /api/renders?id=<uuid>   => single (lazy-polls MAIN + captions + Submagic)
+// POST /api/renders             => captions-start (Submagic) OR captions-apply (Creatomate)
 
 const https = require("https");
 const { requireMemberId } = require("./_lib/auth");
@@ -20,8 +20,8 @@ const CREATO_CAPTIONS_TEMPLATE_11 = (process.env.CREATO_CAPTIONS_TEMPLATE_11 || 
 const CREATO_CAPTIONS_TEMPLATE_169 = (process.env.CREATO_CAPTIONS_TEMPLATE_169 || "").trim();
 
 // element ids from your template
-const CREATO_VIDEO_ELEMENT_ID = "Video-DHM";
-const CREATO_CAPTIONS_JSON_ELEMENT_ID = "a06990b5-eb94-4792-984a-2fdf21c29407";
+const CREATO_VIDEO_ELEMENT_ID = "Video-DHM"; // Video-DHM.source
+const CREATO_CAPTIONS_JSON_ELEMENT_ID = "a06990b5-eb94-4792-984a-2fdf21c29407"; // Captions_JSON.text
 
 // ---------------- CORS ----------------
 const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || "*")
@@ -75,7 +75,26 @@ function pickCaptionsTemplateIdByAspect(aspectRatio) {
   return CREATO_CAPTIONS_TEMPLATE_916;
 }
 
-// --- HTTPS JSON helper ---
+// ✅ caption layer visibility (ONLY ONE ON)
+// (Update these names if your template uses different layer IDs)
+function subtitleVisibilityMods(style) {
+  const s = String(style || "sentence").toLowerCase();
+  const mods = {
+    "Subtitles_Sentence.visible": false,
+    "Subtitles_Karaoke.visible": false,
+    "Subtitles_Word.visible": false,
+    // legacy layer OFF so you don’t get triple captions
+    "Subtitles-1.visible": false,
+  };
+
+  if (s === "word") mods["Subtitles_Word.visible"] = true;
+  else if (s === "karaoke") mods["Subtitles_Karaoke.visible"] = true;
+  else mods["Subtitles_Sentence.visible"] = true;
+
+  return mods;
+}
+
+// --- HTTPS JSON helper (kept like your style) ---
 function postJSON(url, headers, bodyObj) {
   return new Promise((resolve, reject) => {
     const u = new URL(url);
@@ -172,7 +191,7 @@ function extractCreatomateOutputUrl(renderObj) {
   );
 }
 
-// ✅ poll MAIN render and write video_url/status into DB
+// ✅ NEW: lazy poll MAIN render and write video_url/status into DB
 async function lazyPollMainRender({ sb, row }) {
   const videoUrl = String(row?.video_url || "");
   if (videoUrl) return row;
@@ -210,7 +229,7 @@ async function lazyPollMainRender({ sb, row }) {
   return row;
 }
 
-// ✅ poll caption render
+// ✅ lazy poll captions (Creatomate caption render id stored in caption_render_id OR choices.caption_render_id)
 async function lazyPollCaptionRender({ sb, row }) {
   const capUrl = String(row?.captioned_video_url || "");
   const capStatus = String(row?.caption_status || "").toLowerCase();
@@ -250,15 +269,11 @@ async function lazyPollCaptionRender({ sb, row }) {
 }
 
 module.exports = async function handler(req, res) {
-  // ✅ ALWAYS set CORS, even if we crash later
   try {
+    // ✅ CORS FIRST ALWAYS
     setCors(req, res);
-  } catch {}
+    if (req.method === "OPTIONS") return res.status(204).end();
 
-  // ✅ Preflight must NEVER crash
-  if (req.method === "OPTIONS") return res.status(204).end();
-
-  try {
     const sb = getAdminSupabase();
 
     // ---------------- GET ----------------
@@ -278,14 +293,14 @@ module.exports = async function handler(req, res) {
 
           if (error || !data) return res.status(404).json({ ok: false, error: "NOT_FOUND" });
 
-          // poll MAIN
+          // ✅ poll MAIN render
           try {
             data = await lazyPollMainRender({ sb, row: data });
           } catch (e) {
             data.error = data.error || String(e?.message || e);
           }
 
-          // poll CAPTIONS
+          // ✅ poll Creatomate captions
           try {
             data = await lazyPollCaptionRender({ sb, row: data });
           } catch (pollCapErr) {
@@ -301,7 +316,7 @@ module.exports = async function handler(req, res) {
             data.caption_error = String(pollCapErr?.message || pollCapErr);
           }
 
-          // Submagic (back compat)
+          // ✅ poll Submagic captions (back compat)
           try {
             const capStatus2 = String(data.caption_status || "").toLowerCase();
             const isCaptioning2 =
@@ -357,13 +372,29 @@ module.exports = async function handler(req, res) {
         if (error) return res.status(500).json({ ok: false, error: "SUPABASE_LIST_FAILED" });
 
         const items = Array.isArray(data) ? data : [];
-        const stuck = items
+
+        // ✅ list-mode: poll a few stuck MAIN items
+        const stuckMain = items
           .filter((r) => !r.video_url && normStatus(r.status) === "rendering" && r.render_id)
           .slice(0, 6);
 
-        for (const row of stuck) {
+        for (const row of stuckMain) {
           try {
             const updated = await lazyPollMainRender({ sb, row });
+            const idx = items.findIndex((x) => x.id === row.id);
+            if (idx >= 0) items[idx] = updated;
+          } catch {}
+        }
+
+        // ✅ list-mode: also poll a few stuck CAPTION items (so captioned swaps in quickly)
+        const stuckCaps = items
+          .filter((r) => !r.captioned_video_url && String(r.caption_status || "").toLowerCase() === "captioning")
+          .filter((r) => r.caption_render_id || r?.choices?.caption_render_id)
+          .slice(0, 6);
+
+        for (const row of stuckCaps) {
+          try {
+            const updated = await lazyPollCaptionRender({ sb, row });
             const idx = items.findIndex((x) => x.id === row.id);
             if (idx >= 0) items[idx] = updated;
           } catch {}
@@ -382,7 +413,9 @@ module.exports = async function handler(req, res) {
         const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : req.body || {};
         const action = String(body?.action || "").trim();
 
-        // captions-start (Submagic)
+        // =========================================================
+        // ACTION 1: captions-start (Submagic)
+        // =========================================================
         if (action === "captions-start") {
           const id = String(body?.id || "").trim();
           if (!id) return res.status(400).json({ ok: false, error: "MISSING_ID" });
@@ -450,12 +483,14 @@ module.exports = async function handler(req, res) {
           return res.status(200).json({ ok: true, already: false, projectId: String(projectId) });
         }
 
-        // captions-apply (Creatomate) ✅ ADD WEBHOOK_URL WITH ?id=
+        // =========================================================
+        // ACTION 2: captions-apply (Creatomate) ✅ UPDATED
+        // =========================================================
         if (action === "captions-apply") {
           const id = String(body?.id || "").trim();
           if (!id) return res.status(400).json({ ok: false, error: "MISSING_ID" });
 
-          const style = String(body?.style || "").trim() || "sentence";
+          const style = String(body?.style || "").trim() || "sentence"; // sentence|karaoke|word
           if (!CREATOMATE_API_KEY) return res.status(500).json({ ok: false, error: "MISSING_CREATOMATE_API_KEY" });
 
           const { data: row, error } = await sb
@@ -468,6 +503,7 @@ module.exports = async function handler(req, res) {
           if (error || !row) return res.status(404).json({ ok: false, error: "NOT_FOUND" });
           if (!row.video_url) return res.status(400).json({ ok: false, error: "VIDEO_NOT_READY" });
 
+          // Already captioned
           if (row.captioned_video_url) {
             return res.status(200).json({
               ok: true,
@@ -477,32 +513,57 @@ module.exports = async function handler(req, res) {
             });
           }
 
+          // If caption job already exists and still running, do NOT create another one
+          const capStatus = String(row.caption_status || "").toLowerCase();
+          const existingCapJob =
+            String(row.caption_render_id || "").trim() || String(row?.choices?.caption_render_id || "").trim();
+
+          if (
+            existingCapJob &&
+            (capStatus === "captioning" || capStatus === "rendering" || capStatus === "processing" || capStatus === "queued")
+          ) {
+            return res.status(200).json({
+              ok: true,
+              already: true,
+              caption_render_id: String(existingCapJob),
+              status: "captioning",
+            });
+          }
+
           const aspectRatio = row?.choices?.aspectRatio || row?.choices?.aspect_ratio || "9:16";
           const template_id = pickCaptionsTemplateIdByAspect(aspectRatio);
           if (!template_id) return res.status(500).json({ ok: false, error: "MISSING_CAPTIONS_TEMPLATE" });
 
+          // Reset caption output + mark captioning
           await sb
             .from("renders")
             .update({
               caption_status: "captioning",
               caption_error: null,
               caption_template_id: `creatomate:${template_id}`,
+              captioned_video_url: null,
             })
             .eq("id", row.id);
 
+          const baseUrl = (process.env.API_BASE || `https://${req.headers.host}`).trim();
+
           const mods = {
             [`${CREATO_VIDEO_ELEMENT_ID}.source`]: String(row.video_url),
+
+            // blank placeholder text if visible in template
             [`${CREATO_CAPTIONS_JSON_ELEMENT_ID}.text`]: "",
+
+            // ✅ only one subtitle layer visible
+            ...subtitleVisibilityMods(style),
           };
 
-          // ✅ IMPORTANT: webhook_url must include db id so it can write captioned_video_url
           const payload = {
             template_id,
             modifications: mods,
             output_format: "mp4",
-            webhook_url: `${(process.env.API_BASE || `https://${req.headers.host}`).trim()}/api/creatomate-webhook?id=${encodeURIComponent(
-              row.id
-            )}`,
+
+            // ✅ MUST include db row id so webhook can write captioned_video_url
+            webhook_url: `${baseUrl}/api/creatomate-webhook?id=${encodeURIComponent(row.id)}`,
           };
 
           const resp = await postJSON(
@@ -514,17 +575,29 @@ module.exports = async function handler(req, res) {
           if (resp.status !== 202 && resp.status !== 200) {
             await sb
               .from("renders")
-              .update({ caption_status: "failed", caption_error: JSON.stringify(resp.json) })
+              .update({
+                caption_status: "failed",
+                caption_error: JSON.stringify(resp.json),
+              })
               .eq("id", row.id);
+
             return res.status(resp.status).json({ ok: false, error: "CREATOMATE_ERROR", details: resp.json });
           }
 
           const caption_render_id = Array.isArray(resp.json) ? resp.json[0]?.id : resp.json?.id;
           if (!caption_render_id) {
-            await sb.from("renders").update({ caption_status: "failed", caption_error: "NO_CAPTION_RENDER_ID" }).eq("id", row.id);
+            await sb
+              .from("renders")
+              .update({
+                caption_status: "failed",
+                caption_error: "NO_CAPTION_RENDER_ID",
+              })
+              .eq("id", row.id);
+
             return res.status(502).json({ ok: false, error: "NO_CAPTION_RENDER_ID", details: resp.json });
           }
 
+          // ✅ Store caption render id immediately (critical)
           await sb
             .from("renders")
             .update({
@@ -534,7 +607,12 @@ module.exports = async function handler(req, res) {
             })
             .eq("id", row.id);
 
-          return res.status(200).json({ ok: true, already: false, caption_render_id: String(caption_render_id), status: "captioning" });
+          return res.status(200).json({
+            ok: true,
+            already: false,
+            caption_render_id: String(caption_render_id),
+            status: "captioning",
+          });
         }
 
         return res.status(400).json({ ok: false, error: "BAD_ACTION" });
@@ -545,7 +623,6 @@ module.exports = async function handler(req, res) {
 
     return res.status(405).json({ ok: false, error: "METHOD_NOT_ALLOWED" });
   } catch (fatal) {
-    // ✅ even fatal errors return JSON (and CORS headers are already set)
     return res.status(500).json({ ok: false, error: "FATAL", message: String(fatal?.message || fatal) });
   }
 };
