@@ -2,6 +2,7 @@
 // NOTE: Node 18 on Vercel has global fetch.
 
 const https = require("https");
+const crypto = require("crypto"); // ✅ NEW
 const { createClient } = require("@supabase/supabase-js");
 const memberstackAdmin = require("@memberstack/admin");
 
@@ -440,7 +441,7 @@ module.exports = async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "METHOD_NOT_ALLOWED" });
 
   try {
-    const publicBaseUrl = API_BASE || `https://${req.headers.host}`;
+    const publicBaseUrl = (API_BASE || `https://${req.headers.host}`).trim(); // ✅ keep stable
     const memberId = await requireMemberId(req);
 
     const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : req.body || {};
@@ -468,28 +469,9 @@ module.exports = async function handler(req, res) {
 
     const choices = { storyType, artStyle, language, voice, aspectRatio, customPrompt, durationRange, captionStyle };
 
- const { data: row, error: insErr } = await supabase
-  .from("renders")
-  .insert([
-    {
-      member_id: String(memberId),
-      status: "rendering",
-      video_url: null,
-      render_id: null, // ✅ IMPORTANT: don't insert "" (breaks uuid/constraints)
-      choices,
-      error: null,
-    },
-  ])
-  .select("id")
-  .single();
-
-if (insErr) {
-  console.error("[DB_INSERT_FAILED]", insErr); // ✅ see exact Supabase error in Vercel logs
-  return res.status(500).json({ error: "DB_INSERT_FAILED", details: insErr });
-}
-
-    if (insErr) return res.status(500).json({ error: "DB_INSERT_FAILED", details: insErr });
-    const db_id = row.id;
+    // ✅ NEW: generate DB id up front so webhook can target it,
+    // while still keeping render_id NOT NULL when we insert later.
+    const db_id = crypto.randomUUID();
 
     // ✅ Generate script
     const scriptResp = await fetch(`${publicBaseUrl}/api/generate-script`, {
@@ -500,7 +482,6 @@ if (insErr) {
 
     const narration = (scriptResp && scriptResp.narration) || "";
     if (!narration.trim()) {
-      await supabase.from("renders").update({ status: "failed", error: "SCRIPT_EMPTY" }).eq("id", db_id);
       return res.status(502).json({ error: "SCRIPT_EMPTY", details: scriptResp });
     }
 
@@ -572,7 +553,7 @@ if (insErr) {
       }
     }
 
-    // ✅ KEY FIX: webhook URL includes db_id so your webhook can update THIS row
+    // ✅ IMPORTANT: webhook_url includes db_id + kind=main
     const payload = {
       template_id,
       modifications: mods,
@@ -587,21 +568,33 @@ if (insErr) {
     );
 
     if (resp.status !== 202 && resp.status !== 200) {
-      await supabase.from("renders").update({ status: "failed", error: JSON.stringify(resp.json) }).eq("id", db_id);
       return res.status(resp.status).json({ error: "CREATOMATE_ERROR", details: resp.json });
     }
 
     const job_id = Array.isArray(resp.json) ? resp.json[0]?.id : resp.json?.id;
     if (!job_id) {
-      await supabase.from("renders").update({ status: "failed", error: "NO_JOB_ID" }).eq("id", db_id);
       return res.status(502).json({ error: "NO_JOB_ID_IN_RESPONSE", details: resp.json });
     }
 
-    // ✅ store render_id + keep status pending
-    await supabase
+    // ✅ NEW: insert AFTER we have job_id so render_id is never null
+    const { error: insErr } = await supabase
       .from("renders")
-      .update({ render_id: String(job_id), status: "waiting" })
-      .eq("id", db_id);
+      .insert([
+        {
+          id: db_id, // ✅ we control id now
+          member_id: String(memberId),
+          status: "waiting",
+          video_url: null,
+          render_id: String(job_id), // ✅ NOT NULL satisfied
+          choices,
+          error: null,
+        },
+      ]);
+
+    if (insErr) {
+      console.error("[DB_INSERT_FAILED_AFTER_JOB]", insErr);
+      return res.status(500).json({ error: "DB_INSERT_FAILED", details: insErr, job_id, db_id });
+    }
 
     return res.status(200).json({ ok: true, job_id, db_id, captionStyle });
   } catch (err) {
