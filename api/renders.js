@@ -68,6 +68,10 @@ function normStatus(s) {
   if (!x) return "";
   if (x.includes("succeed") || x.includes("complete") || x === "done") return "completed";
   if (x.includes("fail") || x.includes("error")) return "failed";
+
+  // ✅ treat Creatomate "waiting" as pending
+  if (x.includes("wait") || x.includes("plan")) return "rendering";
+
   if (x.includes("queue") || x.includes("process") || x.includes("render") || x.includes("caption")) return "rendering";
   return x;
 }
@@ -176,22 +180,30 @@ function extractCreatomateOutputUrl(renderObj) {
   );
 }
 
-// ✅ NEW: lazy poll MAIN render and write video_url/status into DB
 async function lazyPollMainRender({ sb, row }) {
   const videoUrl = String(row?.video_url || "");
   if (videoUrl) return row;
 
   const status = normStatus(row?.status || "");
-  if (!(status === "rendering" || status === "queued" || status === "processing")) return row;
+  // ✅ now "waiting" becomes "rendering" and WILL poll
+  if (status !== "rendering") return row;
 
-  const renderId = String(row?.render_id || ""); // <-- assumes your column is render_id
+  // ✅ allow multiple possible column names
+  const renderId = String(
+    row?.render_id ||
+    row?.creatomate_render_id ||
+    row?.creatomate_id ||
+    row?.renderId ||
+    ""
+  ).trim();
+
   if (!renderId) return row;
 
   const rObj = await creatomateGetRender(renderId);
   const rStatus = normStatus(rObj?.status || "");
   const outUrl = extractCreatomateOutputUrl(rObj);
 
-  if (outUrl && (rStatus === "completed" || rStatus === "succeeded")) {
+  if (outUrl && (rStatus === "completed" || rStatus === "succeeded" || rStatus === "completed")) {
     const { data: updated } = await sb
       .from("renders")
       .update({
@@ -213,6 +225,7 @@ async function lazyPollMainRender({ sb, row }) {
 
   return row;
 }
+
 
 // ✅ lazy poll captions (Creatomate caption render id stored in caption_render_id OR choices.caption_render_id)
 async function lazyPollCaptionRender({ sb, row }) {
@@ -358,7 +371,12 @@ module.exports = async function handler(req, res) {
 
         // ✅ in list mode, only poll a small number of stuck items to avoid slow responses
         const items = Array.isArray(data) ? data : [];
-        const stuck = items.filter((r) => !r.video_url && normStatus(r.status) === "rendering" && r.render_id).slice(0, 6);
+        const stuck = items
+  .filter((r) => {
+    const rid = r?.render_id || r?.creatomate_render_id || r?.creatomate_id || r?.renderId;
+    return !r.video_url && normStatus(r.status) === "rendering" && rid;
+  })
+  .slice(0, 10);
 
         for (const row of stuck) {
           try {
