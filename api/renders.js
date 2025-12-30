@@ -23,6 +23,11 @@ const CREATO_CAPTIONS_TEMPLATE_169 = (process.env.CREATO_CAPTIONS_TEMPLATE_169 |
 const CREATO_VIDEO_ELEMENT_ID = "Video-DHM"; // Video-DHM.source
 const CREATO_CAPTIONS_JSON_ELEMENT_ID = "a06990b5-eb94-4792-984a-2fdf21c29407"; // Captions_JSON.text
 
+// ✅ subtitle layer names from your template (these MUST match exactly)
+const CREATO_SUB_SENTENCE = "Subtitles_Sentence";
+const CREATO_SUB_KARAOKE = "Subtitles_Karaoke";
+const CREATO_SUB_WORD = "Subtitles_Word";
+
 // ---------------- CORS ----------------
 const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || "*")
   .split(",")
@@ -186,12 +191,11 @@ async function lazyPollMainRender({ sb, row }) {
   const rStatus = normStatus(rObj?.status || "");
   const outUrl = extractCreatomateOutputUrl(rObj);
 
-  // Creatomate uses "succeeded" commonly; our norm maps it to completed
   if (outUrl && (rStatus === "completed" || rStatus === "succeeded")) {
     const { data: updated } = await sb
       .from("renders")
       .update({
-        status: "succeeded",              // keep your UI happy
+        status: "succeeded",
         video_url: String(outUrl),
         error: null,
       })
@@ -274,11 +278,10 @@ module.exports = async function handler(req, res) {
 
           if (error || !data) return res.status(404).json({ ok: false, error: "NOT_FOUND" });
 
-          // ✅ NEW: poll MAIN render first
+          // ✅ poll MAIN render first
           try {
             data = await lazyPollMainRender({ sb, row: data });
           } catch (e) {
-            // don't fail the request; just attach info
             data.error = data.error || String(e?.message || e);
           }
 
@@ -353,14 +356,13 @@ module.exports = async function handler(req, res) {
 
         if (error) return res.status(500).json({ ok: false, error: "SUPABASE_LIST_FAILED" });
 
-        // ✅ NEW: in list mode, only poll a small number of stuck items to avoid slow responses
+        // ✅ in list mode, only poll a small number of stuck items to avoid slow responses
         const items = Array.isArray(data) ? data : [];
         const stuck = items.filter((r) => !r.video_url && normStatus(r.status) === "rendering" && r.render_id).slice(0, 6);
 
         for (const row of stuck) {
           try {
             const updated = await lazyPollMainRender({ sb, row });
-            // replace in array so UI gets fresh values immediately
             const idx = items.findIndex((x) => x.id === row.id);
             if (idx >= 0) items[idx] = updated;
           } catch {
@@ -453,13 +455,13 @@ module.exports = async function handler(req, res) {
         }
 
         // =========================================================
-        // ACTION 2: captions-apply (Creatomate)
+        // ACTION 2: captions-apply (Creatomate) ✅ FIXED (hide 2 layers)
         // =========================================================
         if (action === "captions-apply") {
           const id = String(body?.id || "").trim();
           if (!id) return res.status(400).json({ ok: false, error: "MISSING_ID" });
 
-          const style = String(body?.style || "").trim() || "sentence"; // sentence|karaoke|word
+          const style = String(body?.style || "").trim().toLowerCase() || "sentence"; // sentence|karaoke|word
           if (!CREATOMATE_API_KEY) return res.status(500).json({ ok: false, error: "MISSING_CREATOMATE_API_KEY" });
 
           const { data: row, error } = await sb
@@ -484,13 +486,6 @@ module.exports = async function handler(req, res) {
           const aspectRatio = row?.choices?.aspectRatio || row?.choices?.aspect_ratio || "9:16";
           const template_id = pickCaptionsTemplateIdByAspect(aspectRatio);
 
-          if (!template_id) {
-            return res.status(500).json({
-              ok: false,
-              error: "MISSING_CAPTIONS_TEMPLATE",
-            });
-          }
-
           await sb
             .from("renders")
             .update({
@@ -500,19 +495,27 @@ module.exports = async function handler(req, res) {
             })
             .eq("id", row.id);
 
-          // IMPORTANT:
-          // Your template has three subtitle layers (Subtitles_Sentence/Subtitles_Karaoke/Subtitles_Word)
-          // and they're all visible right now unless you toggle them.
-          // The clean fix is template logic, but for now we at least pass "style" so you can wire it.
+          // ✅ SHOW ONLY ONE CAPTION LAYER
+          const showSentence = style === "sentence";
+          const showKaraoke = style === "karaoke";
+          const showWord = style === "word";
+
           const mods = {
+            // swap the video
             [`${CREATO_VIDEO_ELEMENT_ID}.source`]: String(row.video_url),
 
-            // optional - blank this so "Your text here" stops showing if it’s visible
+            // blank placeholder text so it doesn’t appear
             [`${CREATO_CAPTIONS_JSON_ELEMENT_ID}.text`]: "",
 
-            // if you add a hidden text field in template like "CaptionStyle.text"
-            // you can uncomment this and use it to show/hide layers inside Creatomate:
-            // "CaptionStyle.text": style,
+            // hide the 2 unused subtitle layers
+            [`${CREATO_SUB_SENTENCE}.opacity`]: showSentence ? 100 : 0,
+            [`${CREATO_SUB_KARAOKE}.opacity`]: showKaraoke ? 100 : 0,
+            [`${CREATO_SUB_WORD}.opacity`]: showWord ? 100 : 0,
+
+            // If opacity doesn’t fully hide in your template, also force visible flags:
+            [`${CREATO_SUB_SENTENCE}.visible`]: showSentence,
+            [`${CREATO_SUB_KARAOKE}.visible`]: showKaraoke,
+            [`${CREATO_SUB_WORD}.visible`]: showWord,
           };
 
           const payload = {
