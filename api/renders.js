@@ -513,56 +513,50 @@ module.exports = async function handler(req, res) {
             });
           }
 
-          // If caption job already exists and still running, do NOT create another one
-          const capStatus = String(row.caption_status || "").toLowerCase();
-          const existingCapJob =
-            String(row.caption_render_id || "").trim() || String(row?.choices?.caption_render_id || "").trim();
+          // if we already have a caption render in progress, don't start another
+  const existingCapId =
+    String(row.caption_render_id || "").trim() ||
+    String(row?.choices?.caption_render_id || "").trim();
 
-          if (
-            existingCapJob &&
-            (capStatus === "captioning" || capStatus === "rendering" || capStatus === "processing" || capStatus === "queued")
-          ) {
-            return res.status(200).json({
-              ok: true,
-              already: true,
-              caption_render_id: String(existingCapJob),
-              status: "captioning",
-            });
-          }
+  const capStatus = String(row.caption_status || "").toLowerCase();
+  const isRunning = ["captioning", "rendering", "processing", "queued"].includes(capStatus);
+
+  if (existingCapId && isRunning) {
+    return res.status(200).json({
+      ok: true,
+      already: true,
+      caption_render_id: existingCapId,
+      status: "captioning",
+    });
+  }
 
           const aspectRatio = row?.choices?.aspectRatio || row?.choices?.aspect_ratio || "9:16";
           const template_id = pickCaptionsTemplateIdByAspect(aspectRatio);
           if (!template_id) return res.status(500).json({ ok: false, error: "MISSING_CAPTIONS_TEMPLATE" });
 
-          // Reset caption output + mark captioning
-          await sb
-            .from("renders")
-            .update({
-              caption_status: "captioning",
-              caption_error: null,
-              caption_template_id: `creatomate:${template_id}`,
-              captioned_video_url: null,
-            })
-            .eq("id", row.id);
-
+// mark captioning NOW
+  await sb
+    .from("renders")
+    .update({
+      caption_status: "captioning",
+      caption_error: null,
+      caption_template_id: `creatomate:${template_id}`,
+      captioned_video_url: null,
+    })
+    .eq("id", row.id);
+          
           const baseUrl = (process.env.API_BASE || `https://${req.headers.host}`).trim();
 
-          const mods = {
-            [`${CREATO_VIDEO_ELEMENT_ID}.source`]: String(row.video_url),
-
-            // blank placeholder text if visible in template
-            [`${CREATO_CAPTIONS_JSON_ELEMENT_ID}.text`]: "",
-
-            // ✅ only one subtitle layer visible
-            ...subtitleVisibilityMods(style),
-          };
+            const mods = {
+    [`${CREATO_VIDEO_ELEMENT_ID}.source`]: String(row.video_url),
+    [`${CREATO_CAPTIONS_JSON_ELEMENT_ID}.text`]: "",
+    ...subtitleVisibilityMods(style),
+  };
 
           const payload = {
             template_id,
             modifications: mods,
             output_format: "mp4",
-
-            // ✅ MUST include db row id so webhook can write captioned_video_url
             webhook_url: `${baseUrl}/api/creatomate-webhook?id=${encodeURIComponent(row.id)}`,
           };
 
@@ -588,24 +582,23 @@ module.exports = async function handler(req, res) {
           if (!caption_render_id) {
             await sb
               .from("renders")
-              .update({
-                caption_status: "failed",
-                caption_error: "NO_CAPTION_RENDER_ID",
-              })
+              .update({ caption_status: "failed", caption_error: "NO_CAPTION_RENDER_ID" })
               .eq("id", row.id);
-
+            
             return res.status(502).json({ ok: false, error: "NO_CAPTION_RENDER_ID", details: resp.json });
           }
+            // ✅ SAVE render id in BOTH column + choices
+  const newChoices = { ...(row.choices || {}), caption_render_id: String(caption_render_id), caption_style: style };
 
-          // ✅ Store caption render id immediately (critical)
-          await sb
-            .from("renders")
-            .update({
-              caption_render_id: String(caption_render_id),
-              caption_status: "captioning",
-              caption_error: null,
-            })
-            .eq("id", row.id);
+  await sb
+    .from("renders")
+    .update({
+      caption_render_id: String(caption_render_id),
+      caption_status: "captioning",
+      caption_error: null,
+      choices: newChoices,
+    })
+    .eq("id", row.id);
 
           return res.status(200).json({
             ok: true,
