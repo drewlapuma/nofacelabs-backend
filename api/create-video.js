@@ -6,8 +6,6 @@ const { createClient } = require("@supabase/supabase-js");
 const memberstackAdmin = require("@memberstack/admin");
 
 // -------------------- CORS (FIXED) --------------------
-// Use ALLOW_ORIGINS for comma-separated allowlist.
-// Example: https://nofacelabsai.webflow.io,https://nofacelabs.ai
 const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || "*")
   .split(",")
   .map((s) => s.trim())
@@ -16,7 +14,6 @@ const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || 
 function setCors(req, res) {
   const origin = req.headers.origin;
 
-  // If "*" allow all (no credentials). Best for simple Bearer auth.
   if (ALLOW_ORIGINS.includes("*")) {
     res.setHeader("Access-Control-Allow-Origin", "*");
   } else if (origin && ALLOW_ORIGINS.includes(origin)) {
@@ -29,9 +26,7 @@ function setCors(req, res) {
   res.setHeader("Access-Control-Max-Age", "86400");
 }
 
-// -------------------- API BASE (IMPORTANT) --------------------
-// This must be the PUBLIC URL that Creatomate can reach for webhook calls.
-// Set in Vercel env: API_BASE=https://nofacelabs-backend.vercel.app
+// -------------------- API BASE --------------------
 const API_BASE = (process.env.API_BASE || "").trim();
 
 // -------------------- Your existing env + logic --------------------
@@ -85,7 +80,6 @@ const KREA_JOB_URL_BASE = process.env.KREA_JOB_URL_BASE || "https://api.krea.ai/
 const KREA_STYLE_ID = (process.env.KREA_STYLE_ID || "tvjlqsab9").trim();
 const KREA_STYLE_STRENGTH = Number(process.env.KREA_STYLE_STRENGTH || 0.85);
 
-// ✅ Krea retry/poll tuning
 const KREA_PER_BEAT_RETRIES = Number(process.env.KREA_PER_BEAT_RETRIES || 2);
 const KREA_POLL_TRIES = Number(process.env.KREA_POLL_TRIES || 90);
 const KREA_POLL_DELAY_MS = Number(process.env.KREA_POLL_DELAY_MS || 2500);
@@ -268,7 +262,7 @@ Narration line:
   return out || text;
 }
 
-// ---------- Krea (style -> fallback to no-style + logs) ----------
+// ---------- Krea helpers ----------
 function shortPrompt(p) {
   const s = String(p || "").replace(/\s+/g, " ").trim();
   return s.length > 180 ? s.slice(0, 180) + "..." : s;
@@ -277,10 +271,7 @@ function shortPrompt(p) {
 async function createKreaJob({ prompt, aspectRatio, useStyle }) {
   if (!KREA_API_KEY) throw new Error("KREA_API_KEY not set");
 
-  const payload = {
-    prompt,
-    aspect_ratio: aspectRatio,
-  };
+  const payload = { prompt, aspect_ratio: aspectRatio };
 
   if (useStyle) {
     if (!KREA_STYLE_ID) throw new Error("KREA_STYLE_ID not set");
@@ -360,7 +351,6 @@ async function pollKreaJob(jobId) {
 }
 
 async function generateOneImageWithRetry({ prompt, aspectRatio, beatIndex }) {
-  // 1) Try WITH style
   for (let attempt = 1; attempt <= Math.max(1, KREA_PER_BEAT_RETRIES); attempt++) {
     try {
       const jobId = await createKreaJob({ prompt, aspectRatio, useStyle: true });
@@ -378,7 +368,6 @@ async function generateOneImageWithRetry({ prompt, aspectRatio, beatIndex }) {
     }
   }
 
-  // 2) Try WITHOUT style (fallback)
   for (let attempt = 1; attempt <= Math.max(1, KREA_PER_BEAT_RETRIES); attempt++) {
     try {
       const jobId = await createKreaJob({ prompt, aspectRatio, useStyle: false });
@@ -426,19 +415,9 @@ function buildVariantSequence(beatCount) {
 }
 
 // ---------- Captions (Creatomate layer toggles) ----------
-// Your template screenshot shows: "Subtitles-1" and "Video-DHM".
-// Best practice: duplicate Subtitles-1 into 3 layers:
-// - Subtitles_Sentence
-// - Subtitles_Karaoke
-// - Subtitles_Word
-//
-// This function supports BOTH setups:
-// - If you only have Subtitles-1: we keep it visible always.
-// - If you have the 3-layer setup: we toggle visibility based on captionStyle.
 function subtitleVisibilityMods(captionStyle) {
   const style = String(captionStyle || "sentence").toLowerCase();
 
-  // 3-layer setup (recommended)
   const threeLayer = {
     "Subtitles_Sentence.visible": false,
     "Subtitles_Karaoke.visible": false,
@@ -447,15 +426,9 @@ function subtitleVisibilityMods(captionStyle) {
 
   if (style === "word") threeLayer["Subtitles_Word.visible"] = true;
   else if (style === "karaoke") threeLayer["Subtitles_Karaoke.visible"] = true;
-  else threeLayer["Subtitles_Sentence.visible"] = true; // default
+  else threeLayer["Subtitles_Sentence.visible"] = true;
 
-  // single-layer fallback (your current screenshot name)
-  // If you haven't duplicated layers yet, this makes sure captions still show.
-  const singleLayerFallback = {
-    "Subtitles-1.visible": true,
-  };
-
-  // We include BOTH. Extra keys won't break anything if the layer doesn't exist.
+  const singleLayerFallback = { "Subtitles-1.visible": true };
   return { ...threeLayer, ...singleLayerFallback };
 }
 
@@ -463,15 +436,11 @@ function subtitleVisibilityMods(captionStyle) {
 module.exports = async function handler(req, res) {
   setCors(req, res);
 
-  // IMPORTANT: respond to preflight BEFORE any auth/module work
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "POST") return res.status(405).json({ error: "METHOD_NOT_ALLOWED" });
 
   try {
-    // ✅ Make sure API_BASE exists for webhook + internal calls
-    // If not set, fallback to request host (works sometimes, but webhook may break)
     const publicBaseUrl = API_BASE || `https://${req.headers.host}`;
-
     const memberId = await requireMemberId(req);
 
     const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : req.body || {};
@@ -483,9 +452,6 @@ module.exports = async function handler(req, res) {
       aspectRatio = "9:16",
       customPrompt = "",
       durationRange = "60-90",
-
-      // ✅ NEW: caption style from Webflow
-      // "sentence" | "karaoke" | "word"
       captionStyle = "sentence",
     } = body;
 
@@ -502,15 +468,15 @@ module.exports = async function handler(req, res) {
 
     const choices = { storyType, artStyle, language, voice, aspectRatio, customPrompt, durationRange, captionStyle };
 
-    // ✅ Create DB row first
+    // ✅ Create DB row first (use status "waiting" so it matches Creatomate early states)
     const { data: row, error: insErr } = await supabase
       .from("renders")
       .insert([
         {
           member_id: String(memberId),
-          status: "rendering",
+          status: "waiting",
           video_url: null,
-          render_id: "",
+          render_id: null,
           choices,
           error: null,
         },
@@ -521,7 +487,7 @@ module.exports = async function handler(req, res) {
     if (insErr) return res.status(500).json({ error: "DB_INSERT_FAILED", details: insErr });
     const db_id = row.id;
 
-    // ✅ Generate script using PUBLIC base URL (consistent)
+    // ✅ Generate script
     const scriptResp = await fetch(`${publicBaseUrl}/api/generate-script`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -537,12 +503,10 @@ module.exports = async function handler(req, res) {
     // Beats + timing
     const speechSec = estimateSpeechSeconds(narration);
     let targetSec = Math.round(speechSec + 2);
-    let minSec = 60,
-      maxSec = 90;
-    if (durationRange === "30-60") {
-      minSec = 30;
-      maxSec = 60;
-    }
+
+    let minSec = 60, maxSec = 90;
+    if (durationRange === "30-60") { minSec = 30; maxSec = 60; }
+
     if (targetSec < minSec) targetSec = minSec;
     if (targetSec > maxSec) targetSec = maxSec;
 
@@ -562,8 +526,6 @@ module.exports = async function handler(req, res) {
     const variantSequence = buildVariantSequence(beatCount);
 
     // Creatomate mods
-    // ✅ IMPORTANT: We are NOT writing subtitle text directly.
-    // Creatomate "Subtitles-1" should auto-transcribe from your video layer (Video-DHM).
     const mods = {
       Narration: narration,
       VoiceLabel: voice,
@@ -571,8 +533,6 @@ module.exports = async function handler(req, res) {
       StoryTypeLabel: storyType,
       Voiceover: narration,
       VoiceUrl: null,
-
-      // ✅ caption style selection (layer visibility toggles)
       ...subtitleVisibilityMods(captionStyle),
     };
 
@@ -582,7 +542,6 @@ module.exports = async function handler(req, res) {
 
       mods[`Beat${i}_Scene.start`] = start;
       mods[`Beat${i}_Scene.duration`] = dur;
-
       mods[`Beat${i}_Group.start`] = 0;
       mods[`Beat${i}_Group.duration`] = dur;
     }
@@ -595,7 +554,6 @@ module.exports = async function handler(req, res) {
       for (const variant of ANIMATION_VARIANTS) mods[`Beat${i}_${variant}_Image.source`] = "";
     }
 
-    // Beat images via proxy
     let lastGood = "";
     for (let i = 1; i <= beatCount; i++) {
       const raw = imageUrls[i - 1] || "";
@@ -610,12 +568,12 @@ module.exports = async function handler(req, res) {
       }
     }
 
-    // ✅ KEY: include webhook_url so Supabase gets video_url
+    // ✅ KEY FIX: webhook URL includes db_id so your webhook can update THIS row
     const payload = {
       template_id,
       modifications: mods,
       output_format: "mp4",
-      webhook_url: `${publicBaseUrl}/api/creatomate-webhook`,
+      webhook_url: `${publicBaseUrl}/api/creatomate-webhook?id=${encodeURIComponent(db_id)}`,
     };
 
     const resp = await postJSON(
@@ -635,7 +593,11 @@ module.exports = async function handler(req, res) {
       return res.status(502).json({ error: "NO_JOB_ID_IN_RESPONSE", details: resp.json });
     }
 
-    await supabase.from("renders").update({ render_id: String(job_id) }).eq("id", db_id);
+    // ✅ store render_id + keep status pending
+    await supabase
+      .from("renders")
+      .update({ render_id: String(job_id), status: "waiting" })
+      .eq("id", db_id);
 
     return res.status(200).json({ ok: true, job_id, db_id, captionStyle });
   } catch (err) {
