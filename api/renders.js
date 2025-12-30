@@ -499,33 +499,20 @@ module.exports = async function handler(req, res) {
               caption_template_id: `creatomate:${template_id}`,
             })
             .eq("id", row.id);
-// ===============================
-// Creatomate caption style switch
-// ===============================
 
-const mods = {
-  // Always set the video source
-  "Video-DHM.source": String(row.video_url),
+          // IMPORTANT:
+          // Your template has three subtitle layers (Subtitles_Sentence/Subtitles_Karaoke/Subtitles_Word)
+          // and they're all visible right now unless you toggle them.
+          // The clean fix is template logic, but for now we at least pass "style" so you can wire it.
+          const mods = {
+            [`${CREATO_VIDEO_ELEMENT_ID}.source`]: String(row.video_url),
 
-  // Default: hide all subtitle layers
-  "Subtitles_Sentence.visible": false,
-  "Subtitles_Karaoke.visible": false,
-  "Subtitles_Word.visible": false,
-};
+            // optional - blank this so "Your text here" stops showing if it’s visible
+            [`${CREATO_CAPTIONS_JSON_ELEMENT_ID}.text`]: "",
 
-// Enable ONE layer based on style
-if (style === "sentence") {
-  mods["Subtitles_Sentence.visible"] = true;
-}
-
-if (style === "karaoke") {
-  mods["Subtitles_Karaoke.visible"] = true;
-}
-
-if (style === "word") {
-  mods["Subtitles_Word.visible"] = true;
-}
-
+            // if you add a hidden text field in template like "CaptionStyle.text"
+            // you can uncomment this and use it to show/hide layers inside Creatomate:
+            // "CaptionStyle.text": style,
           };
 
           const payload = {
