@@ -540,7 +540,8 @@ module.exports = async function handler(req, res) {
             template_id,
             modifications: mods,
             output_format: "mp4",
-              webhook_url: `${process.env.API_BASE || `https://${req.headers.host}`}/api/creatomate-webhook?id=${encodeURIComponent(row.id)}&kind=caption`,
+            const payload = {
+            webhook_url: `${process.env.API_BASE || "https://nofacelabs-backend.vercel.app"}/api/creatomate-webhook?id=${encodeURIComponent(row.id)}&kind=caption`,
           };
 
           const resp = await postJSON(
