@@ -415,6 +415,27 @@ function buildVariantSequence(beatCount) {
   return seq;
 }
 
+// ---------- Subtitles helpers ----------
+// Clean base (no subtitles burned in)
+function subtitlesAllOffMods() {
+  return {
+    "Subtitles_Sentence.visible": false,
+    "Subtitles_Karaoke.visible": false,
+    "Subtitles_Word.visible": false,
+    "Subtitles-1.visible": false, // prevent fallback duplicates
+  };
+}
+
+// Default captioned version (only ONE layer on)
+function subtitlesOnlyOneMods(style = "sentence") {
+  const s = String(style || "sentence").toLowerCase();
+  const mods = subtitlesAllOffMods();
+  if (s === "karaoke") mods["Subtitles_Karaoke.visible"] = true;
+  else if (s === "word") mods["Subtitles_Word.visible"] = true;
+  else mods["Subtitles_Sentence.visible"] = true;
+  return mods;
+}
+
 // -------------------- MAIN --------------------
 module.exports = async function handler(req, res) {
   setCors(req, res);
@@ -435,7 +456,7 @@ module.exports = async function handler(req, res) {
       aspectRatio = "9:16",
       customPrompt = "",
       durationRange = "60-90",
-      captionStyle = "sentence",
+      captionStyle = "sentence", // default captions style
     } = body;
 
     if (!process.env.CREATOMATE_API_KEY) return res.status(500).json({ error: "MISSING_CREATOMATE_API_KEY" });
@@ -454,17 +475,22 @@ module.exports = async function handler(req, res) {
     // ✅ DB id up front so webhook can target it
     const db_id = crypto.randomUUID();
 
-    // ✅ IMPORTANT FIX: INSERT ROW FIRST (prevents webhook "row not found")
-    // render_id is NOT NULL, so we use a placeholder and update it after Creatomate returns job_id
+    // ✅ Pre-insert row so webhook never misses (render_id is NOT NULL so placeholder)
     const { error: preInsErr } = await supabase.from("renders").insert([
       {
         id: db_id,
         member_id: String(memberId),
         status: "waiting",
         video_url: null,
-        render_id: "pending", // ✅ placeholder to satisfy NOT NULL
+        render_id: "pending",
         choices,
         error: null,
+
+        // Start captioned version as "captioning" since we'll launch it
+        caption_status: "captioning",
+        caption_style: String(captionStyle || "sentence").toLowerCase(),
+        captioned_video_url: null,
+        caption_error: null,
       },
     ]);
 
@@ -473,7 +499,7 @@ module.exports = async function handler(req, res) {
       return res.status(500).json({ error: "DB_PREINSERT_FAILED", details: preInsErr });
     }
 
-    // Generate script
+    // ✅ Generate script
     const scriptResp = await fetch(`${publicBaseUrl}/api/generate-script`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -482,8 +508,11 @@ module.exports = async function handler(req, res) {
 
     const narration = (scriptResp && scriptResp.narration) || "";
     if (!narration.trim()) {
-      // mark failed
       await supabase.from("renders").update({ status: "failed", error: JSON.stringify(scriptResp || {}) }).eq("id", db_id);
+      await supabase
+        .from("renders")
+        .update({ caption_status: "failed", caption_error: "SCRIPT_EMPTY" })
+        .eq("id", db_id);
       return res.status(502).json({ error: "SCRIPT_EMPTY", details: scriptResp });
     }
 
@@ -491,12 +520,8 @@ module.exports = async function handler(req, res) {
     const speechSec = estimateSpeechSeconds(narration);
     let targetSec = Math.round(speechSec + 2);
 
-    let minSec = 60,
-      maxSec = 90;
-    if (durationRange === "30-60") {
-      minSec = 30;
-      maxSec = 60;
-    }
+    let minSec = 60, maxSec = 90;
+    if (durationRange === "30-60") { minSec = 30; maxSec = 60; }
 
     if (targetSec < minSec) targetSec = minSec;
     if (targetSec > maxSec) targetSec = maxSec;
@@ -516,8 +541,8 @@ module.exports = async function handler(req, res) {
 
     const variantSequence = buildVariantSequence(beatCount);
 
-    // Creatomate modifications (UNCHANGED — keep your current caption behavior here)
-    const mods = {
+    // ---------- Build shared base mods ----------
+    const baseMods = {
       Narration: narration,
       VoiceLabel: voice,
       LanguageLabel: language,
@@ -530,18 +555,18 @@ module.exports = async function handler(req, res) {
       const start = timing.starts[i - 1];
       const dur = timing.durations[i - 1];
 
-      mods[`Beat${i}_Scene.start`] = start;
-      mods[`Beat${i}_Scene.duration`] = dur;
-      mods[`Beat${i}_Group.start`] = 0;
-      mods[`Beat${i}_Group.duration`] = dur;
+      baseMods[`Beat${i}_Scene.start`] = start;
+      baseMods[`Beat${i}_Scene.duration`] = dur;
+      baseMods[`Beat${i}_Group.start`] = 0;
+      baseMods[`Beat${i}_Group.duration`] = dur;
     }
 
     for (let i = beatCount + 1; i <= MAX_BEATS; i++) {
-      mods[`Beat${i}_Scene.start`] = 0;
-      mods[`Beat${i}_Scene.duration`] = 0;
-      mods[`Beat${i}_Group.start`] = 0;
-      mods[`Beat${i}_Group.duration`] = 0;
-      for (const variant of ANIMATION_VARIANTS) mods[`Beat${i}_${variant}_Image.source`] = "";
+      baseMods[`Beat${i}_Scene.start`] = 0;
+      baseMods[`Beat${i}_Scene.duration`] = 0;
+      baseMods[`Beat${i}_Group.start`] = 0;
+      baseMods[`Beat${i}_Group.duration`] = 0;
+      for (const variant of ANIMATION_VARIANTS) baseMods[`Beat${i}_${variant}_Image.source`] = "";
     }
 
     let lastGood = "";
@@ -553,47 +578,80 @@ module.exports = async function handler(req, res) {
 
       const chosen = i === 1 ? "PanRight" : variantSequence[i - 1];
       for (const variant of ANIMATION_VARIANTS) {
-        mods[`Beat${i}_${variant}_Image.source`] = variant === chosen ? proxied : "";
+        baseMods[`Beat${i}_${variant}_Image.source`] = variant === chosen ? proxied : "";
       }
     }
 
-    const payload = {
+    // ✅ 1) MAIN CLEAN render (this becomes video_url)
+    const mainPayload = {
       template_id,
-      modifications: mods,
+      modifications: { ...baseMods, ...subtitlesAllOffMods() },
       output_format: "mp4",
       webhook_url: `${publicBaseUrl}/api/creatomate-webhook?id=${encodeURIComponent(db_id)}&kind=main`,
     };
 
-    const resp = await postJSON(
+    const mainResp = await postJSON(
       "https://api.creatomate.com/v1/renders",
       { Authorization: `Bearer ${process.env.CREATOMATE_API_KEY}` },
-      payload
+      mainPayload
     );
 
-    if (resp.status !== 202 && resp.status !== 200) {
+    if (mainResp.status !== 202 && mainResp.status !== 200) {
+      await supabase.from("renders").update({ status: "failed", error: JSON.stringify(mainResp.json || {}) }).eq("id", db_id);
+      return res.status(mainResp.status).json({ error: "CREATOMATE_ERROR", details: mainResp.json });
+    }
+
+    const main_job_id = Array.isArray(mainResp.json) ? mainResp.json[0]?.id : mainResp.json?.id;
+    if (!main_job_id) {
+      await supabase.from("renders").update({ status: "failed", error: "NO_MAIN_JOB_ID" }).eq("id", db_id);
+      return res.status(502).json({ error: "NO_JOB_ID_IN_RESPONSE", details: mainResp.json });
+    }
+
+    // ✅ Update placeholder render_id to real main id
+    await supabase.from("renders").update({ render_id: String(main_job_id) }).eq("id", db_id);
+
+    // ✅ 2) DEFAULT CAPTIONED render (this becomes captioned_video_url)
+    // Uses SAME template + SAME scenes, but turns on only ONE subtitle layer.
+    // Webhook kind=caption will write captioned_video_url + caption_status.
+    const capPayload = {
+      template_id,
+      modifications: { ...baseMods, ...subtitlesOnlyOneMods(captionStyle) },
+      output_format: "mp4",
+      webhook_url: `${publicBaseUrl}/api/creatomate-webhook?id=${encodeURIComponent(db_id)}&kind=caption`,
+    };
+
+    // Fire and forget (but we still capture the ID for debugging)
+    let caption_job_id = null;
+    try {
+      const capResp = await postJSON(
+        "https://api.creatomate.com/v1/renders",
+        { Authorization: `Bearer ${process.env.CREATOMATE_API_KEY}` },
+        capPayload
+      );
+
+      if (capResp.status === 202 || capResp.status === 200) {
+        caption_job_id = Array.isArray(capResp.json) ? capResp.json[0]?.id : capResp.json?.id;
+      } else {
+        await supabase
+          .from("renders")
+          .update({ caption_status: "failed", caption_error: JSON.stringify(capResp.json || {}) })
+          .eq("id", db_id);
+      }
+    } catch (e) {
       await supabase
         .from("renders")
-        .update({ status: "failed", error: JSON.stringify(resp.json || {}) })
+        .update({ caption_status: "failed", caption_error: String(e?.message || e) })
         .eq("id", db_id);
-
-      return res.status(resp.status).json({ error: "CREATOMATE_ERROR", details: resp.json });
     }
 
-    const job_id = Array.isArray(resp.json) ? resp.json[0]?.id : resp.json?.id;
-    if (!job_id) {
-      await supabase.from("renders").update({ status: "failed", error: "NO_JOB_ID_IN_RESPONSE" }).eq("id", db_id);
-      return res.status(502).json({ error: "NO_JOB_ID_IN_RESPONSE", details: resp.json });
-    }
-
-    // ✅ Update placeholder render_id to the real Creatomate job id
-    const { error: updErr } = await supabase.from("renders").update({ render_id: String(job_id) }).eq("id", db_id);
-
-    if (updErr) {
-      console.error("[DB_UPDATE_RENDER_ID_FAILED]", updErr);
-      // don't fail the whole request, but let you see it
-    }
-
-    return res.status(200).json({ ok: true, job_id, db_id, captionStyle });
+    return res.status(200).json({
+      ok: true,
+      db_id,
+      job_id: main_job_id,       // keep backwards compatibility
+      main_job_id,
+      caption_job_id,
+      captionStyle,
+    });
   } catch (err) {
     const msg = String(err?.message || err);
     if (msg.includes("MISSING_AUTH") || msg.includes("MEMBERSTACK") || msg.includes("INVALID_MEMBER")) {
