@@ -416,14 +416,12 @@ function buildVariantSequence(beatCount) {
 }
 
 // ---------- Subtitles (MAIN render must be clean) ----------
-// ✅ This is the key change that prevents “double captions” later:
-// MAIN render exports with ALL subtitle layers OFF.
 function mainNoSubtitlesMods() {
   return {
     "Subtitles_Sentence.visible": false,
     "Subtitles_Karaoke.visible": false,
     "Subtitles_Word.visible": false,
-    "Subtitles-1.visible": false, // important if your template still has this fallback
+    "Subtitles-1.visible": false,
   };
 }
 
@@ -447,7 +445,7 @@ module.exports = async function handler(req, res) {
       aspectRatio = "9:16",
       customPrompt = "",
       durationRange = "60-90",
-      captionStyle = "sentence", // stored in choices for your UI, but MAIN stays clean
+      captionStyle = "sentence",
     } = body;
 
     if (!process.env.CREATOMATE_API_KEY) return res.status(500).json({ error: "MISSING_CREATOMATE_API_KEY" });
@@ -463,7 +461,6 @@ module.exports = async function handler(req, res) {
 
     const choices = { storyType, artStyle, language, voice, aspectRatio, customPrompt, durationRange, captionStyle };
 
-    // Generate DB id up front so webhook can target it
     const db_id = crypto.randomUUID();
 
     // Generate script
@@ -513,8 +510,6 @@ module.exports = async function handler(req, res) {
       StoryTypeLabel: storyType,
       Voiceover: narration,
       VoiceUrl: null,
-
-      // ✅ IMPORTANT: ensure MAIN is clean (no subtitles baked in)
       ...mainNoSubtitlesMods(),
     };
 
@@ -569,7 +564,7 @@ module.exports = async function handler(req, res) {
     const job_id = Array.isArray(resp.json) ? resp.json[0]?.id : resp.json?.id;
     if (!job_id) return res.status(502).json({ error: "NO_JOB_ID_IN_RESPONSE", details: resp.json });
 
-    // Insert AFTER we have job_id so render_id is never null
+    // Insert AFTER job_id so render_id is never null
     const { error: insErr } = await supabase.from("renders").insert([
       {
         id: db_id,
@@ -579,12 +574,6 @@ module.exports = async function handler(req, res) {
         render_id: String(job_id),
         choices,
         error: null,
-
-        // Optional: reset caption fields on new render (safe even if some columns don't exist)
-        // caption_status: null,
-        // captioned_video_url: null,
-        // caption_style: null,
-        // caption_error: null,
       },
     ]);
 
