@@ -416,24 +416,25 @@ function buildVariantSequence(beatCount) {
 }
 
 // ---------- Captions (Creatomate layer toggles) ----------
-// ✅ CHANGE: For MAIN renders we want NO captions baked in.
-// This helper now ALWAYS returns all subtitle layers OFF.
+// ✅ MAIN render should show DEFAULT captions (exactly one layer visible)
+// Prevents “double captions” by forcing all OFF then enabling just one.
 function subtitleVisibilityMods(captionStyle) {
-  const style = String(captionStyle || "sentence").toLowerCase();
+  const style = String(captionStyle || "sentence").trim().toLowerCase();
 
   const mods = {
     "Subtitles_Sentence.visible": false,
     "Subtitles_Karaoke.visible": false,
     "Subtitles_Word.visible": false,
-    "Subtitles-1.visible": false, // IMPORTANT: prevents double captions
+    "Subtitles-1.visible": false, // ✅ keep OFF to prevent duplicates
   };
 
-  if (style === "word") mods["Subtitles_Word.visible"] = true;
-  else if (style === "karaoke") mods["Subtitles_Karaoke.visible"] = true;
-  else mods["Subtitles_Sentence.visible"] = true;
+  if (style === "karaoke") mods["Subtitles_Karaoke.visible"] = true;
+  else if (style === "word") mods["Subtitles_Word.visible"] = true;
+  else mods["Subtitles_Sentence.visible"] = true; // default
 
   return mods;
 }
+
 
 // -------------------- MAIN --------------------
 module.exports = async function handler(req, res) {
@@ -486,6 +487,7 @@ module.exports = async function handler(req, res) {
     if (!narration.trim()) {
       return res.status(502).json({ error: "SCRIPT_EMPTY", details: scriptResp });
     }
+choices.narration = narration;
 
     // Beats + timing
     const speechSec = estimateSpeechSeconds(narration);
