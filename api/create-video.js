@@ -416,21 +416,15 @@ function buildVariantSequence(beatCount) {
 }
 
 // ---------- Captions (Creatomate layer toggles) ----------
-function subtitleVisibilityMods(captionStyle) {
-  const style = String(captionStyle || "sentence").toLowerCase();
-
-  const threeLayer = {
+// ✅ CHANGE: For MAIN renders we want NO captions baked in.
+// This helper now ALWAYS returns all subtitle layers OFF.
+function subtitleVisibilityMods(_captionStyle) {
+  return {
     "Subtitles_Sentence.visible": false,
     "Subtitles_Karaoke.visible": false,
     "Subtitles_Word.visible": false,
+    "Subtitles-1.visible": false, // safety if it exists
   };
-
-  if (style === "word") threeLayer["Subtitles_Word.visible"] = true;
-  else if (style === "karaoke") threeLayer["Subtitles_Karaoke.visible"] = true;
-  else threeLayer["Subtitles_Sentence.visible"] = true;
-
-  const singleLayerFallback = { "Subtitles-1.visible": true };
-  return { ...threeLayer, ...singleLayerFallback };
 }
 
 // -------------------- MAIN --------------------
@@ -490,7 +484,10 @@ module.exports = async function handler(req, res) {
     let targetSec = Math.round(speechSec + 2);
 
     let minSec = 60, maxSec = 90;
-    if (durationRange === "30-60") { minSec = 30; maxSec = 60; }
+    if (durationRange === "30-60") {
+      minSec = 30;
+      maxSec = 60;
+    }
 
     if (targetSec < minSec) targetSec = minSec;
     if (targetSec > maxSec) targetSec = maxSec;
@@ -518,6 +515,7 @@ module.exports = async function handler(req, res) {
       StoryTypeLabel: storyType,
       Voiceover: narration,
       VoiceUrl: null,
+      // ✅ CHANGE: MAIN render should be clean (no captions baked in)
       ...subtitleVisibilityMods(captionStyle),
     };
 
@@ -577,19 +575,17 @@ module.exports = async function handler(req, res) {
     }
 
     // ✅ NEW: insert AFTER we have job_id so render_id is never null
-    const { error: insErr } = await supabase
-      .from("renders")
-      .insert([
-        {
-          id: db_id, // ✅ we control id now
-          member_id: String(memberId),
-          status: "waiting",
-          video_url: null,
-          render_id: String(job_id), // ✅ NOT NULL satisfied
-          choices,
-          error: null,
-        },
-      ]);
+    const { error: insErr } = await supabase.from("renders").insert([
+      {
+        id: db_id, // ✅ we control id now
+        member_id: String(memberId),
+        status: "waiting",
+        video_url: null,
+        render_id: String(job_id), // ✅ NOT NULL satisfied
+        choices,
+        error: null,
+      },
+    ]);
 
     if (insErr) {
       console.error("[DB_INSERT_FAILED_AFTER_JOB]", insErr);
