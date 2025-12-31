@@ -119,7 +119,7 @@ module.exports = async function handler(req, res) {
 
     if (readErr || !row) {
       console.warn("[CREATOMATE_WEBHOOK] row not found yet, retry", { dbId, readErr });
-      return res.status(404).json({ ok: false, error: "ROW_NOT_FOUND_RETRY" });
+      return res.status(500).json({ ok: false, error: "ROW_NOT_FOUND_RETRY" });
     }
 
     const mainId = String(row.render_id || "").trim();
