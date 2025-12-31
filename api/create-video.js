@@ -418,13 +418,21 @@ function buildVariantSequence(beatCount) {
 // ---------- Captions (Creatomate layer toggles) ----------
 // ✅ CHANGE: For MAIN renders we want NO captions baked in.
 // This helper now ALWAYS returns all subtitle layers OFF.
-function subtitleVisibilityMods(_captionStyle) {
-  return {
+function subtitleVisibilityMods(captionStyle) {
+  const style = String(captionStyle || "sentence").toLowerCase();
+
+  const mods = {
     "Subtitles_Sentence.visible": false,
     "Subtitles_Karaoke.visible": false,
     "Subtitles_Word.visible": false,
-    "Subtitles-1.visible": false, // safety if it exists
+    "Subtitles-1.visible": false, // IMPORTANT: prevents double captions
   };
+
+  if (style === "word") mods["Subtitles_Word.visible"] = true;
+  else if (style === "karaoke") mods["Subtitles_Karaoke.visible"] = true;
+  else mods["Subtitles_Sentence.visible"] = true;
+
+  return mods;
 }
 
 // -------------------- MAIN --------------------
