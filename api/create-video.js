@@ -415,16 +415,6 @@ function buildVariantSequence(beatCount) {
   return seq;
 }
 
-// ---------- Subtitles (MAIN render must be clean) ----------
-function mainNoSubtitlesMods() {
-  return {
-    "Subtitles_Sentence.visible": false,
-    "Subtitles_Karaoke.visible": false,
-    "Subtitles_Word.visible": false,
-    "Subtitles-1.visible": false,
-  };
-}
-
 // -------------------- MAIN --------------------
 module.exports = async function handler(req, res) {
   setCors(req, res);
@@ -461,7 +451,27 @@ module.exports = async function handler(req, res) {
 
     const choices = { storyType, artStyle, language, voice, aspectRatio, customPrompt, durationRange, captionStyle };
 
+    // ✅ DB id up front so webhook can target it
     const db_id = crypto.randomUUID();
+
+    // ✅ IMPORTANT FIX: INSERT ROW FIRST (prevents webhook "row not found")
+    // render_id is NOT NULL, so we use a placeholder and update it after Creatomate returns job_id
+    const { error: preInsErr } = await supabase.from("renders").insert([
+      {
+        id: db_id,
+        member_id: String(memberId),
+        status: "waiting",
+        video_url: null,
+        render_id: "pending", // ✅ placeholder to satisfy NOT NULL
+        choices,
+        error: null,
+      },
+    ]);
+
+    if (preInsErr) {
+      console.error("[DB_PREINSERT_FAILED]", preInsErr);
+      return res.status(500).json({ error: "DB_PREINSERT_FAILED", details: preInsErr });
+    }
 
     // Generate script
     const scriptResp = await fetch(`${publicBaseUrl}/api/generate-script`, {
@@ -471,7 +481,11 @@ module.exports = async function handler(req, res) {
     }).then((r) => r.json());
 
     const narration = (scriptResp && scriptResp.narration) || "";
-    if (!narration.trim()) return res.status(502).json({ error: "SCRIPT_EMPTY", details: scriptResp });
+    if (!narration.trim()) {
+      // mark failed
+      await supabase.from("renders").update({ status: "failed", error: JSON.stringify(scriptResp || {}) }).eq("id", db_id);
+      return res.status(502).json({ error: "SCRIPT_EMPTY", details: scriptResp });
+    }
 
     // Beats + timing
     const speechSec = estimateSpeechSeconds(narration);
@@ -502,7 +516,7 @@ module.exports = async function handler(req, res) {
 
     const variantSequence = buildVariantSequence(beatCount);
 
-    // Creatomate modifications
+    // Creatomate modifications (UNCHANGED — keep your current caption behavior here)
     const mods = {
       Narration: narration,
       VoiceLabel: voice,
@@ -510,7 +524,6 @@ module.exports = async function handler(req, res) {
       StoryTypeLabel: storyType,
       Voiceover: narration,
       VoiceUrl: null,
-      ...mainNoSubtitlesMods(),
     };
 
     for (let i = 1; i <= beatCount; i++) {
@@ -558,28 +571,26 @@ module.exports = async function handler(req, res) {
     );
 
     if (resp.status !== 202 && resp.status !== 200) {
+      await supabase
+        .from("renders")
+        .update({ status: "failed", error: JSON.stringify(resp.json || {}) })
+        .eq("id", db_id);
+
       return res.status(resp.status).json({ error: "CREATOMATE_ERROR", details: resp.json });
     }
 
     const job_id = Array.isArray(resp.json) ? resp.json[0]?.id : resp.json?.id;
-    if (!job_id) return res.status(502).json({ error: "NO_JOB_ID_IN_RESPONSE", details: resp.json });
+    if (!job_id) {
+      await supabase.from("renders").update({ status: "failed", error: "NO_JOB_ID_IN_RESPONSE" }).eq("id", db_id);
+      return res.status(502).json({ error: "NO_JOB_ID_IN_RESPONSE", details: resp.json });
+    }
 
-    // Insert AFTER job_id so render_id is never null
-    const { error: insErr } = await supabase.from("renders").insert([
-      {
-        id: db_id,
-        member_id: String(memberId),
-        status: "waiting",
-        video_url: null,
-        render_id: String(job_id),
-        choices,
-        error: null,
-      },
-    ]);
+    // ✅ Update placeholder render_id to the real Creatomate job id
+    const { error: updErr } = await supabase.from("renders").update({ render_id: String(job_id) }).eq("id", db_id);
 
-    if (insErr) {
-      console.error("[DB_INSERT_FAILED_AFTER_JOB]", insErr);
-      return res.status(500).json({ error: "DB_INSERT_FAILED", details: insErr, job_id, db_id });
+    if (updErr) {
+      console.error("[DB_UPDATE_RENDER_ID_FAILED]", updErr);
+      // don't fail the whole request, but let you see it
     }
 
     return res.status(200).json({ ok: true, job_id, db_id, captionStyle });
