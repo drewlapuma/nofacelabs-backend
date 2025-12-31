@@ -187,15 +187,21 @@ module.exports = async function handler(req, res) {
         if (error || !row) return res.status(404).json({ ok: false, error: "NOT_FOUND" });
         if (!row.video_url) return res.status(400).json({ ok: false, error: "VIDEO_NOT_READY" });
 
-        // already done?
-        if (row.captioned_video_url) {
-          return res.status(200).json({
-            ok: true,
-            already: true,
-            caption_status: row.caption_status || "completed",
-            captioned_video_url: row.captioned_video_url,
-          });
-        }
+// already done? only if same style
+const prevStyle = String(row.caption_style || "").trim().toLowerCase();
+
+if (row.captioned_video_url && prevStyle === styleSafe) {
+  return res.status(200).json({
+    ok: true,
+    already: true,
+    caption_status: row.caption_status || "completed",
+    captioned_video_url: row.captioned_video_url,
+    style: styleSafe,
+  });
+}
+
+        // if a caption exists but style changed, regenerate (overwrite)
+
 
         const aspectRatio = row?.choices?.aspectRatio || row?.choices?.aspect_ratio || "9:16";
         const template_id = pickCaptionsTemplateIdByAspect(aspectRatio);
