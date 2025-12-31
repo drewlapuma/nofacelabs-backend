@@ -1,25 +1,26 @@
 // api/creatomate-webhook.js
-// Requires: ?id=<renders.id>&kind=main  OR  ?id=<renders.id>&kind=caption
+// REQUIRED query params:
+//   ?id=<renders.id>&kind=main
+//   ?id=<renders.id>&kind=caption
+//
 // Updates:
 // - MAIN: status + video_url (+ render_id if missing)
 // - CAPTION: caption_status + captioned_video_url
 //
-// IMPORTANT: Return non-200 when DB read/update fails so Creatomate retries.
+// IMPORTANT: If the webhook body already says succeeded/failed AND contains a URL,
+// we update immediately (do NOT call GET, do NOT downgrade status).
 
 const { getAdminSupabase } = require("./_lib/supabase");
 
 const CREATOMATE_API_KEY = (process.env.CREATOMATE_API_KEY || "").trim();
 
-async function creatomateGetRender(renderId) {
-  if (!CREATOMATE_API_KEY) throw new Error("MISSING_CREATOMATE_API_KEY");
-
-  const r = await fetch(`https://api.creatomate.com/v1/renders/${encodeURIComponent(renderId)}`, {
-    headers: { Authorization: `Bearer ${CREATOMATE_API_KEY}` },
-  });
-
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(j?.message || j?.error || `CREATOMATE_GET_FAILED (${r.status})`);
-  return j;
+function normStatus(s) {
+  const x = String(s || "").toLowerCase();
+  if (!x) return "";
+  if (x === "succeeded" || x.includes("succeed") || x.includes("complete") || x === "done") return "succeeded";
+  if (x === "failed" || x.includes("fail") || x.includes("error")) return "failed";
+  if (x.includes("queue") || x.includes("process") || x.includes("render") || x.includes("wait")) return "rendering";
+  return x;
 }
 
 function extractOutputUrl(obj) {
@@ -38,13 +39,16 @@ function extractOutputUrl(obj) {
   );
 }
 
-function normStatus(s) {
-  const x = String(s || "").toLowerCase();
-  if (!x) return "";
-  if (x.includes("succeed") || x.includes("complete") || x === "done") return "succeeded";
-  if (x.includes("fail") || x.includes("error")) return "failed";
-  if (x.includes("queue") || x.includes("process") || x.includes("render") || x.includes("wait")) return "rendering";
-  return x;
+async function creatomateGetRender(renderId) {
+  if (!CREATOMATE_API_KEY) throw new Error("MISSING_CREATOMATE_API_KEY");
+
+  const r = await fetch(`https://api.creatomate.com/v1/renders/${encodeURIComponent(renderId)}`, {
+    headers: { Authorization: `Bearer ${CREATOMATE_API_KEY}` },
+  });
+
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j?.message || j?.error || `CREATOMATE_GET_FAILED (${r.status})`);
+  return j;
 }
 
 module.exports = async function handler(req, res) {
@@ -61,60 +65,91 @@ module.exports = async function handler(req, res) {
     const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {});
     const incomingRenderId = String(body?.id || body?.render_id || "").trim();
 
+    const bodyStatus = normStatus(body?.status || "");
+    const bodyUrl = extractOutputUrl(body);
+
     console.log("[CREATOMATE_WEBHOOK] incoming", {
       dbId,
       kind,
       incomingRenderId,
       bodyStatus: body?.status,
-      hasOutput: Boolean(body?.output || body?.url || body?.video_url),
+      bodyStatusNorm: bodyStatus,
+      hasBodyUrl: Boolean(bodyUrl),
+      bodyUrlType: typeof body?.url,
       keys: Object.keys(body || {}),
     });
 
-    // ✅ Only select columns that actually exist in your table
+    // ✅ Only select columns that exist
     const { data: row, error: readErr } = await sb
       .from("renders")
-      .select("id, render_id, status, video_url, caption_status, captioned_video_url")
+      .select("id, member_id, render_id, status, video_url, caption_status, captioned_video_url")
       .eq("id", dbId)
       .single();
 
     if (readErr || !row) {
-      console.warn("[CREATOMATE_WEBHOOK] row not found yet, will retry", { dbId, readErr });
+      console.warn("[CREATOMATE_WEBHOOK] row not found yet, retry", { dbId, readErr });
       return res.status(404).json({ ok: false, error: "ROW_NOT_FOUND_RETRY" });
     }
 
     const mainId = String(row.render_id || "").trim();
+    const renderIdToFetch = incomingRenderId || mainId || "";
 
-    // Decide which render ID to fetch
-    let renderIdToFetch = incomingRenderId;
-    if (!renderIdToFetch) renderIdToFetch = mainId;
-    if (!renderIdToFetch) {
-      console.warn("[CREATOMATE_WEBHOOK] missing render id, retry", { dbId, kind });
-      return res.status(500).json({ ok: false, error: "MISSING_RENDER_ID_RETRY" });
-    }
-
-    // Get authoritative info (fallback to body if needed)
-    let rObj = null;
-    try {
-      rObj = await creatomateGetRender(renderIdToFetch);
-    } catch (e) {
-      console.warn("[CREATOMATE_WEBHOOK] creatomateGetRender failed, using body", { message: String(e?.message || e) });
-    }
-
-    const status = normStatus((rObj?.status ?? body?.status) || "");
-    const outUrl = extractOutputUrl(rObj) || extractOutputUrl(body) || null;
-
-    // MAIN update
+    // ------------------------------------------------------------
+    // ✅ MAIN
+    // ------------------------------------------------------------
     if (kind === "main") {
+      // ✅ If webhook says terminal + URL, TRUST IT and update immediately
+      if (bodyStatus === "succeeded" && bodyUrl) {
+        const patch = {
+          render_id: mainId || renderIdToFetch || null,
+          status: "succeeded",
+          video_url: String(bodyUrl),
+          error: null,
+        };
+
+        const { error: updErr } = await sb.from("renders").update(patch).eq("id", dbId);
+        if (updErr) {
+          console.error("[CREATOMATE_WEBHOOK] main immediate update failed", updErr);
+          return res.status(500).json({ ok: false, error: "DB_UPDATE_FAILED_RETRY" });
+        }
+
+        console.log("[CREATOMATE_WEBHOOK] main updated (body)", { dbId, status: patch.status, hasVideo: true });
+        return res.status(200).json({ ok: true });
+      }
+
+      // Otherwise: look up render to confirm (non-terminal webhook body or missing URL)
+      let rObj = null;
+      let getStatus = "";
+      let getUrl = null;
+
+      if (renderIdToFetch) {
+        try {
+          rObj = await creatomateGetRender(renderIdToFetch);
+          getStatus = normStatus(rObj?.status || "");
+          getUrl = extractOutputUrl(rObj);
+        } catch (e) {
+          console.warn("[CREATOMATE_WEBHOOK] main GET failed, fallback to body", { message: String(e?.message || e) });
+        }
+      }
+
+      // ✅ Prefer terminal signals (body beats GET; never downgrade)
+      const finalStatus =
+        bodyStatus === "succeeded" || bodyStatus === "failed"
+          ? bodyStatus
+          : getStatus || "rendering";
+
+      const finalUrl = bodyUrl || getUrl || null;
+
       const patch = {
-        render_id: mainId || renderIdToFetch,
-        status: status || row.status || "rendering",
+        render_id: mainId || renderIdToFetch || null,
+        status: finalStatus,
       };
 
-      if (status === "succeeded" && outUrl) {
+      if (finalStatus === "succeeded" && finalUrl) {
         patch.status = "succeeded";
-        patch.video_url = String(outUrl);
+        patch.video_url = String(finalUrl);
         patch.error = null;
-      } else if (status === "failed") {
+      } else if (finalStatus === "failed") {
         patch.status = "failed";
         patch.error = JSON.stringify(rObj || body || {});
       }
@@ -125,21 +160,70 @@ module.exports = async function handler(req, res) {
         return res.status(500).json({ ok: false, error: "DB_UPDATE_FAILED_RETRY" });
       }
 
-      console.log("[CREATOMATE_WEBHOOK] main updated", { dbId, status: patch.status, hasVideo: !!patch.video_url });
+      console.log("[CREATOMATE_WEBHOOK] main updated", {
+        dbId,
+        status: patch.status,
+        hasVideo: Boolean(patch.video_url),
+        finalStatus,
+        hasFinalUrl: Boolean(finalUrl),
+      });
+
       return res.status(200).json({ ok: true });
     }
 
-    // CAPTION update (no caption_render_id column in your DB)
+    // ------------------------------------------------------------
+    // ✅ CAPTION
+    // ------------------------------------------------------------
     if (kind === "caption") {
+      // ✅ If webhook says terminal + URL, TRUST IT
+      if (bodyStatus === "succeeded" && bodyUrl) {
+        const patch = {
+          caption_status: "completed",
+          captioned_video_url: String(bodyUrl),
+          caption_error: null,
+        };
+
+        const { error: updErr } = await sb.from("renders").update(patch).eq("id", dbId);
+        if (updErr) {
+          console.error("[CREATOMATE_WEBHOOK] caption immediate update failed", updErr);
+          return res.status(500).json({ ok: false, error: "DB_UPDATE_FAILED_RETRY" });
+        }
+
+        console.log("[CREATOMATE_WEBHOOK] caption updated (body)", { dbId, status: patch.caption_status, hasCaptioned: true });
+        return res.status(200).json({ ok: true });
+      }
+
+      // Otherwise: GET (optional)
+      let rObj = null;
+      let getStatus = "";
+      let getUrl = null;
+
+      if (renderIdToFetch) {
+        try {
+          rObj = await creatomateGetRender(renderIdToFetch);
+          getStatus = normStatus(rObj?.status || "");
+          getUrl = extractOutputUrl(rObj);
+        } catch (e) {
+          console.warn("[CREATOMATE_WEBHOOK] caption GET failed, fallback to body", { message: String(e?.message || e) });
+        }
+      }
+
+      const finalStatus =
+        bodyStatus === "succeeded" || bodyStatus === "failed"
+          ? bodyStatus
+          : getStatus || "captioning";
+
+      const finalUrl = bodyUrl || getUrl || null;
+
       const patch = {
-        caption_status: status || row.caption_status || "captioning",
+        caption_status: finalStatus === "succeeded" ? "completed" : finalStatus,
       };
 
-      if (status === "succeeded" && outUrl) {
+      if (finalStatus === "succeeded" && finalUrl) {
         patch.caption_status = "completed";
-        patch.captioned_video_url = String(outUrl);
+        patch.captioned_video_url = String(finalUrl);
         patch.caption_error = null;
-      } else if (status === "failed") {
+      } else if (finalStatus === "failed") {
         patch.caption_status = "failed";
         patch.caption_error = JSON.stringify(rObj || body || {});
       }
@@ -153,13 +237,14 @@ module.exports = async function handler(req, res) {
       console.log("[CREATOMATE_WEBHOOK] caption updated", {
         dbId,
         status: patch.caption_status,
-        hasCaptioned: !!patch.captioned_video_url,
+        hasCaptioned: Boolean(patch.captioned_video_url),
+        hasFinalUrl: Boolean(finalUrl),
       });
 
       return res.status(200).json({ ok: true });
     }
 
-    // If kind missing, fail so Creatomate retries (forces you to pass kind explicitly)
+    // If kind missing, fail so Creatomate retries
     console.warn("[CREATOMATE_WEBHOOK] missing kind, retry", { dbId });
     return res.status(500).json({ ok: false, error: "MISSING_KIND_RETRY" });
   } catch (e) {
