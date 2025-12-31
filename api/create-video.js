@@ -2,7 +2,7 @@
 // NOTE: Node 18 on Vercel has global fetch.
 
 const https = require("https");
-const crypto = require("crypto"); // ✅ NEW
+const crypto = require("crypto");
 const { createClient } = require("@supabase/supabase-js");
 const memberstackAdmin = require("@memberstack/admin");
 
@@ -415,26 +415,17 @@ function buildVariantSequence(beatCount) {
   return seq;
 }
 
-// ---------- Captions (Creatomate layer toggles) ----------
-// ✅ MAIN render should show DEFAULT captions (exactly one layer visible)
-// Prevents “double captions” by forcing all OFF then enabling just one.
-function subtitleVisibilityMods(captionStyle) {
-  const style = String(captionStyle || "sentence").trim().toLowerCase();
-
-  const mods = {
+// ---------- Subtitles (MAIN render must be clean) ----------
+// ✅ This is the key change that prevents “double captions” later:
+// MAIN render exports with ALL subtitle layers OFF.
+function mainNoSubtitlesMods() {
+  return {
     "Subtitles_Sentence.visible": false,
     "Subtitles_Karaoke.visible": false,
     "Subtitles_Word.visible": false,
-    "Subtitles-1.visible": false, // ✅ keep OFF to prevent duplicates
+    "Subtitles-1.visible": false, // important if your template still has this fallback
   };
-
-  if (style === "karaoke") mods["Subtitles_Karaoke.visible"] = true;
-  else if (style === "word") mods["Subtitles_Word.visible"] = true;
-  else mods["Subtitles_Sentence.visible"] = true; // default
-
-  return mods;
 }
-
 
 // -------------------- MAIN --------------------
 module.exports = async function handler(req, res) {
@@ -444,7 +435,7 @@ module.exports = async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "METHOD_NOT_ALLOWED" });
 
   try {
-    const publicBaseUrl = (API_BASE || `https://${req.headers.host}`).trim(); // ✅ keep stable
+    const publicBaseUrl = (API_BASE || `https://${req.headers.host}`).trim();
     const memberId = await requireMemberId(req);
 
     const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : req.body || {};
@@ -456,7 +447,7 @@ module.exports = async function handler(req, res) {
       aspectRatio = "9:16",
       customPrompt = "",
       durationRange = "60-90",
-      captionStyle = "sentence",
+      captionStyle = "sentence", // stored in choices for your UI, but MAIN stays clean
     } = body;
 
     if (!process.env.CREATOMATE_API_KEY) return res.status(500).json({ error: "MISSING_CREATOMATE_API_KEY" });
@@ -472,11 +463,10 @@ module.exports = async function handler(req, res) {
 
     const choices = { storyType, artStyle, language, voice, aspectRatio, customPrompt, durationRange, captionStyle };
 
-    // ✅ NEW: generate DB id up front so webhook can target it,
-    // while still keeping render_id NOT NULL when we insert later.
+    // Generate DB id up front so webhook can target it
     const db_id = crypto.randomUUID();
 
-    // ✅ Generate script
+    // Generate script
     const scriptResp = await fetch(`${publicBaseUrl}/api/generate-script`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -484,16 +474,14 @@ module.exports = async function handler(req, res) {
     }).then((r) => r.json());
 
     const narration = (scriptResp && scriptResp.narration) || "";
-    if (!narration.trim()) {
-      return res.status(502).json({ error: "SCRIPT_EMPTY", details: scriptResp });
-    }
-choices.narration = narration;
+    if (!narration.trim()) return res.status(502).json({ error: "SCRIPT_EMPTY", details: scriptResp });
 
     // Beats + timing
     const speechSec = estimateSpeechSeconds(narration);
     let targetSec = Math.round(speechSec + 2);
 
-    let minSec = 60, maxSec = 90;
+    let minSec = 60,
+      maxSec = 90;
     if (durationRange === "30-60") {
       minSec = 30;
       maxSec = 60;
@@ -517,7 +505,7 @@ choices.narration = narration;
 
     const variantSequence = buildVariantSequence(beatCount);
 
-    // Creatomate mods
+    // Creatomate modifications
     const mods = {
       Narration: narration,
       VoiceLabel: voice,
@@ -525,8 +513,9 @@ choices.narration = narration;
       StoryTypeLabel: storyType,
       Voiceover: narration,
       VoiceUrl: null,
-      // ✅ CHANGE: MAIN render should be clean (no captions baked in)
-      ...subtitleVisibilityMods(captionStyle),
+
+      // ✅ IMPORTANT: ensure MAIN is clean (no subtitles baked in)
+      ...mainNoSubtitlesMods(),
     };
 
     for (let i = 1; i <= beatCount; i++) {
@@ -555,13 +544,11 @@ choices.narration = narration;
       if (proxied) lastGood = proxied;
 
       const chosen = i === 1 ? "PanRight" : variantSequence[i - 1];
-
       for (const variant of ANIMATION_VARIANTS) {
         mods[`Beat${i}_${variant}_Image.source`] = variant === chosen ? proxied : "";
       }
     }
 
-    // ✅ IMPORTANT: webhook_url includes db_id + kind=main
     const payload = {
       template_id,
       modifications: mods,
@@ -580,20 +567,24 @@ choices.narration = narration;
     }
 
     const job_id = Array.isArray(resp.json) ? resp.json[0]?.id : resp.json?.id;
-    if (!job_id) {
-      return res.status(502).json({ error: "NO_JOB_ID_IN_RESPONSE", details: resp.json });
-    }
+    if (!job_id) return res.status(502).json({ error: "NO_JOB_ID_IN_RESPONSE", details: resp.json });
 
-    // ✅ NEW: insert AFTER we have job_id so render_id is never null
+    // Insert AFTER we have job_id so render_id is never null
     const { error: insErr } = await supabase.from("renders").insert([
       {
-        id: db_id, // ✅ we control id now
+        id: db_id,
         member_id: String(memberId),
         status: "waiting",
         video_url: null,
-        render_id: String(job_id), // ✅ NOT NULL satisfied
+        render_id: String(job_id),
         choices,
         error: null,
+
+        // Optional: reset caption fields on new render (safe even if some columns don't exist)
+        // caption_status: null,
+        // captioned_video_url: null,
+        // caption_style: null,
+        // caption_error: null,
       },
     ]);
 
