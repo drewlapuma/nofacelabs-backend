@@ -224,14 +224,16 @@ if (row.captioned_video_url && prevStyle === styleSafe) {
           [`${CREATO_VIDEO_ELEMENT_ID}.source`]: String(row.video_url),
         };
 
-        // Some templates include a subtitle layer you want forced visible.
-        // If your template uses the 3-layer method, your template itself should
-        // switch based on style or you can do it here.
-        // (Safe: extra keys won't break if layer not found.)
-        mods["Subtitles_Sentence.visible"] = styleSafe === "sentence";
-        mods["Subtitles_Karaoke.visible"] = styleSafe === "karaoke";
-        mods["Subtitles_Word.visible"] = styleSafe === "word";
-        mods["Subtitles-1.visible"] = true; // fallback
+      // ✅ Force exactly one captions layer visible (Subtitles_* system)
+mods["Subtitles_Sentence.visible"] = false;
+mods["Subtitles_Karaoke.visible"] = false;
+mods["Subtitles_Word.visible"] = false;
+mods["Subtitles-1.visible"] = false; // ✅ prevent double captions
+
+if (styleSafe === "karaoke") mods["Subtitles_Karaoke.visible"] = true;
+else if (styleSafe === "word") mods["Subtitles_Word.visible"] = true;
+else mods["Subtitles_Sentence.visible"] = true; // default
+
 
         // If you have a text element that must exist, set it to empty (safe)
         mods[`${CREATO_CAPTIONS_JSON_ELEMENT_ID}.text`] = "";
