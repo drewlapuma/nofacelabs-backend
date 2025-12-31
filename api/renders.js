@@ -2,8 +2,7 @@
 // Handles:
 //  - GET /api/renders            => list renders for member
 //  - GET /api/renders?id=...     => single render for member
-//  - POST /api/renders {action:"captions-apply", id, style}  => make captioned copy via captions template
-//  - POST /api/renders {action:"captions-change", id, style} => RE-RENDER MAIN video with new caption style
+//  - POST /api/renders {action:"captions-apply", id, style} => start captions render in Creatomate
 
 const https = require("https");
 const memberstackAdmin = require("@memberstack/admin");
@@ -53,30 +52,14 @@ async function requireMemberId(req) {
 // -------------------- Creatomate --------------------
 const CREATOMATE_API_KEY = (process.env.CREATOMATE_API_KEY || "").trim();
 
-// MAIN templates (same ones create-video.js uses)
-const MAIN_TEMPLATE_916 = (process.env.CREATO_TEMPLATE_916 || "").trim();
-const MAIN_TEMPLATE_11  = (process.env.CREATO_TEMPLATE_11 || "").trim();
-const MAIN_TEMPLATE_169 = (process.env.CREATO_TEMPLATE_169 || "").trim();
-
-// Captions templates (separate caption-copy templates)
 const CAPTIONS_TEMPLATE_916 = (process.env.CREATO_CAPTIONS_TEMPLATE_916 || "").trim();
-const CAPTIONS_TEMPLATE_11  = (process.env.CREATO_CAPTIONS_TEMPLATE_11 || "").trim();
+const CAPTIONS_TEMPLATE_11 = (process.env.CREATO_CAPTIONS_TEMPLATE_11 || "").trim();
 const CAPTIONS_TEMPLATE_169 = (process.env.CREATO_CAPTIONS_TEMPLATE_169 || "").trim();
 
-// Element IDs inside captions template
 const CREATO_VIDEO_ELEMENT_ID = (process.env.CREATO_VIDEO_ELEMENT_ID || "Video-DHM").trim();
 const CREATO_CAPTIONS_JSON_ELEMENT_ID = (process.env.CREATO_CAPTIONS_JSON_ELEMENT_ID || "Subtitles-1").trim();
 
-// Must be public for Creatomate webhook URLs
 const API_BASE = (process.env.API_BASE || "").trim();
-
-function pickMainTemplateIdByAspect(aspectRatio) {
-  const ar = String(aspectRatio || "9:16").trim();
-  if (ar === "9:16") return MAIN_TEMPLATE_916;
-  if (ar === "1:1") return MAIN_TEMPLATE_11;
-  if (ar === "16:9") return MAIN_TEMPLATE_169;
-  return MAIN_TEMPLATE_916 || MAIN_TEMPLATE_11 || MAIN_TEMPLATE_169 || "";
-}
 
 function pickCaptionsTemplateIdByAspect(aspectRatio) {
   const ar = String(aspectRatio || "9:16").trim();
@@ -86,7 +69,6 @@ function pickCaptionsTemplateIdByAspect(aspectRatio) {
   return CAPTIONS_TEMPLATE_916 || CAPTIONS_TEMPLATE_11 || CAPTIONS_TEMPLATE_169 || "";
 }
 
-// HTTPS JSON helper (Creatomate)
 function postJSON(url, headers, bodyObj) {
   return new Promise((resolve, reject) => {
     const u = new URL(url);
@@ -125,28 +107,9 @@ function postJSON(url, headers, bodyObj) {
   });
 }
 
-// IMPORTANT: exactly one captions layer visible (prevents double captions)
-function subtitleVisibilityMods(captionStyle) {
-  const style = String(captionStyle || "sentence").toLowerCase();
-
-  const mods = {
-    "Subtitles_Sentence.visible": false,
-    "Subtitles_Karaoke.visible": false,
-    "Subtitles_Word.visible": false,
-    "Subtitles-1.visible": false,
-  };
-
-  if (style === "karaoke") mods["Subtitles_Karaoke.visible"] = true;
-  else if (style === "word") mods["Subtitles_Word.visible"] = true;
-  else mods["Subtitles_Sentence.visible"] = true;
-
-  return mods;
-}
-
 // -------------------- MAIN --------------------
 module.exports = async function handler(req, res) {
   setCors(req, res);
-
   if (req.method === "OPTIONS") return res.status(204).end();
 
   try {
@@ -185,86 +148,7 @@ module.exports = async function handler(req, res) {
       const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : req.body || {};
       const action = String(body?.action || "").trim();
 
-      // ==========================================================
-      // captions-change  ✅ RE-RENDER MAIN video with new caption style
-      // ==========================================================
-      if (action === "captions-change") {
-        const id = String(body?.id || "").trim();
-        if (!id) return res.status(400).json({ ok: false, error: "MISSING_ID" });
-
-        const style = String(body?.style || "sentence").trim().toLowerCase();
-        const styleSafe = ["sentence", "karaoke", "word"].includes(style) ? style : "sentence";
-
-        if (!CREATOMATE_API_KEY) return res.status(500).json({ ok: false, error: "MISSING_CREATOMATE_API_KEY" });
-
-        const { data: row, error } = await sb
-          .from("renders")
-          .select("*")
-          .eq("id", id)
-          .eq("member_id", member_id)
-          .single();
-
-        if (error || !row) return res.status(404).json({ ok: false, error: "NOT_FOUND" });
-
-        const choices = row.choices || {};
-        const aspectRatio = choices.aspectRatio || choices.aspect_ratio || "9:16";
-        const template_id = pickMainTemplateIdByAspect(aspectRatio);
-        if (!template_id) return res.status(500).json({ ok: false, error: "NO_MAIN_TEMPLATE_FOR_ASPECT", aspectRatio });
-
-        // MUST have narration stored (recommended: choices.narration in create-video.js)
-        const narration = String(choices.narration || row.narration || "").trim();
-        if (!narration) return res.status(500).json({ ok: false, error: "MISSING_NARRATION_FOR_RERENDER" });
-
-        // Build minimal mods (matches your create-video.js labels)
-        const mods = {
-          Narration: narration,
-          Voiceover: narration,
-          VoiceLabel: choices.voice || "Adam",
-          LanguageLabel: choices.language || "English",
-          StoryTypeLabel: choices.storyType || "Video",
-          ...subtitleVisibilityMods(styleSafe),
-        };
-
-        const publicBaseUrl = (API_BASE || `https://${req.headers.host}`).trim();
-        const webhook_url = `${publicBaseUrl}/api/creatomate-webhook?id=${encodeURIComponent(row.id)}&kind=main`;
-
-        const payload = { template_id, modifications: mods, output_format: "mp4", webhook_url };
-
-        const resp = await postJSON(
-          "https://api.creatomate.com/v1/renders",
-          { Authorization: `Bearer ${CREATOMATE_API_KEY}` },
-          payload
-        );
-
-        if (resp.status !== 202 && resp.status !== 200) {
-          return res.status(resp.status).json({ ok: false, error: "CREATOMATE_ERROR", details: resp.json });
-        }
-
-        const newRenderId = Array.isArray(resp.json) ? resp.json[0]?.id : resp.json?.id;
-        if (!newRenderId) return res.status(502).json({ ok: false, error: "NO_JOB_ID", details: resp.json });
-
-        // Force the UI to wait for the new output (webhook will set video_url)
-        await sb.from("renders").update({
-          status: "rendering",
-          render_id: String(newRenderId),
-          video_url: null,
-          // Keep everything, just update the style + narration (so it’s always present)
-          choices: { ...choices, captionStyle: styleSafe, narration },
-        }).eq("id", row.id);
-
-        return res.status(200).json({
-          ok: true,
-          id: row.id,
-          render_id: newRenderId,
-          status: "rendering",
-          captionStyle: styleSafe,
-        });
-      }
-
-      // ==========================================================
-      // captions-apply  ✅ make a captioned COPY via captions template
-      // (kept for optional “export captioned version” flow)
-      // ==========================================================
+      // ---------- captions-apply ----------
       if (action === "captions-apply") {
         const id = String(body?.id || "").trim();
         if (!id) return res.status(400).json({ ok: false, error: "MISSING_ID" });
@@ -284,7 +168,9 @@ module.exports = async function handler(req, res) {
         if (error || !row) return res.status(404).json({ ok: false, error: "NOT_FOUND" });
         if (!row.video_url) return res.status(400).json({ ok: false, error: "VIDEO_NOT_READY" });
 
-        const prevStyle = String(row.caption_style || "").trim().toLowerCase();
+        // ✅ Determine previous style from choices jsonb (NOT a missing column)
+        const prevStyle = String(row?.choices?.captionStyle || row?.choices?.caption_style || "").trim().toLowerCase();
+
         if (row.captioned_video_url && prevStyle === styleSafe) {
           return res.status(200).json({
             ok: true,
@@ -299,6 +185,9 @@ module.exports = async function handler(req, res) {
         const template_id = pickCaptionsTemplateIdByAspect(aspectRatio);
         if (!template_id) return res.status(500).json({ ok: false, error: "MISSING_CAPTIONS_TEMPLATE" });
 
+        // ✅ Update DB state BEFORE calling Creatomate (and store style inside choices)
+        const newChoices = { ...(row.choices || {}), captionStyle: styleSafe };
+
         await sb
           .from("renders")
           .update({
@@ -306,22 +195,36 @@ module.exports = async function handler(req, res) {
             caption_error: null,
             captioned_video_url: null,
             caption_template_id: `creatomate:${template_id}`,
-            caption_style: styleSafe,
+            choices: newChoices, // ✅ store selected style here
           })
           .eq("id", row.id);
 
+        // Template modifications: pipe original video into the captions template
         const mods = {
           [`${CREATO_VIDEO_ELEMENT_ID}.source`]: String(row.video_url),
-          ...subtitleVisibilityMods(styleSafe),
         };
 
-        // Optional element exists in some caption templates
+        // ✅ Force exactly one captions layer visible (prevents double captions inside the captions template)
+        mods["Subtitles_Sentence.visible"] = false;
+        mods["Subtitles_Karaoke.visible"] = false;
+        mods["Subtitles_Word.visible"] = false;
+        mods["Subtitles-1.visible"] = false;
+
+        if (styleSafe === "karaoke") mods["Subtitles_Karaoke.visible"] = true;
+        else if (styleSafe === "word") mods["Subtitles_Word.visible"] = true;
+        else mods["Subtitles_Sentence.visible"] = true;
+
         mods[`${CREATO_CAPTIONS_JSON_ELEMENT_ID}.text`] = "";
 
-        const publicBaseUrl = (API_BASE || `https://${req.headers.host}`).trim();
+        const publicBaseUrl = API_BASE || `https://${req.headers.host}`;
         const webhook_url = `${publicBaseUrl}/api/creatomate-webhook?id=${encodeURIComponent(row.id)}&kind=caption`;
 
-        const payload = { template_id, modifications: mods, output_format: "mp4", webhook_url };
+        const payload = {
+          template_id,
+          modifications: mods,
+          output_format: "mp4",
+          webhook_url,
+        };
 
         const resp = await postJSON(
           "https://api.creatomate.com/v1/renders",
@@ -332,13 +235,29 @@ module.exports = async function handler(req, res) {
         if (resp.status !== 202 && resp.status !== 200) {
           await sb
             .from("renders")
-            .update({ caption_status: "failed", caption_error: JSON.stringify(resp.json) })
+            .update({
+              caption_status: "failed",
+              caption_error: JSON.stringify(resp.json),
+            })
             .eq("id", row.id);
 
           return res.status(resp.status).json({ ok: false, error: "CREATOMATE_ERROR", details: resp.json });
         }
 
-        // You DO NOT have caption_render_id column — do not write it.
+        // ✅ You do NOT have caption_render_id column, so we do NOT store it.
+        const caption_job_id = Array.isArray(resp.json) ? resp.json[0]?.id : resp.json?.id;
+        if (!caption_job_id) {
+          await sb
+            .from("renders")
+            .update({
+              caption_status: "failed",
+              caption_error: "NO_CAPTION_JOB_ID",
+            })
+            .eq("id", row.id);
+
+          return res.status(502).json({ ok: false, error: "NO_CAPTION_JOB_ID", details: resp.json });
+        }
+
         return res.status(200).json({
           ok: true,
           id: row.id,
