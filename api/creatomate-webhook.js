@@ -7,6 +7,10 @@
 // - MAIN: status + video_url (+ render_id if missing)
 // - CAPTION: caption_status + captioned_video_url
 //
+// ✅ ADDITION:
+// - After MAIN succeeds, auto-triggers captions via /api/auto-captions (server-only)
+//   (keeps everything else the same)
+//
 // IMPORTANT: If the webhook body already says succeeded/failed AND contains a URL,
 // we update immediately (do NOT call GET, do NOT downgrade status).
 
@@ -29,14 +33,7 @@ function extractOutputUrl(obj) {
       ? obj.outputs[0]?.url || obj.outputs[0]?.output
       : null;
 
-  return (
-    obj?.output ||
-    obj?.url ||
-    obj?.video_url ||
-    obj?.download_url ||
-    fromOutputs ||
-    null
-  );
+  return obj?.output || obj?.url || obj?.video_url || obj?.download_url || fromOutputs || null;
 }
 
 async function creatomateGetRender(renderId) {
@@ -51,6 +48,38 @@ async function creatomateGetRender(renderId) {
   return j;
 }
 
+// ✅ ADD: helper to kick off auto captions (non-blocking)
+async function triggerAutoCaptions(req, dbId, row) {
+  try {
+    const alreadyCaptioned = Boolean(row?.captioned_video_url);
+    const captioningNow = String(row?.caption_status || "").toLowerCase() === "captioning";
+    const shouldStart = !alreadyCaptioned && !captioningNow;
+
+    if (!shouldStart) return;
+
+    const secret = String(process.env.INTERNAL_WEBHOOK_SECRET || "").trim();
+    if (!secret) {
+      console.warn("[CREATOMATE_WEBHOOK] INTERNAL_WEBHOOK_SECRET not set; skipping auto-captions");
+      return;
+    }
+
+    const publicBaseUrl = String(process.env.API_BASE || `https://${req.headers.host}`).trim();
+    const style = String(process.env.DEFAULT_CAPTION_STYLE || "sentence").trim().toLowerCase();
+
+    // fire-and-forget
+    fetch(`${publicBaseUrl}/api/auto-captions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-internal-admin": secret,
+      },
+      body: JSON.stringify({ id: dbId, style }),
+    }).catch(() => {});
+  } catch (e) {
+    console.warn("[CREATOMATE_WEBHOOK] triggerAutoCaptions failed", String(e?.message || e));
+  }
+}
+
 module.exports = async function handler(req, res) {
   if (req.method === "OPTIONS") return res.status(200).end();
   if (req.method !== "POST") return res.status(405).json({ ok: false, error: "METHOD_NOT_ALLOWED" });
@@ -62,7 +91,7 @@ module.exports = async function handler(req, res) {
   const sb = getAdminSupabase();
 
   try {
-    const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {});
+    const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : req.body || {};
     const incomingRenderId = String(body?.id || body?.render_id || "").trim();
 
     const bodyStatus = normStatus(body?.status || "");
@@ -114,6 +143,10 @@ module.exports = async function handler(req, res) {
         }
 
         console.log("[CREATOMATE_WEBHOOK] main updated (body)", { dbId, status: patch.status, hasVideo: true });
+
+        // ✅ ADD: auto-trigger captions now that main video exists
+        await triggerAutoCaptions(req, dbId, row);
+
         return res.status(200).json({ ok: true });
       }
 
@@ -134,9 +167,7 @@ module.exports = async function handler(req, res) {
 
       // ✅ Prefer terminal signals (body beats GET; never downgrade)
       const finalStatus =
-        bodyStatus === "succeeded" || bodyStatus === "failed"
-          ? bodyStatus
-          : getStatus || "rendering";
+        bodyStatus === "succeeded" || bodyStatus === "failed" ? bodyStatus : getStatus || "rendering";
 
       const finalUrl = bodyUrl || getUrl || null;
 
@@ -168,6 +199,11 @@ module.exports = async function handler(req, res) {
         hasFinalUrl: Boolean(finalUrl),
       });
 
+      // ✅ ADD: auto-trigger captions if we just finished successfully
+      if (patch.status === "succeeded" && patch.video_url) {
+        await triggerAutoCaptions(req, dbId, row);
+      }
+
       return res.status(200).json({ ok: true });
     }
 
@@ -189,7 +225,11 @@ module.exports = async function handler(req, res) {
           return res.status(500).json({ ok: false, error: "DB_UPDATE_FAILED_RETRY" });
         }
 
-        console.log("[CREATOMATE_WEBHOOK] caption updated (body)", { dbId, status: patch.caption_status, hasCaptioned: true });
+        console.log("[CREATOMATE_WEBHOOK] caption updated (body)", {
+          dbId,
+          status: patch.caption_status,
+          hasCaptioned: true,
+        });
         return res.status(200).json({ ok: true });
       }
 
@@ -204,14 +244,14 @@ module.exports = async function handler(req, res) {
           getStatus = normStatus(rObj?.status || "");
           getUrl = extractOutputUrl(rObj);
         } catch (e) {
-          console.warn("[CREATOMATE_WEBHOOK] caption GET failed, fallback to body", { message: String(e?.message || e) });
+          console.warn("[CREATOMATE_WEBHOOK] caption GET failed, fallback to body", {
+            message: String(e?.message || e),
+          });
         }
       }
 
       const finalStatus =
-        bodyStatus === "succeeded" || bodyStatus === "failed"
-          ? bodyStatus
-          : getStatus || "captioning";
+        bodyStatus === "succeeded" || bodyStatus === "failed" ? bodyStatus : getStatus || "captioning";
 
       const finalUrl = bodyUrl || getUrl || null;
 
