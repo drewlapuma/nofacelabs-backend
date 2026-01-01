@@ -30,7 +30,7 @@ function setCors(req, res) {
 // -------------------- API BASE --------------------
 const API_BASE = (process.env.API_BASE || "").trim();
 
-// -------------------- Your existing env + logic --------------------
+// -------------------- Providers --------------------
 const IMAGE_PROVIDER = (process.env.IMAGE_PROVIDER || "krea").toLowerCase();
 
 // ---------- Supabase ----------
@@ -416,6 +416,8 @@ function buildVariantSequence(beatCount) {
 }
 
 // ---------- Default captions on FIRST render (ONLY ONE layer) ----------
+// IMPORTANT: This supports only the 3 layers you currently have.
+// If you add more styles (Subtitles_BoldWhite, etc), add them here too.
 function mainDefaultCaptionMods(captionStyle) {
   const style = String(captionStyle || "sentence").toLowerCase();
 
@@ -424,7 +426,7 @@ function mainDefaultCaptionMods(captionStyle) {
     "Subtitles_Sentence.visible": false,
     "Subtitles_Karaoke.visible": false,
     "Subtitles_Word.visible": false,
-    "Subtitles-1.visible": false, // prevents the extra/default fallback layer from stacking
+    "Subtitles-1.visible": false, // prevents extra/default fallback layer from stacking
   };
 
   // then turn on exactly ONE layer
@@ -471,12 +473,12 @@ module.exports = async function handler(req, res) {
 
     const choices = { storyType, artStyle, language, voice, aspectRatio, customPrompt, durationRange, captionStyle };
 
-    // ✅ DB id up front so webhook can target it
+    // DB id up front so webhook can target it
     const db_id = crypto.randomUUID();
 
-    // ✅ IMPORTANT: INSERT ROW FIRST (prevents webhook "row not found")
+    // IMPORTANT: INSERT ROW FIRST (prevents webhook "row not found")
     // render_id is NOT NULL, so we use a placeholder and update it after Creatomate returns job_id
-    // ✅ ALSO: do NOT include any caption_* columns here (your table doesn't have them)
+    // ALSO: do NOT include any caption_* columns here (your table doesn't have them)
     const { error: preInsErr } = await supabase.from("renders").insert([
       {
         id: db_id,
@@ -494,7 +496,7 @@ module.exports = async function handler(req, res) {
       return res.status(500).json({ error: "DB_PREINSERT_FAILED", details: preInsErr });
     }
 
-    // ✅ Generate script
+    // Generate script
     const scriptResp = await fetch(`${publicBaseUrl}/api/generate-script`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -549,7 +551,7 @@ module.exports = async function handler(req, res) {
       Voiceover: narration,
       VoiceUrl: null,
 
-      // ✅ First render: ONLY one caption layer (default)
+      // First render: ONLY one caption layer
       ...mainDefaultCaptionMods(captionStyle),
     };
 
@@ -608,7 +610,7 @@ module.exports = async function handler(req, res) {
       return res.status(502).json({ error: "NO_JOB_ID_IN_RESPONSE", details: resp.json });
     }
 
-    // ✅ Update placeholder render_id to real job id
+    // Update placeholder render_id to real job id
     const { error: updErr } = await supabase.from("renders").update({ render_id: String(job_id) }).eq("id", db_id);
     if (updErr) console.error("[DB_UPDATE_RENDER_ID_FAILED]", updErr);
 
