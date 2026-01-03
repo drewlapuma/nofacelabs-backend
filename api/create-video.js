@@ -415,20 +415,13 @@ function buildVariantSequence(beatCount) {
   return seq;
 }
 
-/**
- * =========================
- * CAPTIONS: ALL YOUR STYLES
- * =========================
- * These must match the *layer names in Creatomate* exactly.
- * If any name differs, change it here.
- */
-const CAPTION_LAYER_BY_STYLE = {
-  // base
+// =====================================================
+// Captions: styles + settings
+// =====================================================
+const CAPTION_STYLE_TO_LAYER = {
   sentence: "Subtitles_Sentence",
   karaoke: "Subtitles_Karaoke",
   word: "Subtitles_Word",
-
-  // your expanded styles
   boldwhite: "Subtitles_BoldWhite",
   yellowpop: "Subtitles_YellowPop",
   minttag: "Subtitles_MintTag",
@@ -436,40 +429,119 @@ const CAPTION_LAYER_BY_STYLE = {
   blackbar: "Subtitles_BlackBar",
   highlighter: "Subtitles_Highlighter",
   neonglow: "Subtitles_NeonGlow",
-
-  // you replaced SplitEmphasis with purplepop
   purplepop: "Subtitles_PurplePop",
-
   compactlowerthird: "Subtitles_CompactLowerThird",
   bouncepop: "Subtitles_BouncePop",
   redalert: "Subtitles_RedAlert",
   redtag: "Subtitles_RedTag",
 };
 
-// optional: if your template has any “extra fallback subtitle” layer
-const FALLBACK_CAPTION_LAYER_NAME = "Subtitles-1";
+const ACTIVE_COLOR_STYLES = new Set([
+  "karaoke",
+  "yellowpop",
+  "minttag",
+  "highlighter",
+  "purplepop",
+  "redtag",
+]);
 
-/**
- * Turn ALL caption layers off, then turn EXACTLY one on (the chosen style).
- * This prevents “stacked captions” and makes first render clean.
- */
-function mainDefaultCaptionMods(captionStyle) {
-  const styleKey = String(captionStyle || "sentence").trim().toLowerCase();
-  const chosenKey = CAPTION_LAYER_BY_STYLE[styleKey] ? styleKey : "sentence";
-  const chosenLayer = CAPTION_LAYER_BY_STYLE[chosenKey];
+function normCaptionStyle(v) {
+  const s = String(v || "").trim().toLowerCase();
+  if (s === "karoke") return "karaoke"; // typo normalize
+  return s || "sentence";
+}
+
+function clamp(n, min, max) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return null;
+  return Math.max(min, Math.min(max, x));
+}
+
+function asPercent(n, fallback) {
+  const c = clamp(n, 0, 100);
+  const v = c === null ? fallback : c;
+  return `${v}%`;
+}
+
+function safeColor(v, fallback) {
+  const s = String(v || "").trim();
+  // minimal sanity check (keep simple; Creatomate will also validate)
+  if (!s) return fallback;
+  return s;
+}
+
+function safeTextTransform(v) {
+  const s = String(v || "none").trim().toLowerCase();
+  if (["none", "uppercase", "lowercase", "capitalize"].includes(s)) return s;
+  return "none";
+}
+
+function safePx(n, fallback) {
+  const c = clamp(n, 0, 60);
+  const v = c === null ? fallback : c;
+  return `${v}px`;
+}
+
+// Turn off all, turn on exactly one
+function captionVisibilityMods(captionStyle) {
+  const style = normCaptionStyle(captionStyle);
+  const mods = {
+    // If you have a leftover/default layer in the template, keep it off:
+    "Subtitles-1.visible": false,
+  };
+
+  for (const layer of Object.values(CAPTION_STYLE_TO_LAYER)) {
+    mods[`${layer}.visible`] = false;
+  }
+
+  const layer = CAPTION_STYLE_TO_LAYER[style] || CAPTION_STYLE_TO_LAYER.sentence;
+  mods[`${layer}.visible`] = true;
+
+  return mods;
+}
+
+// Apply captionSettings to the selected layer only
+function captionSettingsMods(captionStyle, captionSettings) {
+  const style = normCaptionStyle(captionStyle);
+  const layer = CAPTION_STYLE_TO_LAYER[style] || CAPTION_STYLE_TO_LAYER.sentence;
+
+  const cs = (captionSettings && typeof captionSettings === "object") ? captionSettings : {};
+
+  // Defaults (match your frontend defaults)
+  const x = asPercent(cs.x, 50);
+  const y = asPercent(cs.y, 50);
+
+  const fontFamily = String(cs.fontFamily || "Inter").trim();
+  const fontWeight = clamp(cs.fontWeight, 100, 1000); // optional
+  const fillColor = safeColor(cs.fillColor, "#FFFFFF");
+  const strokeColor = safeColor(cs.strokeColor, "#000000");
+  const strokeWidth = safePx(cs.strokeWidth, 0);
+  const textTransform = safeTextTransform(cs.textTransform);
+
+  const activeColor = safeColor(cs.activeColor, "#A855F7");
 
   const mods = {};
 
-  // 1) Turn every known style layer OFF
-  for (const layerName of Object.values(CAPTION_LAYER_BY_STYLE)) {
-    mods[`${layerName}.visible`] = false;
+  // Position
+  mods[`${layer}.x_alignment`] = x;
+  mods[`${layer}.y_alignment`] = y;
+
+  // Font
+  if (fontFamily) mods[`${layer}.font_family`] = fontFamily;
+  if (fontWeight !== null) mods[`${layer}.font_weight`] = fontWeight;
+
+  // Base colors
+  mods[`${layer}.fill_color`] = fillColor;
+  mods[`${layer}.stroke_color`] = strokeColor;
+  mods[`${layer}.stroke_width`] = strokeWidth;
+
+  // Transform (works if the layer supports it)
+  mods[`${layer}.text_transform`] = textTransform;
+
+  // Active/effect color only for specific transcript effects
+  if (ACTIVE_COLOR_STYLES.has(style)) {
+    mods[`${layer}.transcript_color`] = activeColor;
   }
-
-  // 2) Turn fallback OFF too (if it exists)
-  mods[`${FALLBACK_CAPTION_LAYER_NAME}.visible`] = false;
-
-  // 3) Turn chosen layer ON
-  mods[`${chosenLayer}.visible`] = true;
 
   return mods;
 }
@@ -495,8 +567,9 @@ module.exports = async function handler(req, res) {
       customPrompt = "",
       durationRange = "60-90",
 
-      // ✅ now supports ALL styles in CAPTION_LAYER_BY_STYLE
+      // ✅ captions
       captionStyle = "sentence",
+      captionSettings = {},
     } = body;
 
     if (!process.env.CREATOMATE_API_KEY) return res.status(500).json({ error: "MISSING_CREATOMATE_API_KEY" });
@@ -510,11 +583,22 @@ module.exports = async function handler(req, res) {
     const template_id = (templateMap[aspectRatio] || "").trim();
     if (!template_id) return res.status(400).json({ error: "NO_TEMPLATE_FOR_ASPECT", aspectRatio });
 
-    const choices = { storyType, artStyle, language, voice, aspectRatio, customPrompt, durationRange, captionStyle };
+    const choices = {
+      storyType,
+      artStyle,
+      language,
+      voice,
+      aspectRatio,
+      customPrompt,
+      durationRange,
+      captionStyle: normCaptionStyle(captionStyle),
+      captionSettings: captionSettings && typeof captionSettings === "object" ? captionSettings : {},
+    };
 
     // DB id up front so webhook can target it
     const db_id = crypto.randomUUID();
 
+    // Insert row first (render_id is NOT NULL, so placeholder then update)
     const { error: preInsErr } = await supabase.from("renders").insert([
       {
         id: db_id,
@@ -579,6 +663,8 @@ module.exports = async function handler(req, res) {
     const variantSequence = buildVariantSequence(beatCount);
 
     // Creatomate mods
+    const styleNorm = normCaptionStyle(captionStyle);
+
     const mods = {
       Narration: narration,
       VoiceLabel: voice,
@@ -587,8 +673,11 @@ module.exports = async function handler(req, res) {
       Voiceover: narration,
       VoiceUrl: null,
 
-      // ✅ First render: ONLY one caption layer (ALL styles supported)
-      ...mainDefaultCaptionMods(captionStyle),
+      // ✅ Exactly one caption layer visible
+      ...captionVisibilityMods(styleNorm),
+
+      // ✅ Apply caption settings to the selected layer
+      ...captionSettingsMods(styleNorm, captionSettings),
     };
 
     for (let i = 1; i <= beatCount; i++) {
@@ -646,11 +735,10 @@ module.exports = async function handler(req, res) {
       return res.status(502).json({ error: "NO_JOB_ID_IN_RESPONSE", details: resp.json });
     }
 
-    // Update placeholder render_id to real job id
     const { error: updErr } = await supabase.from("renders").update({ render_id: String(job_id) }).eq("id", db_id);
     if (updErr) console.error("[DB_UPDATE_RENDER_ID_FAILED]", updErr);
 
-    return res.status(200).json({ ok: true, job_id, db_id, captionStyle });
+    return res.status(200).json({ ok: true, job_id, db_id, captionStyle: styleNorm });
   } catch (err) {
     const msg = String(err?.message || err);
     if (msg.includes("MISSING_AUTH") || msg.includes("MEMBERSTACK") || msg.includes("INVALID_MEMBER")) {
