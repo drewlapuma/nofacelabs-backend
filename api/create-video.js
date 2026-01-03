@@ -415,6 +415,76 @@ function buildVariantSequence(beatCount) {
   return seq;
 }
 
+// ---------- Caption settings helpers (NEW) ----------
+function clamp(n, min, max) {
+  n = Number(n);
+  if (!Number.isFinite(n)) return min;
+  return Math.max(min, Math.min(max, n));
+}
+
+function asHexOrRgba(v, fallback) {
+  const s = String(v || "").trim();
+  return s || fallback;
+}
+
+function normalizeTextTransform(v) {
+  const s = String(v || "none").toLowerCase().trim();
+  if (["none", "uppercase", "lowercase", "capitalize"].includes(s)) return s;
+  return "none";
+}
+
+// Convert a "position" into a y_alignment percentage string (Creatomate uses "50%" strings)
+function yAlignFromPosition(position, yOffset) {
+  const pos = String(position || "bottom").toLowerCase().trim();
+  const off = clamp(yOffset ?? (pos === "top" ? 12 : pos === "middle" ? 50 : 92), 0, 100);
+
+  if (pos === "top") return `${off}%`;
+  if (pos === "middle" || pos === "center") return `50%`;
+  return `${off}%`; // bottom default
+}
+
+// Build modifications for ONE subtitle layer name in your template
+function captionLayerMods(layerName, settings = {}) {
+  const fontFamily = String(settings.fontFamily || "Inter");
+  const fontWeight = String(settings.fontWeight || "800");
+  const fillColor = asHexOrRgba(settings.fillColor, "#FFFFFF");
+  const strokeColor = asHexOrRgba(settings.strokeColor, "#000000");
+  const strokeWidth = String(settings.strokeWidth ?? 0);
+  const shadowColor = asHexOrRgba(settings.shadowColor, "rgba(0,0,0,0)");
+  const textTransform = normalizeTextTransform(settings.textTransform);
+
+  const y_alignment = yAlignFromPosition(settings.position, settings.yOffset);
+
+  // Active/effect color (highlight/karaoke emphasis) maps to transcript_color
+  const activeColor = asHexOrRgba(settings.activeColor, "");
+
+  const mods = {
+    [`${layerName}.font_family`]: fontFamily,
+    [`${layerName}.font_weight`]: fontWeight,
+    [`${layerName}.fill_color`]: fillColor,
+    [`${layerName}.text_transform`]: textTransform,
+
+    // position
+    [`${layerName}.x_alignment`]: "50%",
+    [`${layerName}.y_alignment`]: y_alignment,
+
+    // stroke/outline
+    [`${layerName}.stroke_color`]: strokeColor,
+    [`${layerName}.stroke_width`]: strokeWidth,
+
+    // shadow (ignored if your layer doesn't have these props)
+    [`${layerName}.shadow_color`]: shadowColor,
+    [`${layerName}.shadow_blur`]: String(settings.shadowBlur ?? 0),
+    [`${layerName}.shadow_x`]: String(settings.shadowX ?? 0),
+    [`${layerName}.shadow_y`]: String(settings.shadowY ?? 0),
+  };
+
+  // Only override transcript_color if provided (keeps per-style defaults intact)
+  if (activeColor) mods[`${layerName}.transcript_color`] = activeColor;
+
+  return mods;
+}
+
 // ---------- Default captions on FIRST render (ONLY ONE layer) ----------
 // IMPORTANT: This supports only the 3 layers you currently have.
 // If you add more styles (Subtitles_BoldWhite, etc), add them here too.
@@ -458,6 +528,7 @@ module.exports = async function handler(req, res) {
       customPrompt = "",
       durationRange = "60-90",
       captionStyle = "sentence",
+      captionSettings = {}, // ✅ NEW
     } = body;
 
     if (!process.env.CREATOMATE_API_KEY) return res.status(500).json({ error: "MISSING_CREATOMATE_API_KEY" });
@@ -471,7 +542,7 @@ module.exports = async function handler(req, res) {
     const template_id = (templateMap[aspectRatio] || "").trim();
     if (!template_id) return res.status(400).json({ error: "NO_TEMPLATE_FOR_ASPECT", aspectRatio });
 
-    const choices = { storyType, artStyle, language, voice, aspectRatio, customPrompt, durationRange, captionStyle };
+    const choices = { storyType, artStyle, language, voice, aspectRatio, customPrompt, durationRange, captionStyle, captionSettings };
 
     // DB id up front so webhook can target it
     const db_id = crypto.randomUUID();
@@ -551,8 +622,13 @@ module.exports = async function handler(req, res) {
       Voiceover: narration,
       VoiceUrl: null,
 
-      // First render: ONLY one caption layer
+      // First render: ONLY one caption layer visible
       ...mainDefaultCaptionMods(captionStyle),
+
+      // ✅ Apply user caption settings to all caption layers (safe even if only one is visible)
+      ...captionLayerMods("Subtitles_Sentence", captionSettings),
+      ...captionLayerMods("Subtitles_Karaoke", captionSettings),
+      ...captionLayerMods("Subtitles_Word", captionSettings),
     };
 
     for (let i = 1; i <= beatCount; i++) {
@@ -614,7 +690,7 @@ module.exports = async function handler(req, res) {
     const { error: updErr } = await supabase.from("renders").update({ render_id: String(job_id) }).eq("id", db_id);
     if (updErr) console.error("[DB_UPDATE_RENDER_ID_FAILED]", updErr);
 
-    return res.status(200).json({ ok: true, job_id, db_id, captionStyle });
+    return res.status(200).json({ ok: true, job_id, db_id, captionStyle, captionSettings });
   } catch (err) {
     const msg = String(err?.message || err);
     if (msg.includes("MISSING_AUTH") || msg.includes("MEMBERSTACK") || msg.includes("INVALID_MEMBER")) {
