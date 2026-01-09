@@ -85,6 +85,11 @@ const KREA_PER_BEAT_RETRIES = Number(process.env.KREA_PER_BEAT_RETRIES || 2);
 const KREA_POLL_TRIES = Number(process.env.KREA_POLL_TRIES || 90);
 const KREA_POLL_DELAY_MS = Number(process.env.KREA_POLL_DELAY_MS || 2500);
 
+// ---------- ElevenLabs ----------
+const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
+const ELEVENLABS_MODEL_ID = process.env.ELEVENLABS_MODEL_ID || "eleven_multilingual_v2";
+const VOICE_BUCKET = process.env.VOICE_BUCKET || "voiceovers";
+
 // ---------- Beats ----------
 const MIN_BEATS = 8;
 const MAX_BEATS = 24;
@@ -447,7 +452,7 @@ const ACTIVE_COLOR_STYLES = new Set([
 
 function normCaptionStyle(v) {
   const s = String(v || "").trim().toLowerCase();
-  if (s === "karoke") return "karaoke"; // typo normalize
+  if (s === "karoke") return "karaoke";
   return s || "sentence";
 }
 
@@ -465,7 +470,6 @@ function asPercent(n, fallback) {
 
 function safeColor(v, fallback) {
   const s = String(v || "").trim();
-  // minimal sanity check (keep simple; Creatomate will also validate)
   if (!s) return fallback;
   return s;
 }
@@ -482,12 +486,10 @@ function safePx(n, fallback) {
   return `${v}px`;
 }
 
-// Turn off all, turn on exactly one
 function captionVisibilityMods(captionStyle) {
   const style = normCaptionStyle(captionStyle);
   const mods = {
-    // If you have a leftover/default layer in the template, keep it off:
-    "Subtitles-1.visible": false,
+    "Subtitles-1.visible": false, // if template has an old default
   };
 
   for (const layer of Object.values(CAPTION_STYLE_TO_LAYER)) {
@@ -500,50 +502,105 @@ function captionVisibilityMods(captionStyle) {
   return mods;
 }
 
-// Apply captionSettings to the selected layer only
 function captionSettingsMods(captionStyle, captionSettings) {
   const style = normCaptionStyle(captionStyle);
   const layer = CAPTION_STYLE_TO_LAYER[style] || CAPTION_STYLE_TO_LAYER.sentence;
 
   const cs = (captionSettings && typeof captionSettings === "object") ? captionSettings : {};
 
-  // Defaults (match your frontend defaults)
   const x = asPercent(cs.x, 50);
   const y = asPercent(cs.y, 50);
 
   const fontFamily = String(cs.fontFamily || "Inter").trim();
-  const fontWeight = clamp(cs.fontWeight, 100, 1000); // optional
+  const fontWeight = clamp(cs.fontWeight, 100, 1000);
   const fillColor = safeColor(cs.fillColor, "#FFFFFF");
   const strokeColor = safeColor(cs.strokeColor, "#000000");
   const strokeWidth = safePx(cs.strokeWidth, 0);
   const textTransform = safeTextTransform(cs.textTransform);
-
   const activeColor = safeColor(cs.activeColor, "#A855F7");
 
   const mods = {};
 
-  // Position
   mods[`${layer}.x_alignment`] = x;
   mods[`${layer}.y_alignment`] = y;
 
-  // Font
   if (fontFamily) mods[`${layer}.font_family`] = fontFamily;
   if (fontWeight !== null) mods[`${layer}.font_weight`] = fontWeight;
 
-  // Base colors
   mods[`${layer}.fill_color`] = fillColor;
   mods[`${layer}.stroke_color`] = strokeColor;
   mods[`${layer}.stroke_width`] = strokeWidth;
 
-  // Transform (works if the layer supports it)
   mods[`${layer}.text_transform`] = textTransform;
 
-  // Active/effect color only for specific transcript effects
   if (ACTIVE_COLOR_STYLES.has(style)) {
     mods[`${layer}.transcript_color`] = activeColor;
   }
 
   return mods;
+}
+
+// =====================================================
+// ElevenLabs: TTS -> Supabase Storage -> Public URL
+// =====================================================
+async function elevenlabsTTS({ voiceId, text }) {
+  if (!ELEVENLABS_API_KEY) throw new Error("MISSING_ELEVENLABS_API_KEY");
+  if (!voiceId) throw new Error("MISSING_VOICE_ID");
+
+  const t = String(text || "").trim();
+  if (!t) throw new Error("MISSING_TTS_TEXT");
+
+  const url = `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}/stream`;
+
+  const r = await fetch(url, {
+    method: "POST",
+    headers: {
+      "xi-api-key": ELEVENLABS_API_KEY,
+      "Content-Type": "application/json",
+      "Accept": "audio/mpeg",
+    },
+    body: JSON.stringify({
+      text: t,
+      model_id: ELEVENLABS_MODEL_ID,
+      voice_settings: {
+        stability: 0.4,
+        similarity_boost: 0.85,
+      },
+    }),
+  });
+
+  if (!r.ok) {
+    const msg = await r.text().catch(() => "");
+    throw new Error(`ELEVENLABS_TTS_FAILED (${r.status}) ${msg}`);
+  }
+
+  const buf = Buffer.from(await r.arrayBuffer());
+  if (!buf.length) throw new Error("ELEVENLABS_EMPTY_AUDIO");
+  return buf;
+}
+
+async function uploadVoiceMp3({ db_id, mp3Buffer }) {
+  if (!supabase) throw new Error("MISSING_SUPABASE_ENV_VARS");
+
+  const path = `${db_id}/voice.mp3`;
+
+  const { error: upErr } = await supabase.storage
+    .from(VOICE_BUCKET)
+    .upload(path, mp3Buffer, {
+      contentType: "audio/mpeg",
+      upsert: true,
+      cacheControl: "3600",
+    });
+
+  if (upErr) {
+    console.error("[VOICE_UPLOAD_FAILED]", upErr);
+    throw new Error("VOICE_UPLOAD_FAILED");
+  }
+
+  const { data } = supabase.storage.from(VOICE_BUCKET).getPublicUrl(path);
+  const url = data?.publicUrl;
+  if (!url) throw new Error("VOICE_PUBLIC_URL_FAILED");
+  return url;
 }
 
 // -------------------- MAIN --------------------
@@ -562,7 +619,11 @@ module.exports = async function handler(req, res) {
       storyType = "Random AI story",
       artStyle = "Scary toon",
       language = "English",
-      voice = "Adam",
+
+      // ✅ NEW: voice wiring
+      voiceId = "",
+      voiceName = "Adam",
+
       aspectRatio = "9:16",
       customPrompt = "",
       durationRange = "60-90",
@@ -587,7 +648,8 @@ module.exports = async function handler(req, res) {
       storyType,
       artStyle,
       language,
-      voice,
+      voiceId,
+      voiceName,
       aspectRatio,
       customPrompt,
       durationRange,
@@ -633,16 +695,26 @@ module.exports = async function handler(req, res) {
       return res.status(502).json({ error: "SCRIPT_EMPTY", details: scriptResp });
     }
 
+    // ✅ Voiceover MP3 (ElevenLabs) -> Supabase -> URL
+    let voiceUrl = null;
+    if (voiceId && ELEVENLABS_API_KEY) {
+      try {
+        const mp3 = await elevenlabsTTS({ voiceId, text: narration });
+        voiceUrl = await uploadVoiceMp3({ db_id, mp3Buffer: mp3 });
+      } catch (e) {
+        console.error("[VOICEOVER_FAILED]", { message: String(e?.message || e), voiceId });
+        // If you want to fail hard instead of fallback, uncomment:
+        // throw e;
+        voiceUrl = null;
+      }
+    }
+
     // Beats + timing
     const speechSec = estimateSpeechSeconds(narration);
     let targetSec = Math.round(speechSec + 2);
 
-    let minSec = 60,
-      maxSec = 90;
-    if (durationRange === "30-60") {
-      minSec = 30;
-      maxSec = 60;
-    }
+    let minSec = 60, maxSec = 90;
+    if (durationRange === "30-60") { minSec = 30; maxSec = 60; }
 
     if (targetSec < minSec) targetSec = minSec;
     if (targetSec > maxSec) targetSec = maxSec;
@@ -667,11 +739,12 @@ module.exports = async function handler(req, res) {
 
     const mods = {
       Narration: narration,
-      VoiceLabel: voice,
+      VoiceLabel: voiceName || "Voice",
       LanguageLabel: language,
       StoryTypeLabel: storyType,
-      Voiceover: narration,
-      VoiceUrl: null,
+
+      // ✅ Audio layer is named "Voiceover" in your template:
+      "Voiceover.source": voiceUrl || "",
 
       // ✅ Exactly one caption layer visible
       ...captionVisibilityMods(styleNorm),
@@ -680,6 +753,7 @@ module.exports = async function handler(req, res) {
       ...captionSettingsMods(styleNorm, captionSettings),
     };
 
+    // Timing mods
     for (let i = 1; i <= beatCount; i++) {
       const start = timing.starts[i - 1];
       const dur = timing.durations[i - 1];
@@ -690,6 +764,7 @@ module.exports = async function handler(req, res) {
       mods[`Beat${i}_Group.duration`] = dur;
     }
 
+    // Clear unused beats
     for (let i = beatCount + 1; i <= MAX_BEATS; i++) {
       mods[`Beat${i}_Scene.start`] = 0;
       mods[`Beat${i}_Scene.duration`] = 0;
@@ -698,6 +773,7 @@ module.exports = async function handler(req, res) {
       for (const variant of ANIMATION_VARIANTS) mods[`Beat${i}_${variant}_Image.source`] = "";
     }
 
+    // Image assignment
     let lastGood = "";
     for (let i = 1; i <= beatCount; i++) {
       const raw = imageUrls[i - 1] || "";
@@ -738,7 +814,13 @@ module.exports = async function handler(req, res) {
     const { error: updErr } = await supabase.from("renders").update({ render_id: String(job_id) }).eq("id", db_id);
     if (updErr) console.error("[DB_UPDATE_RENDER_ID_FAILED]", updErr);
 
-    return res.status(200).json({ ok: true, job_id, db_id, captionStyle: styleNorm });
+    return res.status(200).json({
+      ok: true,
+      job_id,
+      db_id,
+      captionStyle: styleNorm,
+      voiceUrl: voiceUrl || null,
+    });
   } catch (err) {
     const msg = String(err?.message || err);
     if (msg.includes("MISSING_AUTH") || msg.includes("MEMBERSTACK") || msg.includes("INVALID_MEMBER")) {
