@@ -1,8 +1,5 @@
 // api/create-video.js (CommonJS, Node 18)
-// ✅ Uses ElevenLabs to generate an MP3, uploads to Supabase Storage,
-// ✅ Sends the MP3 to Creatomate via "Voiceover.source" (URL provider mode)
-// ✅ Keeps your caption-style + settings system intact
-// ✅ Avoids passing ElevenLabs voiceId into Creatomate "Voiceover.voice" (that breaks narration)
+// NOTE: Node 18 on Vercel has global fetch.
 
 const https = require("https");
 const crypto = require("crypto");
@@ -35,6 +32,13 @@ const API_BASE = (process.env.API_BASE || "").trim();
 
 // -------------------- Providers --------------------
 const IMAGE_PROVIDER = (process.env.IMAGE_PROVIDER || "krea").toLowerCase();
+
+// -------------------- Creatomate ElevenLabs voice mode --------------------
+// We are using Creatomate's built-in ElevenLabs provider, because:
+// - It reliably generates narration AND captions/transcript in your template
+// - Avoids URL-provider confusion between Voiceover.source / Voiceover.url
+const CREATO_ELEVEN_MODEL_LABEL =
+  (process.env.CREATO_ELEVEN_MODEL_LABEL || "Eleven Multilingual v2").trim();
 
 // ---------- Supabase ----------
 const SUPABASE_URL = process.env.SUPABASE_URL;
@@ -86,11 +90,6 @@ const KREA_STYLE_STRENGTH = Number(process.env.KREA_STYLE_STRENGTH || 0.85);
 const KREA_PER_BEAT_RETRIES = Number(process.env.KREA_PER_BEAT_RETRIES || 2);
 const KREA_POLL_TRIES = Number(process.env.KREA_POLL_TRIES || 90);
 const KREA_POLL_DELAY_MS = Number(process.env.KREA_POLL_DELAY_MS || 2500);
-
-// ---------- ElevenLabs ----------
-const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
-const ELEVENLABS_MODEL_ID = process.env.ELEVENLABS_MODEL_ID || "eleven_multilingual_v2";
-const VOICE_BUCKET = process.env.VOICE_BUCKET || "voiceovers";
 
 // ---------- Beats ----------
 const MIN_BEATS = 8;
@@ -533,63 +532,6 @@ function captionSettingsMods(captionStyle, captionSettings) {
   return mods;
 }
 
-// =====================================================
-// ElevenLabs: TTS -> Supabase Storage -> Public URL
-// =====================================================
-async function elevenlabsTTS({ voiceId, text }) {
-  if (!ELEVENLABS_API_KEY) throw new Error("MISSING_ELEVENLABS_API_KEY");
-  if (!voiceId) throw new Error("MISSING_VOICE_ID");
-
-  const t = String(text || "").trim();
-  if (!t) throw new Error("MISSING_TTS_TEXT");
-
-  const url = `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}/stream`;
-
-  const r = await fetch(url, {
-    method: "POST",
-    headers: {
-      "xi-api-key": ELEVENLABS_API_KEY,
-      "Content-Type": "application/json",
-      Accept: "audio/mpeg",
-    },
-    body: JSON.stringify({
-      text: t,
-      model_id: ELEVENLABS_MODEL_ID,
-      voice_settings: { stability: 0.4, similarity_boost: 0.85 },
-    }),
-  });
-
-  if (!r.ok) {
-    const msg = await r.text().catch(() => "");
-    throw new Error(`ELEVENLABS_TTS_FAILED (${r.status}) ${msg}`);
-  }
-
-  const buf = Buffer.from(await r.arrayBuffer());
-  if (!buf.length) throw new Error("ELEVENLABS_EMPTY_AUDIO");
-  return buf;
-}
-
-async function uploadVoiceMp3({ db_id, mp3Buffer }) {
-  if (!supabase) throw new Error("MISSING_SUPABASE_ENV_VARS");
-  const path = `${db_id}/voice.mp3`;
-
-  const { error: upErr } = await supabase.storage.from(VOICE_BUCKET).upload(path, mp3Buffer, {
-    contentType: "audio/mpeg",
-    upsert: true,
-    cacheControl: "3600",
-  });
-
-  if (upErr) {
-    console.error("[VOICE_UPLOAD_FAILED]", upErr);
-    throw new Error("VOICE_UPLOAD_FAILED");
-  }
-
-  const { data } = supabase.storage.from(VOICE_BUCKET).getPublicUrl(path);
-  const url = data?.publicUrl;
-  if (!url) throw new Error("VOICE_PUBLIC_URL_FAILED");
-  return url;
-}
-
 // -------------------- MAIN --------------------
 module.exports = async function handler(req, res) {
   setCors(req, res);
@@ -606,14 +548,15 @@ module.exports = async function handler(req, res) {
       artStyle = "Scary toon",
       language = "English",
 
-      // from your UI
-      voiceId = "", // ElevenLabs voiceId (EXAVIT..., etc)
-      voiceName = "Voice", // label only (NOT used by Creatomate voice dropdown in URL mode)
+      // Voice picked in your UI:
+      voiceId = "", // ElevenLabs voiceId like EXAVITQu4vr4xnSDxMaL
+      voiceName = "Voice",
 
       aspectRatio = "9:16",
       customPrompt = "",
       durationRange = "60-90",
 
+      // captions
       captionStyle = "sentence",
       captionSettings = {},
     } = body;
@@ -673,35 +616,16 @@ module.exports = async function handler(req, res) {
 
     const narration = String(scriptResp?.narration || "").trim();
     if (!narration) {
-      await supabase
-        .from("renders")
-        .update({ status: "failed", error: JSON.stringify(scriptResp || {}) })
-        .eq("id", db_id);
+      await supabase.from("renders").update({ status: "failed", error: JSON.stringify(scriptResp || {}) }).eq("id", db_id);
       return res.status(502).json({ error: "SCRIPT_EMPTY", details: scriptResp });
-    }
-
-    // ✅ Generate MP3 in backend (exact ElevenLabs voice) + upload to Supabase
-    let voiceUrl = "";
-    if (voiceId) {
-      try {
-        const mp3 = await elevenlabsTTS({ voiceId, text: narration });
-        voiceUrl = await uploadVoiceMp3({ db_id, mp3Buffer: mp3 });
-      } catch (e) {
-        console.error("[VOICEOVER_FAILED]", { voiceId, message: String(e?.message || e) });
-        voiceUrl = "";
-      }
     }
 
     // Beats + timing
     const speechSec = estimateSpeechSeconds(narration);
     let targetSec = Math.round(speechSec + 2);
 
-    let minSec = 60,
-      maxSec = 90;
-    if (durationRange === "30-60") {
-      minSec = 30;
-      maxSec = 60;
-    }
+    let minSec = 60, maxSec = 90;
+    if (durationRange === "30-60") { minSec = 30; maxSec = 60; }
 
     if (targetSec < minSec) targetSec = minSec;
     if (targetSec > maxSec) targetSec = maxSec;
@@ -722,31 +646,34 @@ module.exports = async function handler(req, res) {
     const variantSequence = buildVariantSequence(beatCount);
 
     // ✅ Creatomate modifications
-    // IMPORTANT: In your Creatomate template, set Voiceover provider to "URL"
-    // (Provider dropdown: None / Uploaded file / URL / ElevenLabs / OpenAI)
-    // Then "Voiceover.source" will play the MP3.
+    // IMPORTANT: This assumes your template's main narration audio layer is:
+    // - name: "Voiceover"
+    // - Provider: ElevenLabs
+    // And you have editable properties:
+    // - Voiceover.text
+    // - Voiceover.voice
+    // - Voiceover.model
+    //
+    // We also CLEAR any URL-based properties so they can't override the provider.
     const mods = {
-      // Captions/transcript input (your template likely reads this)
       Narration: narration,
-
-      // Labels
       VoiceLabel: voiceName || "Voice",
       LanguageLabel: language,
       StoryTypeLabel: storyType,
 
-      // ✅ URL audio mode (most reliable + uses the exact ElevenLabs voiceId from UI)
-      "Voiceover.source": voiceUrl || "",
-      "Voiceover.url": voiceUrl || "",
+      // ✅ Creatomate ElevenLabs TTS
+      "Voiceover.text": narration,
+      "Voiceover.voice": String(voiceId || "").trim(),           // EX: EXAVITQu4vr4xnSDxMaL
+      "Voiceover.model": CREATO_ELEVEN_MODEL_LABEL,              // EX: "Eleven Multilingual v2"
 
-      // ✅ Make sure Creatomate doesn't try ElevenLabs provider fields
-      "Voiceover.text": "",
-      "Voiceover.model": "",
-      "Voiceover.voice": "",
+      // ✅ prevent URL provider overrides (you were seeing URL on all 3 tracks)
+      "Voiceover.source": "",
+      "Voiceover.url": "",
 
       // ✅ Exactly one caption layer visible
       ...captionVisibilityMods(styleNorm),
 
-      // ✅ Apply caption settings to the selected layer
+      // ✅ Apply caption settings
       ...captionSettingsMods(styleNorm, captionSettings),
     };
 
@@ -798,10 +725,7 @@ module.exports = async function handler(req, res) {
     );
 
     if (resp.status !== 202 && resp.status !== 200) {
-      await supabase
-        .from("renders")
-        .update({ status: "failed", error: JSON.stringify(resp.json || {}) })
-        .eq("id", db_id);
+      await supabase.from("renders").update({ status: "failed", error: JSON.stringify(resp.json || {}) }).eq("id", db_id);
       return res.status(resp.status).json({ error: "CREATOMATE_ERROR", details: resp.json });
     }
 
@@ -819,7 +743,9 @@ module.exports = async function handler(req, res) {
       job_id,
       db_id,
       captionStyle: styleNorm,
-      voiceUrl: voiceUrl || null,
+      voiceMode: "creatomate_elevenlabs",
+      voiceId: String(voiceId || "").trim() || null,
+      model: CREATO_ELEVEN_MODEL_LABEL,
     });
   } catch (err) {
     const msg = String(err?.message || err);
