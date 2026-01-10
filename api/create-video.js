@@ -710,20 +710,25 @@ module.exports = async function handler(req, res) {
 
     const variantSequence = buildVariantSequence(beatCount);
 
-// ✅ If we successfully generated an mp3 URL, use URL provider
-if (voiceUrl) {
-  mods["Voiceover.source"] = voiceUrl;
-  mods["Voiceover.url"] = voiceUrl;       // extra safety
-  mods["Voiceover.text"] = "";            // prevent ElevenLabs mode
-  mods["Voiceover.model"] = "";           // prevent ElevenLabs mode
-  mods["Voiceover.voice"] = "";           // prevent ElevenLabs mode
-} else {
-  // fallback (no mp3) -> use ElevenLabs provider inside Creatomate
-  mods["Voiceover.text"] = narration;
-  mods["Voiceover.model"] = "Eleven Multilingual v2";
-  mods["Voiceover.voice"] = voiceName || "Adam"; // MUST be a Creatomate voice name
-}
+    // ✅ Creatomate modifications
+    // IMPORTANT:
+    // - Narration is text used for captions/transcripts
+    // - Voiceover.source is the *mp3 url* (your exact ElevenLabs voice)
+    const mods = {
+      Narration: narration,
+      VoiceLabel: voiceName || "Voice",
+      LanguageLabel: language,
+      StoryTypeLabel: storyType,
 
+      // ✅ THIS is what fixes narration reliability
+      "Voiceover.source": voiceUrl || "",
+
+      // ✅ Exactly one caption layer visible
+      ...captionVisibilityMods(styleNorm),
+
+      // ✅ Apply caption settings to the selected layer
+      ...captionSettingsMods(styleNorm, captionSettings),
+    };
 
     // Timing mods
     for (let i = 1; i <= beatCount; i++) {
