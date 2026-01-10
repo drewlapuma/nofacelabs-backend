@@ -1,0 +1,8 @@
+{
+  "crons": [
+    {
+      "path": "/api/cleanup-renders?secret=@cron_secret",
+      "schedule": "0 6 * * *"
+    }
+  ]
+}
