@@ -444,33 +444,17 @@ async function generateOneImageWithRetry({ prompt, aspectRatio, beatIndex, reque
 async function generateKreaImageUrlsForBeats({ beatCount, beatTexts, aspectRatio, requestId }) {
   const urls = [];
 
-  // ✅ Optional “header” log so you see counts + config once
-  if (KREA_LOG_PROMPTS) {
-    console.log("[KREA_BATCH]", {
-      requestId,
-      beatCount,
-      aspectRatio,
-      expandShortBeatsOnly: EXPAND_SHORT_BEATS_ONLY,
-      expandWordThreshold: EXPAND_WORD_THRESHOLD,
-      styleId: KREA_STYLE_ID,
-      styleStrength: KREA_STYLE_STRENGTH,
-      generateUrl: KREA_GENERATE_URL,
-      jobUrlBase: KREA_JOB_URL_BASE,
-    });
-  }
-
   for (let i = 1; i <= beatCount; i++) {
-    const beatText = beatTexts[i - 1] || "";
-    const needsExpand = !EXPAND_SHORT_BEATS_ONLY ? true : countWords(beatText) < EXPAND_WORD_THRESHOLD;
+    const beatText = (beatTexts[i - 1] || "").trim();
 
-    const prompt = needsExpand ? await expandBeatToVisualPrompt(beatText) : beatText.trim();
+    // ✅ ALWAYS expand into a real visual prompt
+    const prompt = await expandBeatToVisualPrompt(beatText);
 
-    // ✅ Log exactly what prompt you will send to Krea
     logPromptForKrea({
       requestId,
       beatIndex: i,
       beatText,
-      expanded: needsExpand,
+      expanded: true,
       prompt,
       aspectRatio,
     });
@@ -478,8 +462,10 @@ async function generateKreaImageUrlsForBeats({ beatCount, beatTexts, aspectRatio
     const imageUrl = await generateOneImageWithRetry({ prompt, aspectRatio, beatIndex: i, requestId });
     urls.push(imageUrl);
   }
+
   return urls;
 }
+
 
 // ---------- Variants ----------
 function buildVariantSequence(beatCount) {
