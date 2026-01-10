@@ -83,6 +83,12 @@ const KREA_PER_BEAT_RETRIES = Number(process.env.KREA_PER_BEAT_RETRIES || 2);
 const KREA_POLL_TRIES = Number(process.env.KREA_POLL_TRIES || 90);
 const KREA_POLL_DELAY_MS = Number(process.env.KREA_POLL_DELAY_MS || 2500);
 
+// ✅ Logging toggles (new)
+const KREA_LOG_PROMPTS = String(process.env.KREA_LOG_PROMPTS ?? "true").toLowerCase() !== "false";
+const KREA_LOG_FULL_PROMPTS = String(process.env.KREA_LOG_FULL_PROMPTS ?? "true").toLowerCase() !== "false";
+// If you want to cap prompt logging length while still "seeing it":
+const KREA_LOG_PROMPT_MAX = Number(process.env.KREA_LOG_PROMPT_MAX || 1200);
+
 // ---------- ElevenLabs ----------
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
 const ELEVENLABS_MODEL_ID = process.env.ELEVENLABS_MODEL_ID || "eleven_multilingual_v2";
@@ -272,7 +278,33 @@ function shortPrompt(p) {
   return s.length > 180 ? s.slice(0, 180) + "..." : s;
 }
 
-async function createKreaJob({ prompt, aspectRatio, useStyle }) {
+// ✅ New helper for logging prompts safely
+function logPromptForKrea({ requestId, beatIndex, beatText, expanded, prompt, aspectRatio }) {
+  if (!KREA_LOG_PROMPTS) return;
+
+  const safePrompt = String(prompt || "");
+  const safeBeat = String(beatText || "");
+
+  const fullOrShort = KREA_LOG_FULL_PROMPTS
+    ? safePrompt.slice(0, Math.max(0, KREA_LOG_PROMPT_MAX))
+    : shortPrompt(safePrompt);
+
+  console.log("[KREA_PROMPT]", {
+    requestId,
+    beat: beatIndex,
+    aspectRatio,
+    expanded,
+    beatText: safeBeat.length > 260 ? safeBeat.slice(0, 260) + "..." : safeBeat,
+    prompt: fullOrShort,
+    promptLen: safePrompt.length,
+    beatWords: countWords(safeBeat),
+    promptWords: countWords(safePrompt),
+    // useful for seeing when you’re accidentally sending empty prompts
+    emptyPrompt: !safePrompt.trim(),
+  });
+}
+
+async function createKreaJob({ prompt, aspectRatio, useStyle, requestId, beatIndex }) {
   if (!KREA_API_KEY) throw new Error("KREA_API_KEY not set");
 
   const payload = { prompt, aspect_ratio: aspectRatio };
@@ -280,6 +312,19 @@ async function createKreaJob({ prompt, aspectRatio, useStyle }) {
   if (useStyle) {
     if (!KREA_STYLE_ID) throw new Error("KREA_STYLE_ID not set");
     payload.styles = [{ id: KREA_STYLE_ID, strength: KREA_STYLE_STRENGTH }];
+  }
+
+  // ✅ Log the exact payload being sent (no secrets)
+  if (KREA_LOG_PROMPTS) {
+    console.log("[KREA_REQUEST]", {
+      requestId,
+      beat: beatIndex,
+      url: KREA_GENERATE_URL,
+      useStyle,
+      styleId: useStyle ? KREA_STYLE_ID : null,
+      styleStrength: useStyle ? KREA_STYLE_STRENGTH : null,
+      payload, // includes prompt + aspect_ratio (+ styles)
+    });
   }
 
   const resp = await fetch(KREA_GENERATE_URL, {
@@ -295,6 +340,8 @@ async function createKreaJob({ prompt, aspectRatio, useStyle }) {
 
   if (!resp.ok) {
     console.error("[KREA_GENERATE_ERROR]", {
+      requestId,
+      beat: beatIndex,
       status: resp.status,
       data,
       useStyle,
@@ -307,14 +354,14 @@ async function createKreaJob({ prompt, aspectRatio, useStyle }) {
 
   const jobId = data?.job_id || data?.id;
   if (!jobId) {
-    console.error("[KREA_MISSING_JOB_ID]", { data, useStyle, prompt: shortPrompt(prompt) });
+    console.error("[KREA_MISSING_JOB_ID]", { requestId, beat: beatIndex, data, useStyle, prompt: shortPrompt(prompt) });
     throw new Error("KREA_MISSING_JOB_ID");
   }
 
   return jobId;
 }
 
-async function pollKreaJob(jobId) {
+async function pollKreaJob(jobId, { requestId, beatIndex } = {}) {
   const url = `${KREA_JOB_URL_BASE}/${encodeURIComponent(jobId)}`;
 
   for (let i = 0; i < KREA_POLL_TRIES; i++) {
@@ -326,7 +373,7 @@ async function pollKreaJob(jobId) {
     const data = await resp.json().catch(() => ({}));
 
     if (!resp.ok) {
-      console.error("[KREA_JOB_LOOKUP_FAILED]", { status: resp.status, data, jobId });
+      console.error("[KREA_JOB_LOOKUP_FAILED]", { requestId, beat: beatIndex, status: resp.status, data, jobId });
       throw new Error(`KREA_JOB_LOOKUP_FAILED (${resp.status})`);
     }
 
@@ -337,14 +384,14 @@ async function pollKreaJob(jobId) {
       const imageUrl = Array.isArray(urls) ? urls[0] : null;
 
       if (!imageUrl) {
-        console.error("[KREA_JOB_NO_RESULT_URL]", { jobId, data });
+        console.error("[KREA_JOB_NO_RESULT_URL]", { requestId, beat: beatIndex, jobId, data });
         throw new Error("KREA_JOB_NO_RESULT_URL");
       }
       return imageUrl;
     }
 
     if (status === "failed" || status === "error") {
-      console.error("[KREA_JOB_FAILED]", { jobId, data });
+      console.error("[KREA_JOB_FAILED]", { requestId, beat: beatIndex, jobId, data });
       throw new Error(`KREA_JOB_FAILED (${jobId})`);
     }
 
@@ -354,13 +401,14 @@ async function pollKreaJob(jobId) {
   throw new Error("KREA_JOB_TIMEOUT");
 }
 
-async function generateOneImageWithRetry({ prompt, aspectRatio, beatIndex }) {
+async function generateOneImageWithRetry({ prompt, aspectRatio, beatIndex, requestId }) {
   for (let attempt = 1; attempt <= Math.max(1, KREA_PER_BEAT_RETRIES); attempt++) {
     try {
-      const jobId = await createKreaJob({ prompt, aspectRatio, useStyle: true });
-      return await pollKreaJob(jobId);
+      const jobId = await createKreaJob({ prompt, aspectRatio, useStyle: true, requestId, beatIndex });
+      return await pollKreaJob(jobId, { requestId, beatIndex });
     } catch (e) {
       console.error("[KREA_RETRY_STYLE]", {
+        requestId,
         beat: beatIndex,
         attempt,
         maxAttempts: KREA_PER_BEAT_RETRIES,
@@ -374,10 +422,11 @@ async function generateOneImageWithRetry({ prompt, aspectRatio, beatIndex }) {
 
   for (let attempt = 1; attempt <= Math.max(1, KREA_PER_BEAT_RETRIES); attempt++) {
     try {
-      const jobId = await createKreaJob({ prompt, aspectRatio, useStyle: false });
-      return await pollKreaJob(jobId);
+      const jobId = await createKreaJob({ prompt, aspectRatio, useStyle: false, requestId, beatIndex });
+      return await pollKreaJob(jobId, { requestId, beatIndex });
     } catch (e) {
       console.error("[KREA_RETRY_NO_STYLE]", {
+        requestId,
         beat: beatIndex,
         attempt,
         maxAttempts: KREA_PER_BEAT_RETRIES,
@@ -392,13 +441,41 @@ async function generateOneImageWithRetry({ prompt, aspectRatio, beatIndex }) {
   throw new Error("KREA_FAILED_AFTER_RETRIES");
 }
 
-async function generateKreaImageUrlsForBeats({ beatCount, beatTexts, aspectRatio }) {
+async function generateKreaImageUrlsForBeats({ beatCount, beatTexts, aspectRatio, requestId }) {
   const urls = [];
+
+  // ✅ Optional “header” log so you see counts + config once
+  if (KREA_LOG_PROMPTS) {
+    console.log("[KREA_BATCH]", {
+      requestId,
+      beatCount,
+      aspectRatio,
+      expandShortBeatsOnly: EXPAND_SHORT_BEATS_ONLY,
+      expandWordThreshold: EXPAND_WORD_THRESHOLD,
+      styleId: KREA_STYLE_ID,
+      styleStrength: KREA_STYLE_STRENGTH,
+      generateUrl: KREA_GENERATE_URL,
+      jobUrlBase: KREA_JOB_URL_BASE,
+    });
+  }
+
   for (let i = 1; i <= beatCount; i++) {
     const beatText = beatTexts[i - 1] || "";
     const needsExpand = !EXPAND_SHORT_BEATS_ONLY ? true : countWords(beatText) < EXPAND_WORD_THRESHOLD;
+
     const prompt = needsExpand ? await expandBeatToVisualPrompt(beatText) : beatText.trim();
-    const imageUrl = await generateOneImageWithRetry({ prompt, aspectRatio, beatIndex: i });
+
+    // ✅ Log exactly what prompt you will send to Krea
+    logPromptForKrea({
+      requestId,
+      beatIndex: i,
+      beatText,
+      expanded: needsExpand,
+      prompt,
+      aspectRatio,
+    });
+
+    const imageUrl = await generateOneImageWithRetry({ prompt, aspectRatio, beatIndex: i, requestId });
     urls.push(imageUrl);
   }
   return urls;
@@ -598,6 +675,9 @@ module.exports = async function handler(req, res) {
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "POST") return res.status(405).json({ error: "METHOD_NOT_ALLOWED" });
 
+  // ✅ correlation id for logs
+  const requestId = crypto.randomUUID();
+
   try {
     const publicBaseUrl = (API_BASE || `https://${req.headers.host}`).trim();
     const memberId = await requireMemberId(req);
@@ -660,7 +740,7 @@ module.exports = async function handler(req, res) {
     ]);
 
     if (preInsErr) {
-      console.error("[DB_PREINSERT_FAILED]", preInsErr);
+      console.error("[DB_PREINSERT_FAILED]", { requestId, error: preInsErr });
       return res.status(500).json({ error: "DB_PREINSERT_FAILED", details: preInsErr });
     }
 
@@ -684,7 +764,7 @@ module.exports = async function handler(req, res) {
         const mp3 = await elevenlabsTTS({ voiceId, text: narration });
         voiceUrl = await uploadVoiceMp3({ db_id, mp3Buffer: mp3 });
       } catch (e) {
-        console.error("[VOICEOVER_FAILED]", { voiceId, message: String(e?.message || e) });
+        console.error("[VOICEOVER_FAILED]", { requestId, voiceId, message: String(e?.message || e) });
         voiceUrl = "";
       }
     }
@@ -709,7 +789,7 @@ module.exports = async function handler(req, res) {
     // Images
     let imageUrls = [];
     if (IMAGE_PROVIDER === "krea") {
-      imageUrls = await generateKreaImageUrlsForBeats({ beatCount, beatTexts, aspectRatio });
+      imageUrls = await generateKreaImageUrlsForBeats({ beatCount, beatTexts, aspectRatio, requestId });
     }
 
     const variantSequence = buildVariantSequence(beatCount);
@@ -721,7 +801,6 @@ module.exports = async function handler(req, res) {
       LanguageLabel: language,
       StoryTypeLabel: storyType,
 
-      // ✅ THIS IS THE IMPORTANT FIX:
       // Creatomate media elements use ".source"
       "Voiceover.source": voiceUrl || "",
 
@@ -788,7 +867,7 @@ module.exports = async function handler(req, res) {
     }
 
     const { error: updErr } = await supabase.from("renders").update({ render_id: String(job_id) }).eq("id", db_id);
-    if (updErr) console.error("[DB_UPDATE_RENDER_ID_FAILED]", updErr);
+    if (updErr) console.error("[DB_UPDATE_RENDER_ID_FAILED]", { requestId, error: updErr });
 
     return res.status(200).json({
       ok: true,
@@ -796,14 +875,14 @@ module.exports = async function handler(req, res) {
       db_id,
       captionStyle: styleNorm,
       voiceUrl: voiceUrl || null,
+      requestId, // ✅ so you can search logs by this id
     });
   } catch (err) {
     const msg = String(err?.message || err);
     if (msg.includes("MISSING_AUTH") || msg.includes("MEMBERSTACK") || msg.includes("INVALID_MEMBER")) {
       return res.status(401).json({ error: "UNAUTHORIZED", message: msg });
     }
-    console.error("[CREATE_VIDEO] SERVER_ERROR", err);
-    return res.status(500).json({ error: "SERVER_ERROR", message: msg });
+    console.error("[CREATE_VIDEO] SERVER_ERROR", { requestId, err });
+    return res.status(500).json({ error: "SERVER_ERROR", message: msg, requestId });
   }
 };
-
