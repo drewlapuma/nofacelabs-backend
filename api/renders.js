@@ -1,8 +1,15 @@
 // api/renders.js (CommonJS, Node 18 on Vercel)
 // Handles:
-//  - GET /api/renders            => list renders for member
-//  - GET /api/renders?id=...     => single render for member
-//  - POST /api/renders {action:"captions-apply", id, style} => start captions render in Creatomate
+//  - GET    /api/renders                 => list renders for member
+//  - GET    /api/renders?id=...          => single render for member
+//  - DELETE /api/renders?id=...          => delete render for member (DB + voiceover mp3)
+//  - POST   /api/renders {action:"delete", id}  => delete fallback (same behavior)
+//
+// ✅ NOTE: captions endpoints kept (so nothing breaks elsewhere) but your /myvideos page no longer uses them.
+// ✅ NOTE: This deletes ONLY:
+//    - the "renders" row
+//    - the voiceover mp3 in Supabase Storage (VOICE_BUCKET) at `${id}/voice.mp3`
+// If you also store MP4s somewhere, tell me where and I’ll add that deletion too.
 
 const https = require("https");
 const memberstackAdmin = require("@memberstack/admin");
@@ -24,7 +31,8 @@ function setCors(req, res) {
     res.setHeader("Vary", "Origin");
   }
 
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  // ✅ add DELETE
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   res.setHeader("Access-Control-Max-Age", "86400");
 }
@@ -49,7 +57,7 @@ async function requireMemberId(req) {
   return String(id);
 }
 
-// -------------------- Creatomate --------------------
+// -------------------- Creatomate (kept) --------------------
 const CREATOMATE_API_KEY = (process.env.CREATOMATE_API_KEY || "").trim();
 
 const CAPTIONS_TEMPLATE_916 = (process.env.CREATO_CAPTIONS_TEMPLATE_916 || "").trim();
@@ -60,6 +68,9 @@ const CREATO_VIDEO_ELEMENT_ID = (process.env.CREATO_VIDEO_ELEMENT_ID || "Video-D
 const CREATO_CAPTIONS_JSON_ELEMENT_ID = (process.env.CREATO_CAPTIONS_JSON_ELEMENT_ID || "Subtitles-1").trim();
 
 const API_BASE = (process.env.API_BASE || "").trim();
+
+// -------------------- Storage cleanup --------------------
+const VOICE_BUCKET = (process.env.VOICE_BUCKET || "voiceovers").trim();
 
 function pickCaptionsTemplateIdByAspect(aspectRatio) {
   const ar = String(aspectRatio || "9:16").trim();
@@ -107,6 +118,49 @@ function postJSON(url, headers, bodyObj) {
   });
 }
 
+function safeJsonParse(s) {
+  try {
+    return JSON.parse(s);
+  } catch {
+    return null;
+  }
+}
+
+async function deleteRenderForMember({ sb, member_id, id }) {
+  // Fetch row (so we can delete associated storage)
+  const { data: row, error: readErr } = await sb
+    .from("renders")
+    .select("*")
+    .eq("id", id)
+    .eq("member_id", member_id)
+    .single();
+
+  if (readErr || !row) return { ok: false, status: 404, error: "NOT_FOUND" };
+
+  // Delete voice file (best-effort)
+  // Your create-video.js stores it at `${db_id}/voice.mp3` in VOICE_BUCKET
+  try {
+    await sb.storage.from(VOICE_BUCKET).remove([`${id}/voice.mp3`]);
+  } catch (e) {
+    console.error("[RENDERS_DELETE] voice remove failed", { id, message: String(e?.message || e) });
+    // keep going: we still delete the DB row
+  }
+
+  // Delete DB row
+  const { error: delErr } = await sb
+    .from("renders")
+    .delete()
+    .eq("id", id)
+    .eq("member_id", member_id);
+
+  if (delErr) {
+    console.error("[RENDERS_DELETE] DB delete failed", { id, delErr });
+    return { ok: false, status: 500, error: "DB_DELETE_FAILED", details: delErr };
+  }
+
+  return { ok: true, status: 200, deleted_id: id };
+}
+
 // -------------------- MAIN --------------------
 module.exports = async function handler(req, res) {
   setCors(req, res);
@@ -143,12 +197,33 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ ok: true, items: items || [] });
     }
 
+    // ---------------- DELETE ----------------
+    if (req.method === "DELETE") {
+      const id = String(req.query?.id || "").trim();
+      if (!id) return res.status(400).json({ ok: false, error: "MISSING_ID" });
+
+      const out = await deleteRenderForMember({ sb, member_id, id });
+      return res.status(out.status).json(out.ok ? { ok: true, id: out.deleted_id } : out);
+    }
+
     // ---------------- POST ----------------
     if (req.method === "POST") {
-      const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : req.body || {};
+      const body =
+        typeof req.body === "string"
+          ? (safeJsonParse(req.body) || {})
+          : (req.body || {});
       const action = String(body?.action || "").trim();
 
-      // ---------- captions-apply ----------
+      // ✅ NEW: delete fallback
+      if (action === "delete") {
+        const id = String(body?.id || "").trim();
+        if (!id) return res.status(400).json({ ok: false, error: "MISSING_ID" });
+
+        const out = await deleteRenderForMember({ sb, member_id, id });
+        return res.status(out.status).json(out.ok ? { ok: true, id: out.deleted_id } : out);
+      }
+
+      // ---------- captions-apply (kept) ----------
       if (action === "captions-apply") {
         const id = String(body?.id || "").trim();
         if (!id) return res.status(400).json({ ok: false, error: "MISSING_ID" });
@@ -168,7 +243,6 @@ module.exports = async function handler(req, res) {
         if (error || !row) return res.status(404).json({ ok: false, error: "NOT_FOUND" });
         if (!row.video_url) return res.status(400).json({ ok: false, error: "VIDEO_NOT_READY" });
 
-        // ✅ Determine previous style from choices jsonb (NOT a missing column)
         const prevStyle = String(row?.choices?.captionStyle || row?.choices?.caption_style || "").trim().toLowerCase();
 
         if (row.captioned_video_url && prevStyle === styleSafe) {
@@ -185,7 +259,6 @@ module.exports = async function handler(req, res) {
         const template_id = pickCaptionsTemplateIdByAspect(aspectRatio);
         if (!template_id) return res.status(500).json({ ok: false, error: "MISSING_CAPTIONS_TEMPLATE" });
 
-        // ✅ Update DB state BEFORE calling Creatomate (and store style inside choices)
         const newChoices = { ...(row.choices || {}), captionStyle: styleSafe };
 
         await sb
@@ -195,16 +268,14 @@ module.exports = async function handler(req, res) {
             caption_error: null,
             captioned_video_url: null,
             caption_template_id: `creatomate:${template_id}`,
-            choices: newChoices, // ✅ store selected style here
+            choices: newChoices,
           })
           .eq("id", row.id);
 
-        // Template modifications: pipe original video into the captions template
         const mods = {
           [`${CREATO_VIDEO_ELEMENT_ID}.source`]: String(row.video_url),
         };
 
-        // ✅ Force exactly one captions layer visible (prevents double captions inside the captions template)
         mods["Subtitles_Sentence.visible"] = false;
         mods["Subtitles_Karaoke.visible"] = false;
         mods["Subtitles_Word.visible"] = false;
@@ -244,7 +315,6 @@ module.exports = async function handler(req, res) {
           return res.status(resp.status).json({ ok: false, error: "CREATOMATE_ERROR", details: resp.json });
         }
 
-        // ✅ You do NOT have caption_render_id column, so we do NOT store it.
         const caption_job_id = Array.isArray(resp.json) ? resp.json[0]?.id : resp.json?.id;
         if (!caption_job_id) {
           await sb
