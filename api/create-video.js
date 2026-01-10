@@ -1,4 +1,8 @@
 // api/create-video.js (CommonJS, Node 18)
+// ✅ Uses ElevenLabs to generate an MP3, uploads to Supabase Storage,
+// ✅ Sends the MP3 to Creatomate via "Voiceover.source" (URL provider mode)
+// ✅ Keeps your caption-style + settings system intact
+// ✅ Avoids passing ElevenLabs voiceId into Creatomate "Voiceover.voice" (that breaks narration)
 
 const https = require("https");
 const crypto = require("crypto");
@@ -530,7 +534,7 @@ function captionSettingsMods(captionStyle, captionSettings) {
 }
 
 // =====================================================
-// ElevenLabs: TTS -> Supabase Storage -> Public URL (Media mode)
+// ElevenLabs: TTS -> Supabase Storage -> Public URL
 // =====================================================
 async function elevenlabsTTS({ voiceId, text }) {
   if (!ELEVENLABS_API_KEY) throw new Error("MISSING_ELEVENLABS_API_KEY");
@@ -601,11 +605,15 @@ module.exports = async function handler(req, res) {
       storyType = "Random AI story",
       artStyle = "Scary toon",
       language = "English",
-      voiceId = "",
-      voiceName = "Voice",
+
+      // from your UI
+      voiceId = "", // ElevenLabs voiceId (EXAVIT..., etc)
+      voiceName = "Voice", // label only (NOT used by Creatomate voice dropdown in URL mode)
+
       aspectRatio = "9:16",
       customPrompt = "",
       durationRange = "60-90",
+
       captionStyle = "sentence",
       captionSettings = {},
     } = body;
@@ -665,11 +673,14 @@ module.exports = async function handler(req, res) {
 
     const narration = String(scriptResp?.narration || "").trim();
     if (!narration) {
-      await supabase.from("renders").update({ status: "failed", error: JSON.stringify(scriptResp || {}) }).eq("id", db_id);
+      await supabase
+        .from("renders")
+        .update({ status: "failed", error: JSON.stringify(scriptResp || {}) })
+        .eq("id", db_id);
       return res.status(502).json({ error: "SCRIPT_EMPTY", details: scriptResp });
     }
 
-    // ✅ Generate MP3 in backend (exact voice) + upload to Supabase
+    // ✅ Generate MP3 in backend (exact ElevenLabs voice) + upload to Supabase
     let voiceUrl = "";
     if (voiceId) {
       try {
@@ -711,17 +722,26 @@ module.exports = async function handler(req, res) {
     const variantSequence = buildVariantSequence(beatCount);
 
     // ✅ Creatomate modifications
-    // IMPORTANT:
-    // - Narration is text used for captions/transcripts
-    // - Voiceover.source is the *mp3 url* (your exact ElevenLabs voice)
+    // IMPORTANT: In your Creatomate template, set Voiceover provider to "URL"
+    // (Provider dropdown: None / Uploaded file / URL / ElevenLabs / OpenAI)
+    // Then "Voiceover.source" will play the MP3.
     const mods = {
+      // Captions/transcript input (your template likely reads this)
       Narration: narration,
+
+      // Labels
       VoiceLabel: voiceName || "Voice",
       LanguageLabel: language,
       StoryTypeLabel: storyType,
 
-      // ✅ THIS is what fixes narration reliability
+      // ✅ URL audio mode (most reliable + uses the exact ElevenLabs voiceId from UI)
       "Voiceover.source": voiceUrl || "",
+      "Voiceover.url": voiceUrl || "",
+
+      // ✅ Make sure Creatomate doesn't try ElevenLabs provider fields
+      "Voiceover.text": "",
+      "Voiceover.model": "",
+      "Voiceover.voice": "",
 
       // ✅ Exactly one caption layer visible
       ...captionVisibilityMods(styleNorm),
@@ -778,7 +798,10 @@ module.exports = async function handler(req, res) {
     );
 
     if (resp.status !== 202 && resp.status !== 200) {
-      await supabase.from("renders").update({ status: "failed", error: JSON.stringify(resp.json || {}) }).eq("id", db_id);
+      await supabase
+        .from("renders")
+        .update({ status: "failed", error: JSON.stringify(resp.json || {}) })
+        .eq("id", db_id);
       return res.status(resp.status).json({ error: "CREATOMATE_ERROR", details: resp.json });
     }
 
