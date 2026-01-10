@@ -67,6 +67,8 @@ async function requireMemberId(req) {
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4.1-mini";
 const PROMPT_EXPANDER = (process.env.PROMPT_EXPANDER || "openai").toLowerCase();
+
+// (kept for compatibility, but we now expand every beat)
 const EXPAND_SHORT_BEATS_ONLY =
   String(process.env.EXPAND_SHORT_BEATS_ONLY || "true").toLowerCase() !== "false";
 const EXPAND_WORD_THRESHOLD = Number(process.env.EXPAND_WORD_THRESHOLD || 14);
@@ -83,11 +85,13 @@ const KREA_PER_BEAT_RETRIES = Number(process.env.KREA_PER_BEAT_RETRIES || 2);
 const KREA_POLL_TRIES = Number(process.env.KREA_POLL_TRIES || 90);
 const KREA_POLL_DELAY_MS = Number(process.env.KREA_POLL_DELAY_MS || 2500);
 
-// ✅ Logging toggles (new)
+// ✅ Logging toggles
 const KREA_LOG_PROMPTS = String(process.env.KREA_LOG_PROMPTS ?? "true").toLowerCase() !== "false";
 const KREA_LOG_FULL_PROMPTS = String(process.env.KREA_LOG_FULL_PROMPTS ?? "true").toLowerCase() !== "false";
-// If you want to cap prompt logging length while still "seeing it":
 const KREA_LOG_PROMPT_MAX = Number(process.env.KREA_LOG_PROMPT_MAX || 1200);
+
+// ✅ Visual variety toggle (defaults ON)
+const KREA_VARIETY_CUES = String(process.env.KREA_VARIETY_CUES ?? "true").toLowerCase() !== "false";
 
 // ---------- ElevenLabs ----------
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
@@ -161,33 +165,49 @@ function splitLongSentence(sentence, maxWords) {
   }
   return out.filter(Boolean);
 }
+
+// ✅ UPDATED: more consistent beat sizing (reduces tiny/huge beats)
 function splitNarrationIntoBeats(narration, beatCount) {
   const text = (narration || "").trim();
   if (!text || beatCount <= 0) return [];
 
   const totalWords = countWords(text);
-  const targetWordsPerBeat = Math.max(8, Math.round(totalWords / beatCount));
+
+  const targetWordsPerBeat = Math.max(12, Math.round(totalWords / beatCount));
+  const minWordsPerBeat = Math.max(10, Math.floor(targetWordsPerBeat * 0.7));
+  const maxWordsPerBeat = Math.max(18, Math.ceil(targetWordsPerBeat * 1.35));
 
   let sentences = splitIntoSentences(text);
-  const maxSentenceWords = Math.max(18, targetWordsPerBeat * 2);
-  sentences = sentences.flatMap((s) => splitLongSentence(s, maxSentenceWords));
+
+  // Split long sentences so we don’t get huge beats
+  sentences = sentences.flatMap((s) => splitLongSentence(s, maxWordsPerBeat));
 
   const beats = [];
-  let current = "";
+  let current = [];
   let currentWords = 0;
 
   for (const s of sentences) {
     const w = countWords(s);
-    if (current && currentWords + w > targetWordsPerBeat) {
-      beats.push(current.trim());
-      current = "";
+
+    if (currentWords + w > maxWordsPerBeat && currentWords >= minWordsPerBeat) {
+      beats.push(current.join(" ").trim());
+      current = [];
       currentWords = 0;
     }
-    current += (current ? " " : "") + s;
-    currentWords += w;
-  }
-  if (current.trim()) beats.push(current.trim());
 
+    current.push(s);
+    currentWords += w;
+
+    if (currentWords >= targetWordsPerBeat) {
+      beats.push(current.join(" ").trim());
+      current = [];
+      currentWords = 0;
+    }
+  }
+
+  if (current.join(" ").trim()) beats.push(current.join(" ").trim());
+
+  // Merge down to beatCount
   while (beats.length > beatCount) {
     let bestIdx = 0;
     let bestLen = Infinity;
@@ -201,29 +221,68 @@ function splitNarrationIntoBeats(narration, beatCount) {
     beats.splice(bestIdx, 2, `${beats[bestIdx]} ${beats[bestIdx + 1]}`.trim());
   }
 
+  // Pad up to beatCount
   while (beats.length < beatCount) beats.push(beats[beats.length - 1] || text);
   return beats;
 }
 
-// ---------- Timing ----------
+// ---------- Timing (UPDATED: speech-based + smoothing + normalization) ----------
+const WORDS_PER_SECOND = Number(process.env.WORDS_PER_SECOND || 2.6);
+const BEAT_PAD_SEC = Number(process.env.BEAT_PAD_SEC || 0.25);
+
+const MIN_BEAT_SEC = Number(process.env.MIN_BEAT_SEC || 2.8);
+const MAX_BEAT_SEC = Number(process.env.MAX_BEAT_SEC || 5.4);
+const MAX_JUMP_RATIO = Number(process.env.MAX_JUMP_RATIO || 1.35);
+
 function beatDurationFromText(text) {
   const words = countWords(text);
-  const speechSeconds = words / 2.5;
-  const padded = speechSeconds + 0.6;
-  return Math.max(2.5, Math.min(7.0, padded));
+  const speechSeconds = words / WORDS_PER_SECOND;
+  const raw = speechSeconds + BEAT_PAD_SEC;
+  return Math.max(MIN_BEAT_SEC, Math.min(MAX_BEAT_SEC, raw));
 }
-function buildBeatTiming(beatTexts) {
-  const durations = beatTexts.map(beatDurationFromText);
+
+function smoothDurations(durations) {
+  if (!durations.length) return durations;
+  const out = durations.slice();
+  for (let i = 1; i < out.length; i++) {
+    const prev = out[i - 1];
+    const maxUp = prev * MAX_JUMP_RATIO;
+    const minDown = prev / MAX_JUMP_RATIO;
+    out[i] = Math.max(minDown, Math.min(maxUp, out[i]));
+  }
+  return out;
+}
+
+function normalizeToTotal(durations, targetTotalSec) {
+  const sum = durations.reduce((a, b) => a + b, 0) || 1;
+  const scale = targetTotalSec / sum;
+  return durations.map((d) => d * scale);
+}
+
+function buildBeatTiming(beatTexts, targetTotalSec) {
+  let durations = beatTexts.map(beatDurationFromText);
+
+  durations = smoothDurations(durations);
+
+  if (Number.isFinite(targetTotalSec) && targetTotalSec > 0) {
+    durations = normalizeToTotal(durations, targetTotalSec);
+
+    // Re-clamp after normalization
+    durations = durations.map((d) => Math.max(MIN_BEAT_SEC, Math.min(MAX_BEAT_SEC, d)));
+    durations = smoothDurations(durations);
+  }
+
   let t = 0;
   const starts = durations.map((d) => {
     const s = t;
     t += d;
     return s;
   });
+
   return { durations, starts, total: t };
 }
 
-// ---------- OpenAI prompt expander ----------
+// ---------- OpenAI prompt expander (UPDATED: turns narration into a real scene prompt) ----------
 async function expandBeatToVisualPrompt(beatText) {
   const text = String(beatText || "").trim();
   if (!text) return "";
@@ -232,12 +291,12 @@ async function expandBeatToVisualPrompt(beatText) {
   const instruction = `
 Rewrite the narration line into a vivid visual prompt for an image generator.
 
-Rules:
+Output rules:
 - Output ONLY the prompt (no quotes, no labels, no JSON).
-- Describe: environment, key objects, mood via visible details, spatial layout.
-- Do NOT include words like: cinematic, realistic, photorealistic, 8k, ultra, high quality, masterpiece.
-- Do NOT mention "art style" or "story type" or "Scene #".
-- Keep it 2–4 sentences, dense and specific.
+- Do NOT write in first person. Do NOT include dialogue.
+- Start with a short establishing sentence naming the scene.
+- Then add 2–4 sentences with concrete visual details: setting, lighting, objects, mood (shown visually), spatial layout.
+- Avoid camera terms and hype words like: cinematic, realistic, photorealistic, 8k, masterpiece.
 
 Narration line:
 "${text}"
@@ -255,9 +314,9 @@ Narration line:
         { role: "system", content: "You output only the final prompt text. No JSON. No extra text." },
         { role: "user", content: instruction },
       ],
-      temperature: 0.7,
+      temperature: 0.8,
       top_p: 0.95,
-      presence_penalty: 0.3,
+      presence_penalty: 0.35,
       frequency_penalty: 0.2,
     }),
   });
@@ -278,8 +337,23 @@ function shortPrompt(p) {
   return s.length > 180 ? s.slice(0, 180) + "..." : s;
 }
 
-// ✅ New helper for logging prompts safely
-function logPromptForKrea({ requestId, beatIndex, beatText, expanded, prompt, aspectRatio }) {
+function pickVariationCue(i) {
+  const cues = [
+    "wide aisle-level view, strong depth",
+    "tight detail on a single object in the scene",
+    "overhead angle showing the layout",
+    "view from behind a foreground object, partially obscured",
+    "side angle with strong shadows and negative space",
+    "focus on hands interacting with something in the scene",
+    "scene framed through glass or reflections",
+    "low angle near the floor, long lines leading forward",
+    "centered composition with symmetrical lines and clean geometry",
+    "off-center framing with a strong light source on one side",
+  ];
+  return cues[(i - 1) % cues.length];
+}
+
+function logPromptForKrea({ requestId, beatIndex, beatText, expanded, prompt, aspectRatio, varietyCue }) {
   if (!KREA_LOG_PROMPTS) return;
 
   const safePrompt = String(prompt || "");
@@ -294,12 +368,12 @@ function logPromptForKrea({ requestId, beatIndex, beatText, expanded, prompt, as
     beat: beatIndex,
     aspectRatio,
     expanded,
+    varietyCue: varietyCue || null,
     beatText: safeBeat.length > 260 ? safeBeat.slice(0, 260) + "..." : safeBeat,
     prompt: fullOrShort,
     promptLen: safePrompt.length,
     beatWords: countWords(safeBeat),
     promptWords: countWords(safePrompt),
-    // useful for seeing when you’re accidentally sending empty prompts
     emptyPrompt: !safePrompt.trim(),
   });
 }
@@ -314,7 +388,6 @@ async function createKreaJob({ prompt, aspectRatio, useStyle, requestId, beatInd
     payload.styles = [{ id: KREA_STYLE_ID, strength: KREA_STYLE_STRENGTH }];
   }
 
-  // ✅ Log the exact payload being sent (no secrets)
   if (KREA_LOG_PROMPTS) {
     console.log("[KREA_REQUEST]", {
       requestId,
@@ -323,7 +396,7 @@ async function createKreaJob({ prompt, aspectRatio, useStyle, requestId, beatInd
       useStyle,
       styleId: useStyle ? KREA_STYLE_ID : null,
       styleStrength: useStyle ? KREA_STYLE_STRENGTH : null,
-      payload, // includes prompt + aspect_ratio (+ styles)
+      payload,
     });
   }
 
@@ -444,11 +517,33 @@ async function generateOneImageWithRetry({ prompt, aspectRatio, beatIndex, reque
 async function generateKreaImageUrlsForBeats({ beatCount, beatTexts, aspectRatio, requestId }) {
   const urls = [];
 
+  if (KREA_LOG_PROMPTS) {
+    console.log("[KREA_BATCH]", {
+      requestId,
+      beatCount,
+      aspectRatio,
+      // keep these in log for debugging, even though we expand every beat now
+      expandShortBeatsOnly: EXPAND_SHORT_BEATS_ONLY,
+      expandWordThreshold: EXPAND_WORD_THRESHOLD,
+      styleId: KREA_STYLE_ID,
+      styleStrength: KREA_STYLE_STRENGTH,
+      generateUrl: KREA_GENERATE_URL,
+      jobUrlBase: KREA_JOB_URL_BASE,
+      varietyCues: KREA_VARIETY_CUES,
+    });
+  }
+
   for (let i = 1; i <= beatCount; i++) {
     const beatText = (beatTexts[i - 1] || "").trim();
 
     // ✅ ALWAYS expand into a real visual prompt
-    const prompt = await expandBeatToVisualPrompt(beatText);
+    let prompt = await expandBeatToVisualPrompt(beatText);
+
+    // ✅ Add a variation cue so images don't all look the same
+    const varietyCue = KREA_VARIETY_CUES ? pickVariationCue(i) : "";
+    if (varietyCue) {
+      prompt = `${prompt}\n\nComposition cue: ${varietyCue}. Keep this scene visually distinct from previous ones.`;
+    }
 
     logPromptForKrea({
       requestId,
@@ -457,15 +552,14 @@ async function generateKreaImageUrlsForBeats({ beatCount, beatTexts, aspectRatio
       expanded: true,
       prompt,
       aspectRatio,
+      varietyCue,
     });
 
     const imageUrl = await generateOneImageWithRetry({ prompt, aspectRatio, beatIndex: i, requestId });
     urls.push(imageUrl);
   }
-
   return urls;
 }
-
 
 // ---------- Variants ----------
 function buildVariantSequence(beatCount) {
@@ -759,8 +853,12 @@ module.exports = async function handler(req, res) {
     const speechSec = estimateSpeechSeconds(narration);
     let targetSec = Math.round(speechSec + 2);
 
-    let minSec = 60, maxSec = 90;
-    if (durationRange === "30-60") { minSec = 30; maxSec = 60; }
+    let minSec = 60,
+      maxSec = 90;
+    if (durationRange === "30-60") {
+      minSec = 30;
+      maxSec = 60;
+    }
 
     if (targetSec < minSec) targetSec = minSec;
     if (targetSec > maxSec) targetSec = maxSec;
@@ -770,7 +868,18 @@ module.exports = async function handler(req, res) {
     beatCount = Math.max(MIN_BEATS, Math.min(MAX_BEATS, beatCount));
 
     const beatTexts = splitNarrationIntoBeats(narration, beatCount);
-    const timing = buildBeatTiming(beatTexts);
+
+    // ✅ UPDATED: timing uses speech-based durations + smoothing + normalization
+    const timing = buildBeatTiming(beatTexts, targetSec);
+
+    console.log("[TIMING_DEBUG]", {
+      requestId,
+      beatCount,
+      targetSec,
+      speechSec: Number(speechSec.toFixed(2)),
+      totalSec: Number(timing.total.toFixed(2)),
+      durations: timing.durations.map((d) => Number(d.toFixed(2))),
+    });
 
     // Images
     let imageUrls = [];
@@ -787,7 +896,7 @@ module.exports = async function handler(req, res) {
       LanguageLabel: language,
       StoryTypeLabel: storyType,
 
-      // Creatomate media elements use ".source"
+      // ✅ Creatomate media elements use ".source"
       "Voiceover.source": voiceUrl || "",
 
       ...captionVisibilityMods(styleNorm),
@@ -861,7 +970,7 @@ module.exports = async function handler(req, res) {
       db_id,
       captionStyle: styleNorm,
       voiceUrl: voiceUrl || null,
-      requestId, // ✅ so you can search logs by this id
+      requestId,
     });
   } catch (err) {
     const msg = String(err?.message || err);
