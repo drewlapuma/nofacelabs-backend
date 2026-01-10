@@ -230,11 +230,11 @@ async function expandBeatToVisualPrompt(beatText) {
   if (!OPENAI_API_KEY || PROMPT_EXPANDER !== "openai") return text;
 
   const instruction = `
-Turn the following narration line into a single, highly detailed visual scene prompt for image generation.
+Rewrite the narration line into a vivid visual prompt for an image generator.
 
 Rules:
-- Output ONLY the prompt text.
-- Describe: environment, key objects, lighting/shadows, mood via visible details, spatial layout.
+- Output ONLY the prompt (no quotes, no labels, no JSON).
+- Describe: environment, key objects, mood via visible details, spatial layout.
 - Do NOT include words like: cinematic, realistic, photorealistic, 8k, ultra, high quality, masterpiece.
 - Do NOT mention "art style" or "story type" or "Scene #".
 - Keep it 2–4 sentences, dense and specific.
