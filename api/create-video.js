@@ -489,7 +489,7 @@ function safePx(n, fallback) {
 function captionVisibilityMods(captionStyle) {
   const style = normCaptionStyle(captionStyle);
   const mods = {
-    "Subtitles-1.visible": false, // if template has an old default
+    "Subtitles-1.visible": false,
   };
 
   for (const layer of Object.values(CAPTION_STYLE_TO_LAYER)) {
@@ -506,7 +506,7 @@ function captionSettingsMods(captionStyle, captionSettings) {
   const style = normCaptionStyle(captionStyle);
   const layer = CAPTION_STYLE_TO_LAYER[style] || CAPTION_STYLE_TO_LAYER.sentence;
 
-  const cs = (captionSettings && typeof captionSettings === "object") ? captionSettings : {};
+  const cs = captionSettings && typeof captionSettings === "object" ? captionSettings : {};
 
   const x = asPercent(cs.x, 50);
   const y = asPercent(cs.y, 50);
@@ -520,7 +520,6 @@ function captionSettingsMods(captionStyle, captionSettings) {
   const activeColor = safeColor(cs.activeColor, "#A855F7");
 
   const mods = {};
-
   mods[`${layer}.x_alignment`] = x;
   mods[`${layer}.y_alignment`] = y;
 
@@ -557,7 +556,7 @@ async function elevenlabsTTS({ voiceId, text }) {
     headers: {
       "xi-api-key": ELEVENLABS_API_KEY,
       "Content-Type": "application/json",
-      "Accept": "audio/mpeg",
+      Accept: "audio/mpeg",
     },
     body: JSON.stringify({
       text: t,
@@ -584,13 +583,11 @@ async function uploadVoiceMp3({ db_id, mp3Buffer }) {
 
   const path = `${db_id}/voice.mp3`;
 
-  const { error: upErr } = await supabase.storage
-    .from(VOICE_BUCKET)
-    .upload(path, mp3Buffer, {
-      contentType: "audio/mpeg",
-      upsert: true,
-      cacheControl: "3600",
-    });
+  const { error: upErr } = await supabase.storage.from(VOICE_BUCKET).upload(path, mp3Buffer, {
+    contentType: "audio/mpeg",
+    upsert: true,
+    cacheControl: "3600",
+  });
 
   if (upErr) {
     console.error("[VOICE_UPLOAD_FAILED]", upErr);
@@ -615,25 +612,26 @@ module.exports = async function handler(req, res) {
     const memberId = await requireMemberId(req);
 
     const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : req.body || {};
+
+    // ✅ FIX: accept both camelCase + snake_case from Webflow
+    const voiceId = String(body.voiceId || body.voice_id || "").trim();
+    const voiceName = String(body.voiceName || body.voice_name || "").trim() || "Voice";
+
     const {
       storyType = "Random AI story",
       artStyle = "Scary toon",
       language = "English",
 
-      // ✅ NEW: voice wiring
-      voiceId = "",
-      voiceName = "Adam",
-
       aspectRatio = "9:16",
       customPrompt = "",
       durationRange = "60-90",
 
-      // ✅ captions
       captionStyle = "sentence",
       captionSettings = {},
     } = body;
 
-    if (!process.env.CREATOMATE_API_KEY) return res.status(500).json({ error: "MISSING_CREATOMATE_API_KEY" });
+    if (!process.env.CREATOMATE_API_KEY)
+      return res.status(500).json({ error: "MISSING_CREATOMATE_API_KEY" });
     if (!supabase) return res.status(500).json({ error: "MISSING_SUPABASE_ENV_VARS" });
 
     const templateMap = {
@@ -686,35 +684,56 @@ module.exports = async function handler(req, res) {
     }).then((r) => r.json());
 
     const narration = (scriptResp && scriptResp.narration) || "";
-    if (!narration.trim()) {
+
+    // ✅ FIX: block "narration is a URL" cases (prevents reading supabase links)
+    const n = String(narration || "").trim();
+    const looksLikeUrl = /^https?:\/\/\S+$/i.test(n) || (n.includes("supabase.co") && !n.includes(" "));
+    if (!n || looksLikeUrl) {
       await supabase
         .from("renders")
-        .update({ status: "failed", error: JSON.stringify(scriptResp || {}) })
+        .update({
+          status: "failed",
+          error: JSON.stringify({
+            reason: "BAD_NARRATION",
+            narration: n.slice(0, 200),
+            scriptResp,
+          }),
+        })
         .eq("id", db_id);
 
-      return res.status(502).json({ error: "SCRIPT_EMPTY", details: scriptResp });
+      return res.status(502).json({ error: "BAD_NARRATION", narration: n.slice(0, 200) });
     }
 
     // ✅ Voiceover MP3 (ElevenLabs) -> Supabase -> URL
     let voiceUrl = null;
     if (voiceId && ELEVENLABS_API_KEY) {
       try {
-        const mp3 = await elevenlabsTTS({ voiceId, text: narration });
+        const mp3 = await elevenlabsTTS({ voiceId, text: n });
         voiceUrl = await uploadVoiceMp3({ db_id, mp3Buffer: mp3 });
       } catch (e) {
         console.error("[VOICEOVER_FAILED]", { message: String(e?.message || e), voiceId });
-        // If you want to fail hard instead of fallback, uncomment:
-        // throw e;
-        voiceUrl = null;
+        voiceUrl = null; // fallback to template if you choose
       }
     }
 
+    // ✅ DEBUG: confirms what the backend is actually using
+    console.log("[VOICE_DEBUG]", {
+      voiceId,
+      voiceName,
+      voiceUrl: voiceUrl ? String(voiceUrl).slice(0, 120) + "..." : null,
+      narrationHead: n.slice(0, 120),
+    });
+
     // Beats + timing
-    const speechSec = estimateSpeechSeconds(narration);
+    const speechSec = estimateSpeechSeconds(n);
     let targetSec = Math.round(speechSec + 2);
 
-    let minSec = 60, maxSec = 90;
-    if (durationRange === "30-60") { minSec = 30; maxSec = 60; }
+    let minSec = 60,
+      maxSec = 90;
+    if (durationRange === "30-60") {
+      minSec = 30;
+      maxSec = 60;
+    }
 
     if (targetSec < minSec) targetSec = minSec;
     if (targetSec > maxSec) targetSec = maxSec;
@@ -723,7 +742,7 @@ module.exports = async function handler(req, res) {
     if (!beatCount || !Number.isFinite(beatCount)) beatCount = MIN_BEATS;
     beatCount = Math.max(MIN_BEATS, Math.min(MAX_BEATS, beatCount));
 
-    const beatTexts = splitNarrationIntoBeats(narration, beatCount);
+    const beatTexts = splitNarrationIntoBeats(n, beatCount);
     const timing = buildBeatTiming(beatTexts);
 
     // Images
@@ -738,12 +757,13 @@ module.exports = async function handler(req, res) {
     const styleNorm = normCaptionStyle(captionStyle);
 
     const mods = {
-      Narration: narration,
+      Narration: n,
       VoiceLabel: voiceName || "Voice",
       LanguageLabel: language,
       StoryTypeLabel: storyType,
 
-      // ✅ Audio layer is named "Voiceover" in your template:
+      // ✅ IMPORTANT: this must match the EXACT audio layer name in Creatomate.
+      // If your template uses a different layer name, change "Voiceover" below.
       "Voiceover.source": voiceUrl || "",
 
       // ✅ Exactly one caption layer visible
@@ -791,7 +811,9 @@ module.exports = async function handler(req, res) {
       template_id,
       modifications: mods,
       output_format: "mp4",
-      webhook_url: `${publicBaseUrl}/api/creatomate-webhook?id=${encodeURIComponent(db_id)}&kind=main`,
+      webhook_url: `${publicBaseUrl}/api/creatomate-webhook?id=${encodeURIComponent(
+        db_id
+      )}&kind=main`,
     };
 
     const resp = await postJSON(
@@ -801,17 +823,26 @@ module.exports = async function handler(req, res) {
     );
 
     if (resp.status !== 202 && resp.status !== 200) {
-      await supabase.from("renders").update({ status: "failed", error: JSON.stringify(resp.json || {}) }).eq("id", db_id);
+      await supabase
+        .from("renders")
+        .update({ status: "failed", error: JSON.stringify(resp.json || {}) })
+        .eq("id", db_id);
       return res.status(resp.status).json({ error: "CREATOMATE_ERROR", details: resp.json });
     }
 
     const job_id = Array.isArray(resp.json) ? resp.json[0]?.id : resp.json?.id;
     if (!job_id) {
-      await supabase.from("renders").update({ status: "failed", error: "NO_JOB_ID_IN_RESPONSE" }).eq("id", db_id);
+      await supabase
+        .from("renders")
+        .update({ status: "failed", error: "NO_JOB_ID_IN_RESPONSE" })
+        .eq("id", db_id);
       return res.status(502).json({ error: "NO_JOB_ID_IN_RESPONSE", details: resp.json });
     }
 
-    const { error: updErr } = await supabase.from("renders").update({ render_id: String(job_id) }).eq("id", db_id);
+    const { error: updErr } = await supabase
+      .from("renders")
+      .update({ render_id: String(job_id) })
+      .eq("id", db_id);
     if (updErr) console.error("[DB_UPDATE_RENDER_ID_FAILED]", updErr);
 
     return res.status(200).json({
@@ -819,6 +850,8 @@ module.exports = async function handler(req, res) {
       job_id,
       db_id,
       captionStyle: styleNorm,
+      voiceId: voiceId || null,
+      voiceName: voiceName || null,
       voiceUrl: voiceUrl || null,
     });
   } catch (err) {
