@@ -1,12 +1,11 @@
 // api/create-video.js (CommonJS, Node 18)
-// NOTE: Node 18 on Vercel has global fetch.
 
 const https = require("https");
 const crypto = require("crypto");
 const { createClient } = require("@supabase/supabase-js");
 const memberstackAdmin = require("@memberstack/admin");
 
-// -------------------- CORS (FIXED) --------------------
+// -------------------- CORS --------------------
 const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || "*")
   .split(",")
   .map((s) => s.trim())
@@ -44,7 +43,7 @@ const supabase =
       })
     : null;
 
-// ---------- Memberstack auth (Admin SDK verify) ----------
+// ---------- Memberstack ----------
 const MEMBERSTACK_SECRET_KEY = process.env.MEMBERSTACK_SECRET_KEY;
 const ms = MEMBERSTACK_SECRET_KEY ? memberstackAdmin.init(MEMBERSTACK_SECRET_KEY) : null;
 
@@ -85,10 +84,8 @@ const KREA_PER_BEAT_RETRIES = Number(process.env.KREA_PER_BEAT_RETRIES || 2);
 const KREA_POLL_TRIES = Number(process.env.KREA_POLL_TRIES || 90);
 const KREA_POLL_DELAY_MS = Number(process.env.KREA_POLL_DELAY_MS || 2500);
 
-// ---------- ElevenLabs ----------
-const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
+// ---------- ElevenLabs (for Creatomate provider settings only) ----------
 const ELEVENLABS_MODEL_ID = process.env.ELEVENLABS_MODEL_ID || "eleven_multilingual_v2";
-const VOICE_BUCKET = process.env.VOICE_BUCKET || "voiceovers";
 
 // ---------- Beats ----------
 const MIN_BEATS = 8;
@@ -252,9 +249,6 @@ Narration line:
         { role: "user", content: instruction },
       ],
       temperature: 0.7,
-      top_p: 0.95,
-      presence_penalty: 0.3,
-      frequency_penalty: 0.2,
     }),
   });
 
@@ -302,17 +296,12 @@ async function createKreaJob({ prompt, aspectRatio, useStyle }) {
       useStyle,
       aspectRatio,
       prompt: shortPrompt(prompt),
-      payloadKeys: Object.keys(payload),
     });
     throw new Error(`KREA_GENERATE_FAILED (${resp.status})`);
   }
 
   const jobId = data?.job_id || data?.id;
-  if (!jobId) {
-    console.error("[KREA_MISSING_JOB_ID]", { data, useStyle, prompt: shortPrompt(prompt) });
-    throw new Error("KREA_MISSING_JOB_ID");
-  }
-
+  if (!jobId) throw new Error("KREA_MISSING_JOB_ID");
   return jobId;
 }
 
@@ -326,30 +315,18 @@ async function pollKreaJob(jobId) {
     });
 
     const data = await resp.json().catch(() => ({}));
-
-    if (!resp.ok) {
-      console.error("[KREA_JOB_LOOKUP_FAILED]", { status: resp.status, data, jobId });
-      throw new Error(`KREA_JOB_LOOKUP_FAILED (${resp.status})`);
-    }
+    if (!resp.ok) throw new Error(`KREA_JOB_LOOKUP_FAILED (${resp.status})`);
 
     const status = String(data?.status || "").toLowerCase();
 
     if (status === "completed" || status === "complete" || status === "succeeded") {
       const urls = data?.result?.urls || data?.urls || [];
       const imageUrl = Array.isArray(urls) ? urls[0] : null;
-
-      if (!imageUrl) {
-        console.error("[KREA_JOB_NO_RESULT_URL]", { jobId, data });
-        throw new Error("KREA_JOB_NO_RESULT_URL");
-      }
+      if (!imageUrl) throw new Error("KREA_JOB_NO_RESULT_URL");
       return imageUrl;
     }
 
-    if (status === "failed" || status === "error") {
-      console.error("[KREA_JOB_FAILED]", { jobId, data });
-      throw new Error(`KREA_JOB_FAILED (${jobId})`);
-    }
-
+    if (status === "failed" || status === "error") throw new Error(`KREA_JOB_FAILED (${jobId})`);
     await new Promise((r) => setTimeout(r, KREA_POLL_DELAY_MS));
   }
 
@@ -362,14 +339,7 @@ async function generateOneImageWithRetry({ prompt, aspectRatio, beatIndex }) {
       const jobId = await createKreaJob({ prompt, aspectRatio, useStyle: true });
       return await pollKreaJob(jobId);
     } catch (e) {
-      console.error("[KREA_RETRY_STYLE]", {
-        beat: beatIndex,
-        attempt,
-        maxAttempts: KREA_PER_BEAT_RETRIES,
-        aspectRatio,
-        prompt: shortPrompt(prompt),
-        message: String(e?.message || e),
-      });
+      console.error("[KREA_RETRY_STYLE]", { beat: beatIndex, attempt, message: String(e?.message || e) });
       await new Promise((r) => setTimeout(r, 1200 * attempt));
     }
   }
@@ -379,14 +349,7 @@ async function generateOneImageWithRetry({ prompt, aspectRatio, beatIndex }) {
       const jobId = await createKreaJob({ prompt, aspectRatio, useStyle: false });
       return await pollKreaJob(jobId);
     } catch (e) {
-      console.error("[KREA_RETRY_NO_STYLE]", {
-        beat: beatIndex,
-        attempt,
-        maxAttempts: KREA_PER_BEAT_RETRIES,
-        aspectRatio,
-        prompt: shortPrompt(prompt),
-        message: String(e?.message || e),
-      });
+      console.error("[KREA_RETRY_NO_STYLE]", { beat: beatIndex, attempt, message: String(e?.message || e) });
       await new Promise((r) => setTimeout(r, 1200 * attempt));
     }
   }
@@ -407,7 +370,6 @@ async function generateKreaImageUrlsForBeats({ beatCount, beatTexts, aspectRatio
   return urls;
 }
 
-// ---------- Variants ----------
 function buildVariantSequence(beatCount) {
   const seq = [];
   let last = null;
@@ -441,14 +403,7 @@ const CAPTION_STYLE_TO_LAYER = {
   redtag: "Subtitles_RedTag",
 };
 
-const ACTIVE_COLOR_STYLES = new Set([
-  "karaoke",
-  "yellowpop",
-  "minttag",
-  "highlighter",
-  "purplepop",
-  "redtag",
-]);
+const ACTIVE_COLOR_STYLES = new Set(["karaoke", "yellowpop", "minttag", "highlighter", "purplepop", "redtag"]);
 
 function normCaptionStyle(v) {
   const s = String(v || "").trim().toLowerCase();
@@ -470,8 +425,7 @@ function asPercent(n, fallback) {
 
 function safeColor(v, fallback) {
   const s = String(v || "").trim();
-  if (!s) return fallback;
-  return s;
+  return s || fallback;
 }
 
 function safeTextTransform(v) {
@@ -488,116 +442,39 @@ function safePx(n, fallback) {
 
 function captionVisibilityMods(captionStyle) {
   const style = normCaptionStyle(captionStyle);
-  const mods = {
-    "Subtitles-1.visible": false,
-  };
+  const mods = { "Subtitles-1.visible": false };
 
-  for (const layer of Object.values(CAPTION_STYLE_TO_LAYER)) {
-    mods[`${layer}.visible`] = false;
-  }
+  for (const layer of Object.values(CAPTION_STYLE_TO_LAYER)) mods[`${layer}.visible`] = false;
 
   const layer = CAPTION_STYLE_TO_LAYER[style] || CAPTION_STYLE_TO_LAYER.sentence;
   mods[`${layer}.visible`] = true;
-
   return mods;
 }
 
 function captionSettingsMods(captionStyle, captionSettings) {
   const style = normCaptionStyle(captionStyle);
   const layer = CAPTION_STYLE_TO_LAYER[style] || CAPTION_STYLE_TO_LAYER.sentence;
-
   const cs = captionSettings && typeof captionSettings === "object" ? captionSettings : {};
 
-  const x = asPercent(cs.x, 50);
-  const y = asPercent(cs.y, 50);
+  const mods = {};
+  mods[`${layer}.x_alignment`] = asPercent(cs.x, 50);
+  mods[`${layer}.y_alignment`] = asPercent(cs.y, 50);
 
   const fontFamily = String(cs.fontFamily || "Inter").trim();
   const fontWeight = clamp(cs.fontWeight, 100, 1000);
-  const fillColor = safeColor(cs.fillColor, "#FFFFFF");
-  const strokeColor = safeColor(cs.strokeColor, "#000000");
-  const strokeWidth = safePx(cs.strokeWidth, 0);
-  const textTransform = safeTextTransform(cs.textTransform);
-  const activeColor = safeColor(cs.activeColor, "#A855F7");
-
-  const mods = {};
-  mods[`${layer}.x_alignment`] = x;
-  mods[`${layer}.y_alignment`] = y;
-
   if (fontFamily) mods[`${layer}.font_family`] = fontFamily;
   if (fontWeight !== null) mods[`${layer}.font_weight`] = fontWeight;
 
-  mods[`${layer}.fill_color`] = fillColor;
-  mods[`${layer}.stroke_color`] = strokeColor;
-  mods[`${layer}.stroke_width`] = strokeWidth;
-
-  mods[`${layer}.text_transform`] = textTransform;
+  mods[`${layer}.fill_color`] = safeColor(cs.fillColor, "#FFFFFF");
+  mods[`${layer}.stroke_color`] = safeColor(cs.strokeColor, "#000000");
+  mods[`${layer}.stroke_width`] = safePx(cs.strokeWidth, 0);
+  mods[`${layer}.text_transform`] = safeTextTransform(cs.textTransform);
 
   if (ACTIVE_COLOR_STYLES.has(style)) {
-    mods[`${layer}.transcript_color`] = activeColor;
+    mods[`${layer}.transcript_color`] = safeColor(cs.activeColor, "#A855F7");
   }
 
   return mods;
-}
-
-// =====================================================
-// ElevenLabs: TTS -> Supabase Storage -> Public URL
-// =====================================================
-async function elevenlabsTTS({ voiceId, text }) {
-  if (!ELEVENLABS_API_KEY) throw new Error("MISSING_ELEVENLABS_API_KEY");
-  if (!voiceId) throw new Error("MISSING_VOICE_ID");
-
-  const t = String(text || "").trim();
-  if (!t) throw new Error("MISSING_TTS_TEXT");
-
-  const url = `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}/stream`;
-
-  const r = await fetch(url, {
-    method: "POST",
-    headers: {
-      "xi-api-key": ELEVENLABS_API_KEY,
-      "Content-Type": "application/json",
-      Accept: "audio/mpeg",
-    },
-    body: JSON.stringify({
-      text: t,
-      model_id: ELEVENLABS_MODEL_ID,
-      voice_settings: {
-        stability: 0.4,
-        similarity_boost: 0.85,
-      },
-    }),
-  });
-
-  if (!r.ok) {
-    const msg = await r.text().catch(() => "");
-    throw new Error(`ELEVENLABS_TTS_FAILED (${r.status}) ${msg}`);
-  }
-
-  const buf = Buffer.from(await r.arrayBuffer());
-  if (!buf.length) throw new Error("ELEVENLABS_EMPTY_AUDIO");
-  return buf;
-}
-
-async function uploadVoiceMp3({ db_id, mp3Buffer }) {
-  if (!supabase) throw new Error("MISSING_SUPABASE_ENV_VARS");
-
-  const path = `${db_id}/voice.mp3`;
-
-  const { error: upErr } = await supabase.storage.from(VOICE_BUCKET).upload(path, mp3Buffer, {
-    contentType: "audio/mpeg",
-    upsert: true,
-    cacheControl: "3600",
-  });
-
-  if (upErr) {
-    console.error("[VOICE_UPLOAD_FAILED]", upErr);
-    throw new Error("VOICE_UPLOAD_FAILED");
-  }
-
-  const { data } = supabase.storage.from(VOICE_BUCKET).getPublicUrl(path);
-  const url = data?.publicUrl;
-  if (!url) throw new Error("VOICE_PUBLIC_URL_FAILED");
-  return url;
 }
 
 // -------------------- MAIN --------------------
@@ -613,7 +490,7 @@ module.exports = async function handler(req, res) {
 
     const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : req.body || {};
 
-    // ✅ FIX: accept both camelCase + snake_case from Webflow
+    // ✅ accept both camelCase + snake_case
     const voiceId = String(body.voiceId || body.voice_id || "").trim();
     const voiceName = String(body.voiceName || body.voice_name || "").trim() || "Voice";
 
@@ -621,17 +498,14 @@ module.exports = async function handler(req, res) {
       storyType = "Random AI story",
       artStyle = "Scary toon",
       language = "English",
-
       aspectRatio = "9:16",
       customPrompt = "",
       durationRange = "60-90",
-
       captionStyle = "sentence",
       captionSettings = {},
     } = body;
 
-    if (!process.env.CREATOMATE_API_KEY)
-      return res.status(500).json({ error: "MISSING_CREATOMATE_API_KEY" });
+    if (!process.env.CREATOMATE_API_KEY) return res.status(500).json({ error: "MISSING_CREATOMATE_API_KEY" });
     if (!supabase) return res.status(500).json({ error: "MISSING_SUPABASE_ENV_VARS" });
 
     const templateMap = {
@@ -642,6 +516,8 @@ module.exports = async function handler(req, res) {
     const template_id = (templateMap[aspectRatio] || "").trim();
     if (!template_id) return res.status(400).json({ error: "NO_TEMPLATE_FOR_ASPECT", aspectRatio });
 
+    const styleNorm = normCaptionStyle(captionStyle);
+
     const choices = {
       storyType,
       artStyle,
@@ -651,14 +527,12 @@ module.exports = async function handler(req, res) {
       aspectRatio,
       customPrompt,
       durationRange,
-      captionStyle: normCaptionStyle(captionStyle),
+      captionStyle: styleNorm,
       captionSettings: captionSettings && typeof captionSettings === "object" ? captionSettings : {},
     };
 
-    // DB id up front so webhook can target it
     const db_id = crypto.randomUUID();
 
-    // Insert row first (render_id is NOT NULL, so placeholder then update)
     const { error: preInsErr } = await supabase.from("renders").insert([
       {
         id: db_id,
@@ -671,61 +545,29 @@ module.exports = async function handler(req, res) {
       },
     ]);
 
-    if (preInsErr) {
-      console.error("[DB_PREINSERT_FAILED]", preInsErr);
-      return res.status(500).json({ error: "DB_PREINSERT_FAILED", details: preInsErr });
-    }
+    if (preInsErr) return res.status(500).json({ error: "DB_PREINSERT_FAILED", details: preInsErr });
 
-    // Generate script
+    // Script
     const scriptResp = await fetch(`${publicBaseUrl}/api/generate-script`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ storyType, artStyle, language, customPrompt, durationRange }),
     }).then((r) => r.json());
 
-    const narration = (scriptResp && scriptResp.narration) || "";
+    const narration = String(scriptResp?.narration || "").trim();
 
-    // ✅ FIX: block "narration is a URL" cases (prevents reading supabase links)
-    const n = String(narration || "").trim();
-    const looksLikeUrl = /^https?:\/\/\S+$/i.test(n) || (n.includes("supabase.co") && !n.includes(" "));
-    if (!n || looksLikeUrl) {
+    // ✅ stop “narration is a URL” disasters
+    const looksLikeUrl = /^https?:\/\/\S+$/i.test(narration) || (narration.includes("supabase.co") && !narration.includes(" "));
+    if (!narration || looksLikeUrl) {
       await supabase
         .from("renders")
-        .update({
-          status: "failed",
-          error: JSON.stringify({
-            reason: "BAD_NARRATION",
-            narration: n.slice(0, 200),
-            scriptResp,
-          }),
-        })
+        .update({ status: "failed", error: JSON.stringify({ reason: "BAD_NARRATION", narration, scriptResp }) })
         .eq("id", db_id);
-
-      return res.status(502).json({ error: "BAD_NARRATION", narration: n.slice(0, 200) });
+      return res.status(502).json({ error: "BAD_NARRATION", narration: narration.slice(0, 200) });
     }
-
-    // ✅ Voiceover MP3 (ElevenLabs) -> Supabase -> URL
-    let voiceUrl = null;
-    if (voiceId && ELEVENLABS_API_KEY) {
-      try {
-        const mp3 = await elevenlabsTTS({ voiceId, text: n });
-        voiceUrl = await uploadVoiceMp3({ db_id, mp3Buffer: mp3 });
-      } catch (e) {
-        console.error("[VOICEOVER_FAILED]", { message: String(e?.message || e), voiceId });
-        voiceUrl = null; // fallback to template if you choose
-      }
-    }
-
-    // ✅ DEBUG: confirms what the backend is actually using
-    console.log("[VOICE_DEBUG]", {
-      voiceId,
-      voiceName,
-      voiceUrl: voiceUrl ? String(voiceUrl).slice(0, 120) + "..." : null,
-      narrationHead: n.slice(0, 120),
-    });
 
     // Beats + timing
-    const speechSec = estimateSpeechSeconds(n);
+    const speechSec = estimateSpeechSeconds(narration);
     let targetSec = Math.round(speechSec + 2);
 
     let minSec = 60,
@@ -734,7 +576,6 @@ module.exports = async function handler(req, res) {
       minSec = 30;
       maxSec = 60;
     }
-
     if (targetSec < minSec) targetSec = minSec;
     if (targetSec > maxSec) targetSec = maxSec;
 
@@ -742,7 +583,7 @@ module.exports = async function handler(req, res) {
     if (!beatCount || !Number.isFinite(beatCount)) beatCount = MIN_BEATS;
     beatCount = Math.max(MIN_BEATS, Math.min(MAX_BEATS, beatCount));
 
-    const beatTexts = splitNarrationIntoBeats(n, beatCount);
+    const beatTexts = splitNarrationIntoBeats(narration, beatCount);
     const timing = buildBeatTiming(beatTexts);
 
     // Images
@@ -750,26 +591,25 @@ module.exports = async function handler(req, res) {
     if (IMAGE_PROVIDER === "krea") {
       imageUrls = await generateKreaImageUrlsForBeats({ beatCount, beatTexts, aspectRatio });
     }
-
     const variantSequence = buildVariantSequence(beatCount);
 
-    // Creatomate mods
-    const styleNorm = normCaptionStyle(captionStyle);
-
+    // ✅ Creatomate mods
     const mods = {
-      Narration: n,
-      VoiceLabel: voiceName || "Voice",
+      Narration: narration,
+      VoiceLabel: voiceName,
       LanguageLabel: language,
       StoryTypeLabel: storyType,
 
-      // ✅ IMPORTANT: this must match the EXACT audio layer name in Creatomate.
-      // If your template uses a different layer name, change "Voiceover" below.
-      "Voiceover.source": voiceUrl || "",
+      // ✅ THIS is the real fix: override the ElevenLabs provider fields
+      "Voiceover.provider": "ElevenLabs",
+      "Voiceover.model": "Eleven Multilingual v2",
+      "Voiceover.voice": voiceId || "Adam",
+      "Voiceover.text": narration,
+      "Voiceover.stability": 50,
+      "Voiceover.similarity_boost": 75,
 
-      // ✅ Exactly one caption layer visible
+      // captions
       ...captionVisibilityMods(styleNorm),
-
-      // ✅ Apply caption settings to the selected layer
       ...captionSettingsMods(styleNorm, captionSettings),
     };
 
@@ -811,9 +651,7 @@ module.exports = async function handler(req, res) {
       template_id,
       modifications: mods,
       output_format: "mp4",
-      webhook_url: `${publicBaseUrl}/api/creatomate-webhook?id=${encodeURIComponent(
-        db_id
-      )}&kind=main`,
+      webhook_url: `${publicBaseUrl}/api/creatomate-webhook?id=${encodeURIComponent(db_id)}&kind=main`,
     };
 
     const resp = await postJSON(
@@ -823,36 +661,25 @@ module.exports = async function handler(req, res) {
     );
 
     if (resp.status !== 202 && resp.status !== 200) {
-      await supabase
-        .from("renders")
-        .update({ status: "failed", error: JSON.stringify(resp.json || {}) })
-        .eq("id", db_id);
+      await supabase.from("renders").update({ status: "failed", error: JSON.stringify(resp.json || {}) }).eq("id", db_id);
       return res.status(resp.status).json({ error: "CREATOMATE_ERROR", details: resp.json });
     }
 
     const job_id = Array.isArray(resp.json) ? resp.json[0]?.id : resp.json?.id;
     if (!job_id) {
-      await supabase
-        .from("renders")
-        .update({ status: "failed", error: "NO_JOB_ID_IN_RESPONSE" })
-        .eq("id", db_id);
+      await supabase.from("renders").update({ status: "failed", error: "NO_JOB_ID_IN_RESPONSE" }).eq("id", db_id);
       return res.status(502).json({ error: "NO_JOB_ID_IN_RESPONSE", details: resp.json });
     }
 
-    const { error: updErr } = await supabase
-      .from("renders")
-      .update({ render_id: String(job_id) })
-      .eq("id", db_id);
-    if (updErr) console.error("[DB_UPDATE_RENDER_ID_FAILED]", updErr);
+    await supabase.from("renders").update({ render_id: String(job_id) }).eq("id", db_id);
 
     return res.status(200).json({
       ok: true,
       job_id,
       db_id,
-      captionStyle: styleNorm,
       voiceId: voiceId || null,
-      voiceName: voiceName || null,
-      voiceUrl: voiceUrl || null,
+      voiceName,
+      captionStyle: styleNorm,
     });
   } catch (err) {
     const msg = String(err?.message || err);
