@@ -1,5 +1,7 @@
 // api/create-video.js (CommonJS, Node 18)
-// NOTE: Node 18 on Vercel has global fetch.
+// ✅ Uses ONLY ONE voiceover element in Creatomate: "Voiceover" (Provider = URL)
+// ✅ Backend generates MP3 via ElevenLabs -> uploads to Supabase -> sets "Voiceover.url"
+// ✅ Captions should be set in the TEMPLATE to transcribe from Voiceover (Captions source = Voiceover)
 
 const https = require("https");
 const crypto = require("crypto");
@@ -32,13 +34,6 @@ const API_BASE = (process.env.API_BASE || "").trim();
 
 // -------------------- Providers --------------------
 const IMAGE_PROVIDER = (process.env.IMAGE_PROVIDER || "krea").toLowerCase();
-
-// -------------------- Creatomate ElevenLabs voice mode --------------------
-// We are using Creatomate's built-in ElevenLabs provider, because:
-// - It reliably generates narration AND captions/transcript in your template
-// - Avoids URL-provider confusion between Voiceover.source / Voiceover.url
-const CREATO_ELEVEN_MODEL_LABEL =
-  (process.env.CREATO_ELEVEN_MODEL_LABEL || "Eleven Multilingual v2").trim();
 
 // ---------- Supabase ----------
 const SUPABASE_URL = process.env.SUPABASE_URL;
@@ -90,6 +85,11 @@ const KREA_STYLE_STRENGTH = Number(process.env.KREA_STYLE_STRENGTH || 0.85);
 const KREA_PER_BEAT_RETRIES = Number(process.env.KREA_PER_BEAT_RETRIES || 2);
 const KREA_POLL_TRIES = Number(process.env.KREA_POLL_TRIES || 90);
 const KREA_POLL_DELAY_MS = Number(process.env.KREA_POLL_DELAY_MS || 2500);
+
+// ---------- ElevenLabs (MP3 generation) ----------
+const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
+const ELEVENLABS_MODEL_ID = process.env.ELEVENLABS_MODEL_ID || "eleven_multilingual_v2";
+const VOICE_BUCKET = process.env.VOICE_BUCKET || "voiceovers";
 
 // ---------- Beats ----------
 const MIN_BEATS = 8;
@@ -401,6 +401,7 @@ async function generateKreaImageUrlsForBeats({ beatCount, beatTexts, aspectRatio
     const beatText = beatTexts[i - 1] || "";
     const needsExpand = !EXPAND_SHORT_BEATS_ONLY ? true : countWords(beatText) < EXPAND_WORD_THRESHOLD;
     const prompt = needsExpand ? await expandBeatToVisualPrompt(beatText) : beatText.trim();
+
     const imageUrl = await generateOneImageWithRetry({ prompt, aspectRatio, beatIndex: i });
     urls.push(imageUrl);
   }
@@ -422,6 +423,7 @@ function buildVariantSequence(beatCount) {
 
 // =====================================================
 // Captions: styles + settings
+// (Your template uses Narration for captions, and you toggle which subtitle layer is visible.)
 // =====================================================
 const CAPTION_STYLE_TO_LAYER = {
   sentence: "Subtitles_Sentence",
@@ -441,14 +443,7 @@ const CAPTION_STYLE_TO_LAYER = {
   redtag: "Subtitles_RedTag",
 };
 
-const ACTIVE_COLOR_STYLES = new Set([
-  "karaoke",
-  "yellowpop",
-  "minttag",
-  "highlighter",
-  "purplepop",
-  "redtag",
-]);
+const ACTIVE_COLOR_STYLES = new Set(["karaoke", "yellowpop", "minttag", "highlighter", "purplepop", "redtag"]);
 
 function normCaptionStyle(v) {
   const s = String(v || "").trim().toLowerCase();
@@ -516,25 +511,88 @@ function captionSettingsMods(captionStyle, captionSettings) {
   const activeColor = safeColor(cs.activeColor, "#A855F7");
 
   const mods = {};
+
   mods[`${layer}.x_alignment`] = x;
   mods[`${layer}.y_alignment`] = y;
+
   if (fontFamily) mods[`${layer}.font_family`] = fontFamily;
   if (fontWeight !== null) mods[`${layer}.font_weight`] = fontWeight;
 
   mods[`${layer}.fill_color`] = fillColor;
   mods[`${layer}.stroke_color`] = strokeColor;
   mods[`${layer}.stroke_width`] = strokeWidth;
+
   mods[`${layer}.text_transform`] = textTransform;
 
   if (ACTIVE_COLOR_STYLES.has(style)) {
     mods[`${layer}.transcript_color`] = activeColor;
   }
+
   return mods;
+}
+
+// =====================================================
+// ElevenLabs: TTS -> Supabase Storage -> Public URL
+// =====================================================
+async function elevenlabsTTS({ voiceId, text }) {
+  if (!ELEVENLABS_API_KEY) throw new Error("MISSING_ELEVENLABS_API_KEY");
+  if (!voiceId) throw new Error("MISSING_VOICE_ID");
+
+  const t = String(text || "").trim();
+  if (!t) throw new Error("MISSING_TTS_TEXT");
+
+  const url = `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}/stream`;
+
+  const r = await fetch(url, {
+    method: "POST",
+    headers: {
+      "xi-api-key": ELEVENLABS_API_KEY,
+      "Content-Type": "application/json",
+      Accept: "audio/mpeg",
+    },
+    body: JSON.stringify({
+      text: t,
+      model_id: ELEVENLABS_MODEL_ID,
+      voice_settings: { stability: 0.4, similarity_boost: 0.85 },
+    }),
+  });
+
+  if (!r.ok) {
+    const msg = await r.text().catch(() => "");
+    throw new Error(`ELEVENLABS_TTS_FAILED (${r.status}) ${msg}`);
+  }
+
+  const buf = Buffer.from(await r.arrayBuffer());
+  if (!buf.length) throw new Error("ELEVENLABS_EMPTY_AUDIO");
+  return buf;
+}
+
+async function uploadVoiceMp3({ db_id, mp3Buffer }) {
+  if (!supabase) throw new Error("MISSING_SUPABASE_ENV_VARS");
+
+  const path = `${db_id}/voice.mp3`;
+
+  const { error: upErr } = await supabase.storage.from(VOICE_BUCKET).upload(path, mp3Buffer, {
+    contentType: "audio/mpeg",
+    upsert: true,
+    cacheControl: "3600",
+  });
+
+  if (upErr) {
+    console.error("[VOICE_UPLOAD_FAILED]", upErr);
+    throw new Error("VOICE_UPLOAD_FAILED");
+  }
+
+  const { data } = supabase.storage.from(VOICE_BUCKET).getPublicUrl(path);
+  const url = data?.publicUrl;
+  if (!url) throw new Error("VOICE_PUBLIC_URL_FAILED");
+  return url;
 }
 
 // -------------------- MAIN --------------------
 module.exports = async function handler(req, res) {
   setCors(req, res);
+
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "POST") return res.status(405).json({ error: "METHOD_NOT_ALLOWED" });
 
@@ -548,15 +606,14 @@ module.exports = async function handler(req, res) {
       artStyle = "Scary toon",
       language = "English",
 
-      // Voice picked in your UI:
-      voiceId = "", // ElevenLabs voiceId like EXAVITQu4vr4xnSDxMaL
+      // voice selection coming from your UI
+      voiceId = "",
       voiceName = "Voice",
 
       aspectRatio = "9:16",
       customPrompt = "",
       durationRange = "60-90",
 
-      // captions
       captionStyle = "sentence",
       captionSettings = {},
     } = body;
@@ -587,9 +644,10 @@ module.exports = async function handler(req, res) {
       captionSettings: captionSettings && typeof captionSettings === "object" ? captionSettings : {},
     };
 
+    // DB id up front so webhook can target it
     const db_id = crypto.randomUUID();
 
-    // Pre-insert DB row
+    // Insert row first (render_id is NOT NULL, so placeholder then update)
     const { error: preInsErr } = await supabase.from("renders").insert([
       {
         id: db_id,
@@ -607,7 +665,7 @@ module.exports = async function handler(req, res) {
       return res.status(500).json({ error: "DB_PREINSERT_FAILED", details: preInsErr });
     }
 
-    // Script
+    // Generate script
     const scriptResp = await fetch(`${publicBaseUrl}/api/generate-script`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -620,12 +678,28 @@ module.exports = async function handler(req, res) {
       return res.status(502).json({ error: "SCRIPT_EMPTY", details: scriptResp });
     }
 
+    // ✅ Generate MP3 with ElevenLabs and upload to Supabase (this is the ONLY voiceover we use)
+    let voiceUrl = "";
+    if (voiceId) {
+      try {
+        const mp3 = await elevenlabsTTS({ voiceId, text: narration });
+        voiceUrl = await uploadVoiceMp3({ db_id, mp3Buffer: mp3 });
+      } catch (e) {
+        console.error("[VOICEOVER_FAILED]", { voiceId, message: String(e?.message || e) });
+        voiceUrl = "";
+      }
+    }
+
     // Beats + timing
     const speechSec = estimateSpeechSeconds(narration);
     let targetSec = Math.round(speechSec + 2);
 
-    let minSec = 60, maxSec = 90;
-    if (durationRange === "30-60") { minSec = 30; maxSec = 60; }
+    let minSec = 60,
+      maxSec = 90;
+    if (durationRange === "30-60") {
+      minSec = 30;
+      maxSec = 60;
+    }
 
     if (targetSec < minSec) targetSec = minSec;
     if (targetSec > maxSec) targetSec = maxSec;
@@ -646,34 +720,21 @@ module.exports = async function handler(req, res) {
     const variantSequence = buildVariantSequence(beatCount);
 
     // ✅ Creatomate modifications
-    // IMPORTANT: This assumes your template's main narration audio layer is:
-    // - name: "Voiceover"
-    // - Provider: ElevenLabs
-    // And you have editable properties:
-    // - Voiceover.text
-    // - Voiceover.voice
-    // - Voiceover.model
-    //
-    // We also CLEAR any URL-based properties so they can't override the provider.
+    // IMPORTANT:
+    // - Your template must have ONE element named exactly "Voiceover"
+    // - Voiceover Provider must be URL
+    // - We set: "Voiceover.url" to the MP3 URL
     const mods = {
       Narration: narration,
       VoiceLabel: voiceName || "Voice",
       LanguageLabel: language,
       StoryTypeLabel: storyType,
 
-      // ✅ Creatomate ElevenLabs TTS
-      "Voiceover.text": narration,
-      "Voiceover.voice": String(voiceId || "").trim(),           // EX: EXAVITQu4vr4xnSDxMaL
-      "Voiceover.model": CREATO_ELEVEN_MODEL_LABEL,              // EX: "Eleven Multilingual v2"
+      // ✅ THIS is the only audio wiring
+      "Voiceover.url": voiceUrl || "",
 
-      // ✅ prevent URL provider overrides (you were seeing URL on all 3 tracks)
-      "Voiceover.source": "",
-      "Voiceover.url": "",
-
-      // ✅ Exactly one caption layer visible
+      // ✅ Captions layer visibility + settings
       ...captionVisibilityMods(styleNorm),
-
-      // ✅ Apply caption settings
       ...captionSettingsMods(styleNorm, captionSettings),
     };
 
@@ -743,9 +804,7 @@ module.exports = async function handler(req, res) {
       job_id,
       db_id,
       captionStyle: styleNorm,
-      voiceMode: "creatomate_elevenlabs",
-      voiceId: String(voiceId || "").trim() || null,
-      model: CREATO_ELEVEN_MODEL_LABEL,
+      voiceUrl: voiceUrl || null,
     });
   } catch (err) {
     const msg = String(err?.message || err);
