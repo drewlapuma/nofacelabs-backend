@@ -43,7 +43,7 @@ const supabase =
       })
     : null;
 
-// ---------- Memberstack ----------
+// ---------- Memberstack auth (Admin SDK verify) ----------
 const MEMBERSTACK_SECRET_KEY = process.env.MEMBERSTACK_SECRET_KEY;
 const ms = MEMBERSTACK_SECRET_KEY ? memberstackAdmin.init(MEMBERSTACK_SECRET_KEY) : null;
 
@@ -60,7 +60,6 @@ async function requireMemberId(req) {
 
   const { id } = await ms.verifyToken({ token });
   if (!id) throw new Error("INVALID_MEMBER_TOKEN");
-
   return id;
 }
 
@@ -84,8 +83,14 @@ const KREA_PER_BEAT_RETRIES = Number(process.env.KREA_PER_BEAT_RETRIES || 2);
 const KREA_POLL_TRIES = Number(process.env.KREA_POLL_TRIES || 90);
 const KREA_POLL_DELAY_MS = Number(process.env.KREA_POLL_DELAY_MS || 2500);
 
-// ---------- ElevenLabs (for Creatomate provider settings only) ----------
+// ---------- ElevenLabs ----------
+const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
 const ELEVENLABS_MODEL_ID = process.env.ELEVENLABS_MODEL_ID || "eleven_multilingual_v2";
+
+// IMPORTANT: Creatomate “Audio Provider: ElevenLabs” expects a DISPLAY name like your UI shows.
+// If your template expects a different string, change this env var.
+const CREATO_ELEVEN_MODEL_LABEL =
+  process.env.CREATO_ELEVEN_MODEL_LABEL || "Eleven Multilingual v2";
 
 // ---------- Beats ----------
 const MIN_BEATS = 8;
@@ -249,6 +254,9 @@ Narration line:
         { role: "user", content: instruction },
       ],
       temperature: 0.7,
+      top_p: 0.95,
+      presence_penalty: 0.3,
+      frequency_penalty: 0.2,
     }),
   });
 
@@ -296,12 +304,17 @@ async function createKreaJob({ prompt, aspectRatio, useStyle }) {
       useStyle,
       aspectRatio,
       prompt: shortPrompt(prompt),
+      payloadKeys: Object.keys(payload),
     });
     throw new Error(`KREA_GENERATE_FAILED (${resp.status})`);
   }
 
   const jobId = data?.job_id || data?.id;
-  if (!jobId) throw new Error("KREA_MISSING_JOB_ID");
+  if (!jobId) {
+    console.error("[KREA_MISSING_JOB_ID]", { data, useStyle, prompt: shortPrompt(prompt) });
+    throw new Error("KREA_MISSING_JOB_ID");
+  }
+
   return jobId;
 }
 
@@ -315,18 +328,30 @@ async function pollKreaJob(jobId) {
     });
 
     const data = await resp.json().catch(() => ({}));
-    if (!resp.ok) throw new Error(`KREA_JOB_LOOKUP_FAILED (${resp.status})`);
+
+    if (!resp.ok) {
+      console.error("[KREA_JOB_LOOKUP_FAILED]", { status: resp.status, data, jobId });
+      throw new Error(`KREA_JOB_LOOKUP_FAILED (${resp.status})`);
+    }
 
     const status = String(data?.status || "").toLowerCase();
 
     if (status === "completed" || status === "complete" || status === "succeeded") {
       const urls = data?.result?.urls || data?.urls || [];
       const imageUrl = Array.isArray(urls) ? urls[0] : null;
-      if (!imageUrl) throw new Error("KREA_JOB_NO_RESULT_URL");
+
+      if (!imageUrl) {
+        console.error("[KREA_JOB_NO_RESULT_URL]", { jobId, data });
+        throw new Error("KREA_JOB_NO_RESULT_URL");
+      }
       return imageUrl;
     }
 
-    if (status === "failed" || status === "error") throw new Error(`KREA_JOB_FAILED (${jobId})`);
+    if (status === "failed" || status === "error") {
+      console.error("[KREA_JOB_FAILED]", { jobId, data });
+      throw new Error(`KREA_JOB_FAILED (${jobId})`);
+    }
+
     await new Promise((r) => setTimeout(r, KREA_POLL_DELAY_MS));
   }
 
@@ -339,7 +364,14 @@ async function generateOneImageWithRetry({ prompt, aspectRatio, beatIndex }) {
       const jobId = await createKreaJob({ prompt, aspectRatio, useStyle: true });
       return await pollKreaJob(jobId);
     } catch (e) {
-      console.error("[KREA_RETRY_STYLE]", { beat: beatIndex, attempt, message: String(e?.message || e) });
+      console.error("[KREA_RETRY_STYLE]", {
+        beat: beatIndex,
+        attempt,
+        maxAttempts: KREA_PER_BEAT_RETRIES,
+        aspectRatio,
+        prompt: shortPrompt(prompt),
+        message: String(e?.message || e),
+      });
       await new Promise((r) => setTimeout(r, 1200 * attempt));
     }
   }
@@ -349,7 +381,14 @@ async function generateOneImageWithRetry({ prompt, aspectRatio, beatIndex }) {
       const jobId = await createKreaJob({ prompt, aspectRatio, useStyle: false });
       return await pollKreaJob(jobId);
     } catch (e) {
-      console.error("[KREA_RETRY_NO_STYLE]", { beat: beatIndex, attempt, message: String(e?.message || e) });
+      console.error("[KREA_RETRY_NO_STYLE]", {
+        beat: beatIndex,
+        attempt,
+        maxAttempts: KREA_PER_BEAT_RETRIES,
+        aspectRatio,
+        prompt: shortPrompt(prompt),
+        message: String(e?.message || e),
+      });
       await new Promise((r) => setTimeout(r, 1200 * attempt));
     }
   }
@@ -363,13 +402,13 @@ async function generateKreaImageUrlsForBeats({ beatCount, beatTexts, aspectRatio
     const beatText = beatTexts[i - 1] || "";
     const needsExpand = !EXPAND_SHORT_BEATS_ONLY ? true : countWords(beatText) < EXPAND_WORD_THRESHOLD;
     const prompt = needsExpand ? await expandBeatToVisualPrompt(beatText) : beatText.trim();
-
     const imageUrl = await generateOneImageWithRetry({ prompt, aspectRatio, beatIndex: i });
     urls.push(imageUrl);
   }
   return urls;
 }
 
+// ---------- Variants ----------
 function buildVariantSequence(beatCount) {
   const seq = [];
   let last = null;
@@ -403,7 +442,7 @@ const CAPTION_STYLE_TO_LAYER = {
   redtag: "Subtitles_RedTag",
 };
 
-const ACTIVE_COLOR_STYLES = new Set(["karaoke", "yellowpop", "minttag", "highlighter", "purplepop", "redtag"]);
+const ACTIVE_COLOR_STYLES = new Set(["karaoke","yellowpop","minttag","highlighter","purplepop","redtag"]);
 
 function normCaptionStyle(v) {
   const s = String(v || "").trim().toLowerCase();
@@ -416,24 +455,21 @@ function clamp(n, min, max) {
   if (!Number.isFinite(x)) return null;
   return Math.max(min, Math.min(max, x));
 }
-
 function asPercent(n, fallback) {
   const c = clamp(n, 0, 100);
   const v = c === null ? fallback : c;
   return `${v}%`;
 }
-
 function safeColor(v, fallback) {
   const s = String(v || "").trim();
-  return s || fallback;
+  if (!s) return fallback;
+  return s;
 }
-
 function safeTextTransform(v) {
   const s = String(v || "none").trim().toLowerCase();
   if (["none", "uppercase", "lowercase", "capitalize"].includes(s)) return s;
   return "none";
 }
-
 function safePx(n, fallback) {
   const c = clamp(n, 0, 60);
   const v = c === null ? fallback : c;
@@ -442,36 +478,50 @@ function safePx(n, fallback) {
 
 function captionVisibilityMods(captionStyle) {
   const style = normCaptionStyle(captionStyle);
-  const mods = { "Subtitles-1.visible": false };
+  const mods = {};
 
-  for (const layer of Object.values(CAPTION_STYLE_TO_LAYER)) mods[`${layer}.visible`] = false;
+  for (const layer of Object.values(CAPTION_STYLE_TO_LAYER)) {
+    mods[`${layer}.visible`] = false;
+  }
 
   const layer = CAPTION_STYLE_TO_LAYER[style] || CAPTION_STYLE_TO_LAYER.sentence;
   mods[`${layer}.visible`] = true;
+
   return mods;
 }
 
 function captionSettingsMods(captionStyle, captionSettings) {
   const style = normCaptionStyle(captionStyle);
   const layer = CAPTION_STYLE_TO_LAYER[style] || CAPTION_STYLE_TO_LAYER.sentence;
-  const cs = captionSettings && typeof captionSettings === "object" ? captionSettings : {};
 
-  const mods = {};
-  mods[`${layer}.x_alignment`] = asPercent(cs.x, 50);
-  mods[`${layer}.y_alignment`] = asPercent(cs.y, 50);
+  const cs = (captionSettings && typeof captionSettings === "object") ? captionSettings : {};
+
+  const x = asPercent(cs.x, 50);
+  const y = asPercent(cs.y, 50);
 
   const fontFamily = String(cs.fontFamily || "Inter").trim();
   const fontWeight = clamp(cs.fontWeight, 100, 1000);
+  const fillColor = safeColor(cs.fillColor, "#FFFFFF");
+  const strokeColor = safeColor(cs.strokeColor, "#000000");
+  const strokeWidth = safePx(cs.strokeWidth, 0);
+  const textTransform = safeTextTransform(cs.textTransform);
+  const activeColor = safeColor(cs.activeColor, "#A855F7");
+
+  const mods = {};
+
+  mods[`${layer}.x_alignment`] = x;
+  mods[`${layer}.y_alignment`] = y;
+
   if (fontFamily) mods[`${layer}.font_family`] = fontFamily;
   if (fontWeight !== null) mods[`${layer}.font_weight`] = fontWeight;
 
-  mods[`${layer}.fill_color`] = safeColor(cs.fillColor, "#FFFFFF");
-  mods[`${layer}.stroke_color`] = safeColor(cs.strokeColor, "#000000");
-  mods[`${layer}.stroke_width`] = safePx(cs.strokeWidth, 0);
-  mods[`${layer}.text_transform`] = safeTextTransform(cs.textTransform);
+  mods[`${layer}.fill_color`] = fillColor;
+  mods[`${layer}.stroke_color`] = strokeColor;
+  mods[`${layer}.stroke_width`] = strokeWidth;
+  mods[`${layer}.text_transform`] = textTransform;
 
   if (ACTIVE_COLOR_STYLES.has(style)) {
-    mods[`${layer}.transcript_color`] = safeColor(cs.activeColor, "#A855F7");
+    mods[`${layer}.transcript_color`] = activeColor;
   }
 
   return mods;
@@ -489,18 +539,19 @@ module.exports = async function handler(req, res) {
     const memberId = await requireMemberId(req);
 
     const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : req.body || {};
-
-    // ✅ accept both camelCase + snake_case
-    const voiceId = String(body.voiceId || body.voice_id || "").trim();
-    const voiceName = String(body.voiceName || body.voice_name || "").trim() || "Voice";
-
     const {
       storyType = "Random AI story",
       artStyle = "Scary toon",
       language = "English",
+
+      // voice selection from your UI
+      voiceId = "",     // ElevenLabs voice ID
+      voiceName = "Voice",
+
       aspectRatio = "9:16",
       customPrompt = "",
       durationRange = "60-90",
+
       captionStyle = "sentence",
       captionSettings = {},
     } = body;
@@ -533,6 +584,7 @@ module.exports = async function handler(req, res) {
 
     const db_id = crypto.randomUUID();
 
+    // Insert row first
     const { error: preInsErr } = await supabase.from("renders").insert([
       {
         id: db_id,
@@ -544,42 +596,35 @@ module.exports = async function handler(req, res) {
         error: null,
       },
     ]);
+    if (preInsErr) {
+      console.error("[DB_PREINSERT_FAILED]", preInsErr);
+      return res.status(500).json({ error: "DB_PREINSERT_FAILED", details: preInsErr });
+    }
 
-    if (preInsErr) return res.status(500).json({ error: "DB_PREINSERT_FAILED", details: preInsErr });
-
-    // Script
+    // Generate script
     const scriptResp = await fetch(`${publicBaseUrl}/api/generate-script`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ storyType, artStyle, language, customPrompt, durationRange }),
     }).then((r) => r.json());
 
-    const narration = String(scriptResp?.narration || "").trim();
-
-    // ✅ stop “narration is a URL” disasters
-    const looksLikeUrl = /^https?:\/\/\S+$/i.test(narration) || (narration.includes("supabase.co") && !narration.includes(" "));
-    if (!narration || looksLikeUrl) {
-      await supabase
-        .from("renders")
-        .update({ status: "failed", error: JSON.stringify({ reason: "BAD_NARRATION", narration, scriptResp }) })
-        .eq("id", db_id);
-      return res.status(502).json({ error: "BAD_NARRATION", narration: narration.slice(0, 200) });
+    const narration = (scriptResp && scriptResp.narration) || "";
+    if (!narration.trim()) {
+      await supabase.from("renders").update({ status: "failed", error: JSON.stringify(scriptResp || {}) }).eq("id", db_id);
+      return res.status(502).json({ error: "SCRIPT_EMPTY", details: scriptResp });
     }
 
     // Beats + timing
     const speechSec = estimateSpeechSeconds(narration);
     let targetSec = Math.round(speechSec + 2);
 
-    let minSec = 60,
-      maxSec = 90;
-    if (durationRange === "30-60") {
-      minSec = 30;
-      maxSec = 60;
-    }
+    let minSec = 60, maxSec = 90;
+    if (durationRange === "30-60") { minSec = 30; maxSec = 60; }
+
     if (targetSec < minSec) targetSec = minSec;
     if (targetSec > maxSec) targetSec = maxSec;
 
-    let beatCount = Math.round(targetSec / SECONDS_PER_BEAT_ESTIMATE);
+    let beatCount = Math.round(targetSec / 3.0);
     if (!beatCount || !Number.isFinite(beatCount)) beatCount = MIN_BEATS;
     beatCount = Math.max(MIN_BEATS, Math.min(MAX_BEATS, beatCount));
 
@@ -591,24 +636,26 @@ module.exports = async function handler(req, res) {
     if (IMAGE_PROVIDER === "krea") {
       imageUrls = await generateKreaImageUrlsForBeats({ beatCount, beatTexts, aspectRatio });
     }
+
     const variantSequence = buildVariantSequence(beatCount);
 
-    // ✅ Creatomate mods
+    // -----------------------------
+    // Creatomate modifications
+    // -----------------------------
+    // IMPORTANT: Your template uses Audio Provider = ElevenLabs
+    // So we set Voiceover.text/voice/model (NOT source).
     const mods = {
       Narration: narration,
-      VoiceLabel: voiceName,
+      VoiceLabel: voiceName || "Voice",
       LanguageLabel: language,
       StoryTypeLabel: storyType,
 
-      // ✅ THIS is the real fix: override the ElevenLabs provider fields
-      "Voiceover.provider": "ElevenLabs",
-      "Voiceover.model": "Eleven Multilingual v2",
-      "Voiceover.voice": voiceId || "Adam",
+      // ✅ provider-driven voiceover
       "Voiceover.text": narration,
-      "Voiceover.stability": 50,
-      "Voiceover.similarity_boost": 75,
+      "Voiceover.voice": voiceId || "",                 // ElevenLabs voice id
+      "Voiceover.model": CREATO_ELEVEN_MODEL_LABEL,     // label Creatomate expects (per your UI)
 
-      // captions
+      // ✅ captions layers
       ...captionVisibilityMods(styleNorm),
       ...captionSettingsMods(styleNorm, captionSettings),
     };
@@ -671,15 +718,15 @@ module.exports = async function handler(req, res) {
       return res.status(502).json({ error: "NO_JOB_ID_IN_RESPONSE", details: resp.json });
     }
 
-    await supabase.from("renders").update({ render_id: String(job_id) }).eq("id", db_id);
+    const { error: updErr } = await supabase.from("renders").update({ render_id: String(job_id) }).eq("id", db_id);
+    if (updErr) console.error("[DB_UPDATE_RENDER_ID_FAILED]", updErr);
 
     return res.status(200).json({
       ok: true,
       job_id,
       db_id,
-      voiceId: voiceId || null,
-      voiceName,
       captionStyle: styleNorm,
+      voiceMode: "creatomate_elevenlabs_provider",
     });
   } catch (err) {
     const msg = String(err?.message || err);
