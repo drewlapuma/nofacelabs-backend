@@ -222,6 +222,13 @@ Global rules:
 - Keep it TikTok-safe (no graphic injury descriptions).
 `.trim();
 
+const pacingRules = `
+Global rules:
+- Use short sentences most of the time (10-14 words).
+- Prefer 1–2 concrete details per sentence, not long lists.
+- Every 1–2 sentences should shift the visual focus (new object, new area, new action).
+`.trim();
+
   const prompt = `
 You write short scripts for vertical videos (TikTok / Reels / Shorts).
 
@@ -238,6 +245,8 @@ ${tropeBlocker}
 ${antiRepetitionRules}
 
 ${extraVisualRules}
+
+${pacingRules}
 
 - Language: ${language || 'English'}.
 - Art style preference (for visuals only): ${artStyle || 'Realistic'}.
