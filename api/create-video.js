@@ -43,7 +43,7 @@ const supabase =
       })
     : null;
 
-// ---------- Memberstack auth (Admin SDK verify) ----------
+// ---------- Memberstack auth ----------
 const MEMBERSTACK_SECRET_KEY = process.env.MEMBERSTACK_SECRET_KEY;
 const ms = MEMBERSTACK_SECRET_KEY ? memberstackAdmin.init(MEMBERSTACK_SECRET_KEY) : null;
 
@@ -86,11 +86,7 @@ const KREA_POLL_DELAY_MS = Number(process.env.KREA_POLL_DELAY_MS || 2500);
 // ---------- ElevenLabs ----------
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
 const ELEVENLABS_MODEL_ID = process.env.ELEVENLABS_MODEL_ID || "eleven_multilingual_v2";
-
-// IMPORTANT: Creatomate “Audio Provider: ElevenLabs” expects a DISPLAY name like your UI shows.
-// If your template expects a different string, change this env var.
-const CREATO_ELEVEN_MODEL_LABEL =
-  process.env.CREATO_ELEVEN_MODEL_LABEL || "Eleven Multilingual v2";
+const VOICE_BUCKET = process.env.VOICE_BUCKET || "voiceovers";
 
 // ---------- Beats ----------
 const MIN_BEATS = 8;
@@ -442,7 +438,14 @@ const CAPTION_STYLE_TO_LAYER = {
   redtag: "Subtitles_RedTag",
 };
 
-const ACTIVE_COLOR_STYLES = new Set(["karaoke","yellowpop","minttag","highlighter","purplepop","redtag"]);
+const ACTIVE_COLOR_STYLES = new Set([
+  "karaoke",
+  "yellowpop",
+  "minttag",
+  "highlighter",
+  "purplepop",
+  "redtag",
+]);
 
 function normCaptionStyle(v) {
   const s = String(v || "").trim().toLowerCase();
@@ -455,21 +458,25 @@ function clamp(n, min, max) {
   if (!Number.isFinite(x)) return null;
   return Math.max(min, Math.min(max, x));
 }
+
 function asPercent(n, fallback) {
   const c = clamp(n, 0, 100);
   const v = c === null ? fallback : c;
   return `${v}%`;
 }
+
 function safeColor(v, fallback) {
   const s = String(v || "").trim();
   if (!s) return fallback;
   return s;
 }
+
 function safeTextTransform(v) {
   const s = String(v || "none").trim().toLowerCase();
   if (["none", "uppercase", "lowercase", "capitalize"].includes(s)) return s;
   return "none";
 }
+
 function safePx(n, fallback) {
   const c = clamp(n, 0, 60);
   const v = c === null ? fallback : c;
@@ -478,7 +485,7 @@ function safePx(n, fallback) {
 
 function captionVisibilityMods(captionStyle) {
   const style = normCaptionStyle(captionStyle);
-  const mods = {};
+  const mods = { "Subtitles-1.visible": false };
 
   for (const layer of Object.values(CAPTION_STYLE_TO_LAYER)) {
     mods[`${layer}.visible`] = false;
@@ -486,7 +493,6 @@ function captionVisibilityMods(captionStyle) {
 
   const layer = CAPTION_STYLE_TO_LAYER[style] || CAPTION_STYLE_TO_LAYER.sentence;
   mods[`${layer}.visible`] = true;
-
   return mods;
 }
 
@@ -494,8 +500,7 @@ function captionSettingsMods(captionStyle, captionSettings) {
   const style = normCaptionStyle(captionStyle);
   const layer = CAPTION_STYLE_TO_LAYER[style] || CAPTION_STYLE_TO_LAYER.sentence;
 
-  const cs = (captionSettings && typeof captionSettings === "object") ? captionSettings : {};
-
+  const cs = captionSettings && typeof captionSettings === "object" ? captionSettings : {};
   const x = asPercent(cs.x, 50);
   const y = asPercent(cs.y, 50);
 
@@ -508,10 +513,8 @@ function captionSettingsMods(captionStyle, captionSettings) {
   const activeColor = safeColor(cs.activeColor, "#A855F7");
 
   const mods = {};
-
   mods[`${layer}.x_alignment`] = x;
   mods[`${layer}.y_alignment`] = y;
-
   if (fontFamily) mods[`${layer}.font_family`] = fontFamily;
   if (fontWeight !== null) mods[`${layer}.font_weight`] = fontWeight;
 
@@ -523,14 +526,69 @@ function captionSettingsMods(captionStyle, captionSettings) {
   if (ACTIVE_COLOR_STYLES.has(style)) {
     mods[`${layer}.transcript_color`] = activeColor;
   }
-
   return mods;
+}
+
+// =====================================================
+// ElevenLabs: TTS -> Supabase Storage -> Public URL (Media mode)
+// =====================================================
+async function elevenlabsTTS({ voiceId, text }) {
+  if (!ELEVENLABS_API_KEY) throw new Error("MISSING_ELEVENLABS_API_KEY");
+  if (!voiceId) throw new Error("MISSING_VOICE_ID");
+
+  const t = String(text || "").trim();
+  if (!t) throw new Error("MISSING_TTS_TEXT");
+
+  const url = `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}/stream`;
+
+  const r = await fetch(url, {
+    method: "POST",
+    headers: {
+      "xi-api-key": ELEVENLABS_API_KEY,
+      "Content-Type": "application/json",
+      Accept: "audio/mpeg",
+    },
+    body: JSON.stringify({
+      text: t,
+      model_id: ELEVENLABS_MODEL_ID,
+      voice_settings: { stability: 0.4, similarity_boost: 0.85 },
+    }),
+  });
+
+  if (!r.ok) {
+    const msg = await r.text().catch(() => "");
+    throw new Error(`ELEVENLABS_TTS_FAILED (${r.status}) ${msg}`);
+  }
+
+  const buf = Buffer.from(await r.arrayBuffer());
+  if (!buf.length) throw new Error("ELEVENLABS_EMPTY_AUDIO");
+  return buf;
+}
+
+async function uploadVoiceMp3({ db_id, mp3Buffer }) {
+  if (!supabase) throw new Error("MISSING_SUPABASE_ENV_VARS");
+  const path = `${db_id}/voice.mp3`;
+
+  const { error: upErr } = await supabase.storage.from(VOICE_BUCKET).upload(path, mp3Buffer, {
+    contentType: "audio/mpeg",
+    upsert: true,
+    cacheControl: "3600",
+  });
+
+  if (upErr) {
+    console.error("[VOICE_UPLOAD_FAILED]", upErr);
+    throw new Error("VOICE_UPLOAD_FAILED");
+  }
+
+  const { data } = supabase.storage.from(VOICE_BUCKET).getPublicUrl(path);
+  const url = data?.publicUrl;
+  if (!url) throw new Error("VOICE_PUBLIC_URL_FAILED");
+  return url;
 }
 
 // -------------------- MAIN --------------------
 module.exports = async function handler(req, res) {
   setCors(req, res);
-
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "POST") return res.status(405).json({ error: "METHOD_NOT_ALLOWED" });
 
@@ -543,15 +601,11 @@ module.exports = async function handler(req, res) {
       storyType = "Random AI story",
       artStyle = "Scary toon",
       language = "English",
-
-      // voice selection from your UI
-      voiceId = "",     // ElevenLabs voice ID
+      voiceId = "",
       voiceName = "Voice",
-
       aspectRatio = "9:16",
       customPrompt = "",
       durationRange = "60-90",
-
       captionStyle = "sentence",
       captionSettings = {},
     } = body;
@@ -584,7 +638,7 @@ module.exports = async function handler(req, res) {
 
     const db_id = crypto.randomUUID();
 
-    // Insert row first
+    // Pre-insert DB row
     const { error: preInsErr } = await supabase.from("renders").insert([
       {
         id: db_id,
@@ -596,35 +650,52 @@ module.exports = async function handler(req, res) {
         error: null,
       },
     ]);
+
     if (preInsErr) {
       console.error("[DB_PREINSERT_FAILED]", preInsErr);
       return res.status(500).json({ error: "DB_PREINSERT_FAILED", details: preInsErr });
     }
 
-    // Generate script
+    // Script
     const scriptResp = await fetch(`${publicBaseUrl}/api/generate-script`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ storyType, artStyle, language, customPrompt, durationRange }),
     }).then((r) => r.json());
 
-    const narration = (scriptResp && scriptResp.narration) || "";
-    if (!narration.trim()) {
+    const narration = String(scriptResp?.narration || "").trim();
+    if (!narration) {
       await supabase.from("renders").update({ status: "failed", error: JSON.stringify(scriptResp || {}) }).eq("id", db_id);
       return res.status(502).json({ error: "SCRIPT_EMPTY", details: scriptResp });
+    }
+
+    // ✅ Generate MP3 in backend (exact voice) + upload to Supabase
+    let voiceUrl = "";
+    if (voiceId) {
+      try {
+        const mp3 = await elevenlabsTTS({ voiceId, text: narration });
+        voiceUrl = await uploadVoiceMp3({ db_id, mp3Buffer: mp3 });
+      } catch (e) {
+        console.error("[VOICEOVER_FAILED]", { voiceId, message: String(e?.message || e) });
+        voiceUrl = "";
+      }
     }
 
     // Beats + timing
     const speechSec = estimateSpeechSeconds(narration);
     let targetSec = Math.round(speechSec + 2);
 
-    let minSec = 60, maxSec = 90;
-    if (durationRange === "30-60") { minSec = 30; maxSec = 60; }
+    let minSec = 60,
+      maxSec = 90;
+    if (durationRange === "30-60") {
+      minSec = 30;
+      maxSec = 60;
+    }
 
     if (targetSec < minSec) targetSec = minSec;
     if (targetSec > maxSec) targetSec = maxSec;
 
-    let beatCount = Math.round(targetSec / 3.0);
+    let beatCount = Math.round(targetSec / SECONDS_PER_BEAT_ESTIMATE);
     if (!beatCount || !Number.isFinite(beatCount)) beatCount = MIN_BEATS;
     beatCount = Math.max(MIN_BEATS, Math.min(MAX_BEATS, beatCount));
 
@@ -639,24 +710,23 @@ module.exports = async function handler(req, res) {
 
     const variantSequence = buildVariantSequence(beatCount);
 
-    // -----------------------------
-    // Creatomate modifications
-    // -----------------------------
-    // IMPORTANT: Your template uses Audio Provider = ElevenLabs
-    // So we set Voiceover.text/voice/model (NOT source).
+    // ✅ Creatomate modifications
+    // IMPORTANT:
+    // - Narration is text used for captions/transcripts
+    // - Voiceover.source is the *mp3 url* (your exact ElevenLabs voice)
     const mods = {
       Narration: narration,
       VoiceLabel: voiceName || "Voice",
       LanguageLabel: language,
       StoryTypeLabel: storyType,
 
-      // ✅ provider-driven voiceover
-      "Voiceover.text": narration,
-      "Voiceover.voice": voiceId || "",                 // ElevenLabs voice id
-      "Voiceover.model": CREATO_ELEVEN_MODEL_LABEL,     // label Creatomate expects (per your UI)
+      // ✅ THIS is what fixes narration reliability
+      "Voiceover.source": voiceUrl || "",
 
-      // ✅ captions layers
+      // ✅ Exactly one caption layer visible
       ...captionVisibilityMods(styleNorm),
+
+      // ✅ Apply caption settings to the selected layer
       ...captionSettingsMods(styleNorm, captionSettings),
     };
 
@@ -726,7 +796,7 @@ module.exports = async function handler(req, res) {
       job_id,
       db_id,
       captionStyle: styleNorm,
-      voiceMode: "creatomate_elevenlabs_provider",
+      voiceUrl: voiceUrl || null,
     });
   } catch (err) {
     const msg = String(err?.message || err);
