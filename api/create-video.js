@@ -1,7 +1,4 @@
 // api/create-video.js (CommonJS, Node 18)
-// ✅ Uses ONLY ONE voiceover element in Creatomate: "Voiceover" (Provider = URL)
-// ✅ Backend generates MP3 via ElevenLabs -> uploads to Supabase -> sets "Voiceover.url"
-// ✅ Captions should be set in the TEMPLATE to transcribe from Voiceover (Captions source = Voiceover)
 
 const https = require("https");
 const crypto = require("crypto");
@@ -86,7 +83,7 @@ const KREA_PER_BEAT_RETRIES = Number(process.env.KREA_PER_BEAT_RETRIES || 2);
 const KREA_POLL_TRIES = Number(process.env.KREA_POLL_TRIES || 90);
 const KREA_POLL_DELAY_MS = Number(process.env.KREA_POLL_DELAY_MS || 2500);
 
-// ---------- ElevenLabs (MP3 generation) ----------
+// ---------- ElevenLabs ----------
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
 const ELEVENLABS_MODEL_ID = process.env.ELEVENLABS_MODEL_ID || "eleven_multilingual_v2";
 const VOICE_BUCKET = process.env.VOICE_BUCKET || "voiceovers";
@@ -401,7 +398,6 @@ async function generateKreaImageUrlsForBeats({ beatCount, beatTexts, aspectRatio
     const beatText = beatTexts[i - 1] || "";
     const needsExpand = !EXPAND_SHORT_BEATS_ONLY ? true : countWords(beatText) < EXPAND_WORD_THRESHOLD;
     const prompt = needsExpand ? await expandBeatToVisualPrompt(beatText) : beatText.trim();
-
     const imageUrl = await generateOneImageWithRetry({ prompt, aspectRatio, beatIndex: i });
     urls.push(imageUrl);
   }
@@ -423,7 +419,6 @@ function buildVariantSequence(beatCount) {
 
 // =====================================================
 // Captions: styles + settings
-// (Your template uses Narration for captions, and you toggle which subtitle layer is visible.)
 // =====================================================
 const CAPTION_STYLE_TO_LAYER = {
   sentence: "Subtitles_Sentence",
@@ -450,31 +445,24 @@ function normCaptionStyle(v) {
   if (s === "karoke") return "karaoke";
   return s || "sentence";
 }
-
 function clamp(n, min, max) {
   const x = Number(n);
   if (!Number.isFinite(x)) return null;
   return Math.max(min, Math.min(max, x));
 }
-
 function asPercent(n, fallback) {
   const c = clamp(n, 0, 100);
   const v = c === null ? fallback : c;
   return `${v}%`;
 }
-
 function safeColor(v, fallback) {
   const s = String(v || "").trim();
-  if (!s) return fallback;
-  return s;
+  return s || fallback;
 }
-
 function safeTextTransform(v) {
   const s = String(v || "none").trim().toLowerCase();
-  if (["none", "uppercase", "lowercase", "capitalize"].includes(s)) return s;
-  return "none";
+  return ["none", "uppercase", "lowercase", "capitalize"].includes(s) ? s : "none";
 }
-
 function safePx(n, fallback) {
   const c = clamp(n, 0, 60);
   const v = c === null ? fallback : c;
@@ -484,11 +472,7 @@ function safePx(n, fallback) {
 function captionVisibilityMods(captionStyle) {
   const style = normCaptionStyle(captionStyle);
   const mods = { "Subtitles-1.visible": false };
-
-  for (const layer of Object.values(CAPTION_STYLE_TO_LAYER)) {
-    mods[`${layer}.visible`] = false;
-  }
-
+  for (const layer of Object.values(CAPTION_STYLE_TO_LAYER)) mods[`${layer}.visible`] = false;
   const layer = CAPTION_STYLE_TO_LAYER[style] || CAPTION_STYLE_TO_LAYER.sentence;
   mods[`${layer}.visible`] = true;
   return mods;
@@ -511,28 +495,22 @@ function captionSettingsMods(captionStyle, captionSettings) {
   const activeColor = safeColor(cs.activeColor, "#A855F7");
 
   const mods = {};
-
   mods[`${layer}.x_alignment`] = x;
   mods[`${layer}.y_alignment`] = y;
-
   if (fontFamily) mods[`${layer}.font_family`] = fontFamily;
   if (fontWeight !== null) mods[`${layer}.font_weight`] = fontWeight;
 
   mods[`${layer}.fill_color`] = fillColor;
   mods[`${layer}.stroke_color`] = strokeColor;
   mods[`${layer}.stroke_width`] = strokeWidth;
-
   mods[`${layer}.text_transform`] = textTransform;
 
-  if (ACTIVE_COLOR_STYLES.has(style)) {
-    mods[`${layer}.transcript_color`] = activeColor;
-  }
-
+  if (ACTIVE_COLOR_STYLES.has(style)) mods[`${layer}.transcript_color`] = activeColor;
   return mods;
 }
 
 // =====================================================
-// ElevenLabs: TTS -> Supabase Storage -> Public URL
+// ElevenLabs -> MP3 Buffer
 // =====================================================
 async function elevenlabsTTS({ voiceId, text }) {
   if (!ELEVENLABS_API_KEY) throw new Error("MISSING_ELEVENLABS_API_KEY");
@@ -567,6 +545,16 @@ async function elevenlabsTTS({ voiceId, text }) {
   return buf;
 }
 
+async function isUrlFetchable(url) {
+  try {
+    const r = await fetch(url, { method: "HEAD" });
+    return r.ok;
+  } catch {
+    return false;
+  }
+}
+
+// Upload MP3 -> return a URL Creatomate can fetch
 async function uploadVoiceMp3({ db_id, mp3Buffer }) {
   if (!supabase) throw new Error("MISSING_SUPABASE_ENV_VARS");
 
@@ -583,10 +571,24 @@ async function uploadVoiceMp3({ db_id, mp3Buffer }) {
     throw new Error("VOICE_UPLOAD_FAILED");
   }
 
-  const { data } = supabase.storage.from(VOICE_BUCKET).getPublicUrl(path);
-  const url = data?.publicUrl;
-  if (!url) throw new Error("VOICE_PUBLIC_URL_FAILED");
-  return url;
+  // Try public URL first
+  const pub = supabase.storage.from(VOICE_BUCKET).getPublicUrl(path);
+  const publicUrl = pub?.data?.publicUrl || "";
+
+  // If bucket isn't public, publicUrl often 404/401 for Creatomate. Fall back to signed URL.
+  if (publicUrl && (await isUrlFetchable(publicUrl))) return publicUrl;
+
+  const { data: signed, error: signErr } = await supabase.storage
+    .from(VOICE_BUCKET)
+    .createSignedUrl(path, 60 * 60); // 1 hour
+
+  if (signErr || !signed?.signedUrl) {
+    console.error("[VOICE_SIGNED_URL_FAILED]", signErr);
+    // last resort: return publicUrl even if not fetchable (for debugging)
+    return publicUrl;
+  }
+
+  return signed.signedUrl;
 }
 
 // -------------------- MAIN --------------------
@@ -606,7 +608,6 @@ module.exports = async function handler(req, res) {
       artStyle = "Scary toon",
       language = "English",
 
-      // voice selection coming from your UI
       voiceId = "",
       voiceName = "Voice",
 
@@ -644,10 +645,8 @@ module.exports = async function handler(req, res) {
       captionSettings: captionSettings && typeof captionSettings === "object" ? captionSettings : {},
     };
 
-    // DB id up front so webhook can target it
     const db_id = crypto.randomUUID();
 
-    // Insert row first (render_id is NOT NULL, so placeholder then update)
     const { error: preInsErr } = await supabase.from("renders").insert([
       {
         id: db_id,
@@ -665,7 +664,7 @@ module.exports = async function handler(req, res) {
       return res.status(500).json({ error: "DB_PREINSERT_FAILED", details: preInsErr });
     }
 
-    // Generate script
+    // Script
     const scriptResp = await fetch(`${publicBaseUrl}/api/generate-script`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -678,7 +677,7 @@ module.exports = async function handler(req, res) {
       return res.status(502).json({ error: "SCRIPT_EMPTY", details: scriptResp });
     }
 
-    // ✅ Generate MP3 with ElevenLabs and upload to Supabase (this is the ONLY voiceover we use)
+    // Voice MP3 -> URL
     let voiceUrl = "";
     if (voiceId) {
       try {
@@ -694,12 +693,8 @@ module.exports = async function handler(req, res) {
     const speechSec = estimateSpeechSeconds(narration);
     let targetSec = Math.round(speechSec + 2);
 
-    let minSec = 60,
-      maxSec = 90;
-    if (durationRange === "30-60") {
-      minSec = 30;
-      maxSec = 60;
-    }
+    let minSec = 60, maxSec = 90;
+    if (durationRange === "30-60") { minSec = 30; maxSec = 60; }
 
     if (targetSec < minSec) targetSec = minSec;
     if (targetSec > maxSec) targetSec = maxSec;
@@ -719,21 +714,17 @@ module.exports = async function handler(req, res) {
 
     const variantSequence = buildVariantSequence(beatCount);
 
-    // ✅ Creatomate modifications
-    // IMPORTANT:
-    // - Your template must have ONE element named exactly "Voiceover"
-    // - Voiceover Provider must be URL
-    // - We set: "Voiceover.url" to the MP3 URL
+    // ✅ Creatomate mods
     const mods = {
       Narration: narration,
       VoiceLabel: voiceName || "Voice",
       LanguageLabel: language,
       StoryTypeLabel: storyType,
 
-      // ✅ THIS is the only audio wiring
-      "Voiceover.url": voiceUrl || "",
+      // ✅ THIS IS THE IMPORTANT FIX:
+      // Creatomate media elements use ".source"
+      "Voiceover.source": voiceUrl || "",
 
-      // ✅ Captions layer visibility + settings
       ...captionVisibilityMods(styleNorm),
       ...captionSettingsMods(styleNorm, captionSettings),
     };
@@ -815,3 +806,4 @@ module.exports = async function handler(req, res) {
     return res.status(500).json({ error: "SERVER_ERROR", message: msg });
   }
 };
+
