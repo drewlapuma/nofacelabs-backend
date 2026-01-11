@@ -78,6 +78,8 @@ const KREA_API_KEY = process.env.KREA_API_KEY;
 const KREA_GENERATE_URL =
   process.env.KREA_GENERATE_URL || "https://api.krea.ai/generate/image/bfl/flux-1-dev";
 const KREA_JOB_URL_BASE = process.env.KREA_JOB_URL_BASE || "https://api.krea.ai/jobs";
+
+// Existing default style (your current one)
 const KREA_STYLE_ID = (process.env.KREA_STYLE_ID || "tvjlqsab9").trim();
 const KREA_STYLE_STRENGTH = Number(process.env.KREA_STYLE_STRENGTH || 0.85);
 
@@ -92,6 +94,42 @@ const KREA_LOG_PROMPT_MAX = Number(process.env.KREA_LOG_PROMPT_MAX || 1200);
 
 // ✅ Visual variety toggle (defaults ON)
 const KREA_VARIETY_CUES = String(process.env.KREA_VARIETY_CUES ?? "true").toLowerCase() !== "false";
+
+// ✅ MULTI KREA STYLE MAP (artStyle -> {id, useStyle})
+const KREA_STYLE_MAP = {
+  // Your new styles (exact keys are matched after lowercasing)
+  "whimsical realism": { id: "egcoxayphj", useStyle: true },
+  "atmospheric realism": { id: "nagjnorlkq", useStyle: true },
+  "lego": { id: "maf9xtl8u", useStyle: true },
+  "pixar": { id: "nq1hafccw", useStyle: true },
+  "90's anime": { id: "nfiym5rwe", useStyle: true },
+  "90s anime": { id: "nfiym5rwe", useStyle: true }, // alias
+  "studio ghibli": { id: "hqu5m66ri", useStyle: true },
+  "painterly cinema": { id: "53u2ibzsn", useStyle: true },
+  "paniterly cinema": { id: "53u2ibzsn", useStyle: true }, // typo-safe alias
+  "cinematic noir": { id: "jbfg5nynk", useStyle: true },
+
+  // Realism = base model (no style)
+  "realism": { id: "", useStyle: false },
+};
+
+function normKey(s) {
+  return String(s || "").trim().toLowerCase();
+}
+
+// Decide which Krea style config to use for this request.
+// - If artStyle matches a known key: use that
+// - Else fallback to your existing default KREA_STYLE_ID (styled)
+// - Else base model
+function pickKreaStyleConfig(artStyle) {
+  const key = normKey(artStyle);
+  if (KREA_STYLE_MAP[key]) return KREA_STYLE_MAP[key];
+
+  const fallbackId = String(KREA_STYLE_ID || "").trim();
+  if (fallbackId) return { id: fallbackId, useStyle: true };
+
+  return { id: "", useStyle: false };
+}
 
 // ---------- ElevenLabs ----------
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
@@ -353,7 +391,7 @@ function pickVariationCue(i) {
   return cues[(i - 1) % cues.length];
 }
 
-function logPromptForKrea({ requestId, beatIndex, beatText, expanded, prompt, aspectRatio, varietyCue }) {
+function logPromptForKrea({ requestId, beatIndex, beatText, expanded, prompt, aspectRatio, varietyCue, styleId, useStyle }) {
   if (!KREA_LOG_PROMPTS) return;
 
   const safePrompt = String(prompt || "");
@@ -369,6 +407,8 @@ function logPromptForKrea({ requestId, beatIndex, beatText, expanded, prompt, as
     aspectRatio,
     expanded,
     varietyCue: varietyCue || null,
+    useStyle: !!useStyle,
+    styleId: useStyle ? String(styleId || "").trim() : null,
     beatText: safeBeat.length > 260 ? safeBeat.slice(0, 260) + "..." : safeBeat,
     prompt: fullOrShort,
     promptLen: safePrompt.length,
@@ -378,14 +418,16 @@ function logPromptForKrea({ requestId, beatIndex, beatText, expanded, prompt, as
   });
 }
 
-async function createKreaJob({ prompt, aspectRatio, useStyle, requestId, beatIndex }) {
+// ✅ UPDATED: supports passing styleId (and can disable style entirely)
+async function createKreaJob({ prompt, aspectRatio, useStyle, styleId, requestId, beatIndex }) {
   if (!KREA_API_KEY) throw new Error("KREA_API_KEY not set");
 
   const payload = { prompt, aspect_ratio: aspectRatio };
 
   if (useStyle) {
-    if (!KREA_STYLE_ID) throw new Error("KREA_STYLE_ID not set");
-    payload.styles = [{ id: KREA_STYLE_ID, strength: KREA_STYLE_STRENGTH }];
+    const sid = String(styleId || "").trim();
+    if (!sid) throw new Error("KREA_STYLE_ID not set");
+    payload.styles = [{ id: sid, strength: KREA_STYLE_STRENGTH }];
   }
 
   if (KREA_LOG_PROMPTS) {
@@ -393,8 +435,8 @@ async function createKreaJob({ prompt, aspectRatio, useStyle, requestId, beatInd
       requestId,
       beat: beatIndex,
       url: KREA_GENERATE_URL,
-      useStyle,
-      styleId: useStyle ? KREA_STYLE_ID : null,
+      useStyle: !!useStyle,
+      styleId: useStyle ? String(styleId || "").trim() : null,
       styleStrength: useStyle ? KREA_STYLE_STRENGTH : null,
       payload,
     });
@@ -417,7 +459,8 @@ async function createKreaJob({ prompt, aspectRatio, useStyle, requestId, beatInd
       beat: beatIndex,
       status: resp.status,
       data,
-      useStyle,
+      useStyle: !!useStyle,
+      styleId: useStyle ? String(styleId || "").trim() : null,
       aspectRatio,
       prompt: shortPrompt(prompt),
       payloadKeys: Object.keys(payload),
@@ -427,7 +470,7 @@ async function createKreaJob({ prompt, aspectRatio, useStyle, requestId, beatInd
 
   const jobId = data?.job_id || data?.id;
   if (!jobId) {
-    console.error("[KREA_MISSING_JOB_ID]", { requestId, beat: beatIndex, data, useStyle, prompt: shortPrompt(prompt) });
+    console.error("[KREA_MISSING_JOB_ID]", { requestId, beat: beatIndex, data, useStyle: !!useStyle, prompt: shortPrompt(prompt) });
     throw new Error("KREA_MISSING_JOB_ID");
   }
 
@@ -474,18 +517,29 @@ async function pollKreaJob(jobId, { requestId, beatIndex } = {}) {
   throw new Error("KREA_JOB_TIMEOUT");
 }
 
-async function generateOneImageWithRetry({ prompt, aspectRatio, beatIndex, requestId }) {
+// ✅ UPDATED: accepts styleId/useStyle and uses them (with fallback attempts)
+async function generateOneImageWithRetry({ prompt, aspectRatio, beatIndex, requestId, useStyle, styleId }) {
+  // First: try with chosen style config (could be base model if useStyle=false)
   for (let attempt = 1; attempt <= Math.max(1, KREA_PER_BEAT_RETRIES); attempt++) {
     try {
-      const jobId = await createKreaJob({ prompt, aspectRatio, useStyle: true, requestId, beatIndex });
+      const jobId = await createKreaJob({
+        prompt,
+        aspectRatio,
+        useStyle: !!useStyle,
+        styleId,
+        requestId,
+        beatIndex,
+      });
       return await pollKreaJob(jobId, { requestId, beatIndex });
     } catch (e) {
-      console.error("[KREA_RETRY_STYLE]", {
+      console.error("[KREA_RETRY_PRIMARY]", {
         requestId,
         beat: beatIndex,
         attempt,
         maxAttempts: KREA_PER_BEAT_RETRIES,
         aspectRatio,
+        useStyle: !!useStyle,
+        styleId: useStyle ? String(styleId || "").trim() : null,
         prompt: shortPrompt(prompt),
         message: String(e?.message || e),
       });
@@ -493,9 +547,17 @@ async function generateOneImageWithRetry({ prompt, aspectRatio, beatIndex, reque
     }
   }
 
+  // Second: fall back to NO STYLE always (base model)
   for (let attempt = 1; attempt <= Math.max(1, KREA_PER_BEAT_RETRIES); attempt++) {
     try {
-      const jobId = await createKreaJob({ prompt, aspectRatio, useStyle: false, requestId, beatIndex });
+      const jobId = await createKreaJob({
+        prompt,
+        aspectRatio,
+        useStyle: false,
+        styleId,
+        requestId,
+        beatIndex,
+      });
       return await pollKreaJob(jobId, { requestId, beatIndex });
     } catch (e) {
       console.error("[KREA_RETRY_NO_STYLE]", {
@@ -514,7 +576,8 @@ async function generateOneImageWithRetry({ prompt, aspectRatio, beatIndex, reque
   throw new Error("KREA_FAILED_AFTER_RETRIES");
 }
 
-async function generateKreaImageUrlsForBeats({ beatCount, beatTexts, aspectRatio, requestId }) {
+// ✅ UPDATED: receives style config once per video
+async function generateKreaImageUrlsForBeats({ beatCount, beatTexts, aspectRatio, requestId, useStyle, styleId }) {
   const urls = [];
 
   if (KREA_LOG_PROMPTS) {
@@ -522,14 +585,14 @@ async function generateKreaImageUrlsForBeats({ beatCount, beatTexts, aspectRatio
       requestId,
       beatCount,
       aspectRatio,
-      // keep these in log for debugging, even though we expand every beat now
       expandShortBeatsOnly: EXPAND_SHORT_BEATS_ONLY,
       expandWordThreshold: EXPAND_WORD_THRESHOLD,
-      styleId: KREA_STYLE_ID,
-      styleStrength: KREA_STYLE_STRENGTH,
+      varietyCues: KREA_VARIETY_CUES,
       generateUrl: KREA_GENERATE_URL,
       jobUrlBase: KREA_JOB_URL_BASE,
-      varietyCues: KREA_VARIETY_CUES,
+      useStyle: !!useStyle,
+      styleId: useStyle ? String(styleId || "").trim() : null,
+      styleStrength: useStyle ? KREA_STYLE_STRENGTH : null,
     });
   }
 
@@ -553,11 +616,22 @@ async function generateKreaImageUrlsForBeats({ beatCount, beatTexts, aspectRatio
       prompt,
       aspectRatio,
       varietyCue,
+      styleId,
+      useStyle,
     });
 
-    const imageUrl = await generateOneImageWithRetry({ prompt, aspectRatio, beatIndex: i, requestId });
+    const imageUrl = await generateOneImageWithRetry({
+      prompt,
+      aspectRatio,
+      beatIndex: i,
+      requestId,
+      useStyle,
+      styleId,
+    });
+
     urls.push(imageUrl);
   }
+
   return urls;
 }
 
@@ -869,7 +943,7 @@ module.exports = async function handler(req, res) {
 
     const beatTexts = splitNarrationIntoBeats(narration, beatCount);
 
-    // ✅ UPDATED: timing uses speech-based durations + smoothing + normalization
+    // ✅ timing uses speech-based durations + smoothing + normalization
     const timing = buildBeatTiming(beatTexts, targetSec);
 
     console.log("[TIMING_DEBUG]", {
@@ -881,10 +955,27 @@ module.exports = async function handler(req, res) {
       durations: timing.durations.map((d) => Number(d.toFixed(2))),
     });
 
+    // ✅ Pick Krea style once per render (based on artStyle)
+    const kreaStyle = pickKreaStyleConfig(artStyle);
+
+    console.log("[KREA_STYLE_PICK]", {
+      requestId,
+      artStyle,
+      useStyle: !!kreaStyle.useStyle,
+      styleId: kreaStyle.useStyle ? String(kreaStyle.id || "").trim() : null,
+    });
+
     // Images
     let imageUrls = [];
     if (IMAGE_PROVIDER === "krea") {
-      imageUrls = await generateKreaImageUrlsForBeats({ beatCount, beatTexts, aspectRatio, requestId });
+      imageUrls = await generateKreaImageUrlsForBeats({
+        beatCount,
+        beatTexts,
+        aspectRatio,
+        requestId,
+        useStyle: kreaStyle.useStyle,
+        styleId: kreaStyle.id,
+      });
     }
 
     const variantSequence = buildVariantSequence(beatCount);
@@ -970,6 +1061,11 @@ module.exports = async function handler(req, res) {
       db_id,
       captionStyle: styleNorm,
       voiceUrl: voiceUrl || null,
+      kreaStyle: {
+        artStyle,
+        useStyle: !!kreaStyle.useStyle,
+        styleId: kreaStyle.useStyle ? String(kreaStyle.id || "").trim() : null,
+      },
       requestId,
     });
   } catch (err) {
