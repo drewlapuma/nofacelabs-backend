@@ -104,7 +104,7 @@ const KREA_STYLE_MAP = {
   "pixar": { id: "nq1hafccw", useStyle: true },
   "90's anime": { id: "nfiym5rwe", useStyle: true },
   "90s anime": { id: "nfiym5rwe", useStyle: true }, // alias
-  "studio ghibli": { id: "hqu5m66ri", useStyle: true },
+  "studio ghibli": { id: "059z065o4", useStyle: true },
   "painterly cinema": { id: "53u2ibzsn", useStyle: true },
   "paniterly cinema": { id: "53u2ibzsn", useStyle: true }, // typo-safe alias
   "cinematic noir": { id: "jbfg5nynk", useStyle: true },
