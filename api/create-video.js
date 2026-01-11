@@ -97,19 +97,18 @@ const KREA_VARIETY_CUES = String(process.env.KREA_VARIETY_CUES ?? "true").toLowe
 
 // ✅ MULTI KREA STYLE MAP (artStyle -> {id, useStyle})
 const KREA_STYLE_MAP = {
-  // Your new styles (exact keys are matched after lowercasing)
+  // Your styles
   "whimsical realism": { id: "egcoxayphj", useStyle: true },
   "atmospheric realism": { id: "nagjnorlkq", useStyle: true },
   "lego": { id: "maf9xtl8u", useStyle: true },
   "pixar": { id: "nq1hafccw", useStyle: true },
   "90's anime": { id: "nfiym5rwe", useStyle: true },
   "90s anime": { id: "nfiym5rwe", useStyle: true }, // alias
-  "studio ghibli": { id: "059z065o4", useStyle: true },
+  "studio ghibli": { id: "059z065o4", useStyle: true }, // ✅ fixed to your ID
   "painterly cinema": { id: "53u2ibzsn", useStyle: true },
   "paniterly cinema": { id: "53u2ibzsn", useStyle: true }, // typo-safe alias
   "cinematic noir": { id: "jbfg5nynk", useStyle: true },
   "cute anime": { id: "hjxbhue1w", useStyle: true },
-
 
   // Realism = base model (no style)
   "realism": { id: "", useStyle: false },
@@ -266,7 +265,7 @@ function splitNarrationIntoBeats(narration, beatCount) {
   return beats;
 }
 
-// ---------- Timing (UPDATED: speech-based + smoothing + normalization) ----------
+// ---------- Timing (speech-based + smoothing + normalization) ----------
 const WORDS_PER_SECOND = Number(process.env.WORDS_PER_SECOND || 2.6);
 const BEAT_PAD_SEC = Number(process.env.BEAT_PAD_SEC || 0.25);
 
@@ -322,7 +321,7 @@ function buildBeatTiming(beatTexts, targetTotalSec) {
   return { durations, starts, total: t };
 }
 
-// ---------- OpenAI prompt expander (UPDATED: turns narration into a real scene prompt) ----------
+// ---------- OpenAI prompt expander ----------
 async function expandBeatToVisualPrompt(beatText) {
   const text = String(beatText || "").trim();
   if (!text) return "";
@@ -411,6 +410,7 @@ function logPromptForKrea({ requestId, beatIndex, beatText, expanded, prompt, as
     varietyCue: varietyCue || null,
     useStyle: !!useStyle,
     styleId: useStyle ? String(styleId || "").trim() : null,
+    styleStrength: useStyle ? KREA_STYLE_STRENGTH : null,
     beatText: safeBeat.length > 260 ? safeBeat.slice(0, 260) + "..." : safeBeat,
     prompt: fullOrShort,
     promptLen: safePrompt.length,
@@ -420,7 +420,7 @@ function logPromptForKrea({ requestId, beatIndex, beatText, expanded, prompt, as
   });
 }
 
-// ✅ UPDATED: supports passing styleId (and can disable style entirely)
+// ✅ supports passing styleId (and can disable style entirely)
 async function createKreaJob({ prompt, aspectRatio, useStyle, styleId, requestId, beatIndex }) {
   if (!KREA_API_KEY) throw new Error("KREA_API_KEY not set");
 
@@ -440,7 +440,7 @@ async function createKreaJob({ prompt, aspectRatio, useStyle, styleId, requestId
       useStyle: !!useStyle,
       styleId: useStyle ? String(styleId || "").trim() : null,
       styleStrength: useStyle ? KREA_STYLE_STRENGTH : null,
-      payload,
+      payloadKeys: Object.keys(payload),
     });
   }
 
@@ -519,9 +519,9 @@ async function pollKreaJob(jobId, { requestId, beatIndex } = {}) {
   throw new Error("KREA_JOB_TIMEOUT");
 }
 
-// ✅ UPDATED: accepts styleId/useStyle and uses them (with fallback attempts)
+// ✅ accepts styleId/useStyle and uses them (with fallback attempts)
 async function generateOneImageWithRetry({ prompt, aspectRatio, beatIndex, requestId, useStyle, styleId }) {
-  // First: try with chosen style config (could be base model if useStyle=false)
+  // Try primary (style or no-style depending on selection)
   for (let attempt = 1; attempt <= Math.max(1, KREA_PER_BEAT_RETRIES); attempt++) {
     try {
       const jobId = await createKreaJob({
@@ -549,7 +549,7 @@ async function generateOneImageWithRetry({ prompt, aspectRatio, beatIndex, reque
     }
   }
 
-  // Second: fall back to NO STYLE always (base model)
+  // Fall back: NO STYLE always
   for (let attempt = 1; attempt <= Math.max(1, KREA_PER_BEAT_RETRIES); attempt++) {
     try {
       const jobId = await createKreaJob({
@@ -578,7 +578,7 @@ async function generateOneImageWithRetry({ prompt, aspectRatio, beatIndex, reque
   throw new Error("KREA_FAILED_AFTER_RETRIES");
 }
 
-// ✅ UPDATED: receives style config once per video
+// ✅ receives style config once per video
 async function generateKreaImageUrlsForBeats({ beatCount, beatTexts, aspectRatio, requestId, useStyle, styleId }) {
   const urls = [];
 
@@ -601,10 +601,10 @@ async function generateKreaImageUrlsForBeats({ beatCount, beatTexts, aspectRatio
   for (let i = 1; i <= beatCount; i++) {
     const beatText = (beatTexts[i - 1] || "").trim();
 
-    // ✅ ALWAYS expand into a real visual prompt
+    // Always expand to a visual prompt (unless PROMPT_EXPANDER disabled)
     let prompt = await expandBeatToVisualPrompt(beatText);
 
-    // ✅ Add a variation cue so images don't all look the same
+    // Add a variation cue so images don't all look the same
     const varietyCue = KREA_VARIETY_CUES ? pickVariationCue(i) : "";
     if (varietyCue) {
       prompt = `${prompt}\n\nComposition cue: ${varietyCue}. Keep this scene visually distinct from previous ones.`;
@@ -817,8 +817,7 @@ async function uploadVoiceMp3({ db_id, mp3Buffer }) {
 
   if (signErr || !signed?.signedUrl) {
     console.error("[VOICE_SIGNED_URL_FAILED]", signErr);
-    // last resort: return publicUrl even if not fetchable (for debugging)
-    return publicUrl;
+    return publicUrl; // last resort (debug)
   }
 
   return signed.signedUrl;
@@ -831,7 +830,6 @@ module.exports = async function handler(req, res) {
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "POST") return res.status(405).json({ error: "METHOD_NOT_ALLOWED" });
 
-  // ✅ correlation id for logs
   const requestId = crypto.randomUUID();
 
   try {
@@ -839,6 +837,7 @@ module.exports = async function handler(req, res) {
     const memberId = await requireMemberId(req);
 
     const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : req.body || {};
+
     const {
       storyType = "Random AI story",
       artStyle = "Scary toon",
@@ -854,6 +853,19 @@ module.exports = async function handler(req, res) {
       captionStyle = "sentence",
       captionSettings = {},
     } = body;
+
+    console.log("[CREATE_VIDEO_REQUEST]", {
+      requestId,
+      memberId: String(memberId),
+      storyType,
+      artStyle,
+      language,
+      aspectRatio,
+      durationRange,
+      hasCustomPrompt: !!String(customPrompt || "").trim(),
+      hasVoiceId: !!String(voiceId || "").trim(),
+      captionStyle,
+    });
 
     if (!process.env.CREATOMATE_API_KEY) return res.status(500).json({ error: "MISSING_CREATOMATE_API_KEY" });
     if (!supabase) return res.status(500).json({ error: "MISSING_SUPABASE_ENV_VARS" });
@@ -900,7 +912,7 @@ module.exports = async function handler(req, res) {
       return res.status(500).json({ error: "DB_PREINSERT_FAILED", details: preInsErr });
     }
 
-    // Script
+    // Script (your generate-script endpoint)
     const scriptResp = await fetch(`${publicBaseUrl}/api/generate-script`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -929,8 +941,8 @@ module.exports = async function handler(req, res) {
     const speechSec = estimateSpeechSeconds(narration);
     let targetSec = Math.round(speechSec + 2);
 
-    let minSec = 60,
-      maxSec = 90;
+    let minSec = 60;
+    let maxSec = 90;
     if (durationRange === "30-60") {
       minSec = 30;
       maxSec = 60;
@@ -944,8 +956,6 @@ module.exports = async function handler(req, res) {
     beatCount = Math.max(MIN_BEATS, Math.min(MAX_BEATS, beatCount));
 
     const beatTexts = splitNarrationIntoBeats(narration, beatCount);
-
-    // ✅ timing uses speech-based durations + smoothing + normalization
     const timing = buildBeatTiming(beatTexts, targetSec);
 
     console.log("[TIMING_DEBUG]", {
@@ -957,7 +967,7 @@ module.exports = async function handler(req, res) {
       durations: timing.durations.map((d) => Number(d.toFixed(2))),
     });
 
-    // ✅ Pick Krea style once per render (based on artStyle)
+    // Pick Krea style once per render (based on artStyle)
     const kreaStyle = pickKreaStyleConfig(artStyle);
 
     console.log("[KREA_STYLE_PICK]", {
@@ -965,6 +975,8 @@ module.exports = async function handler(req, res) {
       artStyle,
       useStyle: !!kreaStyle.useStyle,
       styleId: kreaStyle.useStyle ? String(kreaStyle.id || "").trim() : null,
+      styleStrength: kreaStyle.useStyle ? KREA_STYLE_STRENGTH : null,
+      aspectRatio,
     });
 
     // Images
@@ -982,14 +994,13 @@ module.exports = async function handler(req, res) {
 
     const variantSequence = buildVariantSequence(beatCount);
 
-    // ✅ Creatomate mods
+    // Creatomate mods
     const mods = {
       Narration: narration,
       VoiceLabel: voiceName || "Voice",
       LanguageLabel: language,
       StoryTypeLabel: storyType,
 
-      // ✅ Creatomate media elements use ".source"
       "Voiceover.source": voiceUrl || "",
 
       ...captionVisibilityMods(styleNorm),
@@ -1016,7 +1027,7 @@ module.exports = async function handler(req, res) {
       for (const variant of ANIMATION_VARIANTS) mods[`Beat${i}_${variant}_Image.source`] = "";
     }
 
-    // Image assignment
+    // Image assignment (proxy through your /api/krea-image)
     let lastGood = "";
     for (let i = 1; i <= beatCount; i++) {
       const raw = imageUrls[i - 1] || "";
@@ -1067,6 +1078,7 @@ module.exports = async function handler(req, res) {
         artStyle,
         useStyle: !!kreaStyle.useStyle,
         styleId: kreaStyle.useStyle ? String(kreaStyle.id || "").trim() : null,
+        styleStrength: kreaStyle.useStyle ? KREA_STYLE_STRENGTH : null,
       },
       requestId,
     });
