@@ -108,6 +108,8 @@ const KREA_STYLE_MAP = {
   "painterly cinema": { id: "53u2ibzsn", useStyle: true },
   "paniterly cinema": { id: "53u2ibzsn", useStyle: true }, // typo-safe alias
   "cinematic noir": { id: "jbfg5nynk", useStyle: true },
+  "cute anime": { id: "hjxbhue1w", useStyle: true },
+
 
   // Realism = base model (no style)
   "realism": { id: "", useStyle: false },
