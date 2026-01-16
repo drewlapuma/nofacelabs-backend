@@ -1,4 +1,4 @@
-// api/user-video-upload-url.js (CommonJS, Node 18+)
+// api/user-video-caption.js (CommonJS, Node 18+)
 const { createClient } = require("@supabase/supabase-js");
 
 const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || "*")
@@ -20,8 +20,13 @@ function setCors(req, res) {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 }
 
+function json(res, status, body) {
+  res.statusCode = status;
+  res.setHeader("Content-Type", "application/json");
+  res.end(JSON.stringify(body));
+}
+
 async function readJson(req) {
-  // Works reliably on Vercel Node serverless
   if (req.body && typeof req.body === "object") return req.body;
 
   const chunks = [];
@@ -36,83 +41,86 @@ async function readJson(req) {
   }
 }
 
-function json(res, status, body) {
-  res.statusCode = status;
-  res.setHeader("Content-Type", "application/json");
-  res.end(JSON.stringify(body));
-}
-
-function safeName(name) {
-  return String(name || "video.mp4")
-    .replace(/[^a-zA-Z0-9._-]/g, "_")
-    .slice(0, 120);
-}
-
 module.exports = async function handler(req, res) {
   setCors(req, res);
 
-  if (req.method === "OPTIONS") {
-    // Preflight
-    return json(res, 200, { ok: true });
-  }
-
-  if (req.method !== "POST") {
-    return json(res, 405, { error: "Method not allowed" });
-  }
+  if (req.method === "OPTIONS") return json(res, 200, { ok: true });
+  if (req.method !== "POST") return json(res, 405, { error: "Method not allowed" });
 
   const body = await readJson(req);
   if (!body) return json(res, 400, { error: "Missing body" });
   if (body === "__INVALID__") return json(res, 400, { error: "Invalid JSON" });
 
-  const { fileName, fileSize, contentType } = body;
+  const {
+    path,
+    width,
+    height,
+    captionStyle,
+    captionSettings
+  } = body;
 
-  if (!fileName || !fileSize) {
-    return json(res, 400, { error: "fileName and fileSize are required" });
+  if (!path || !width || !height) {
+    return json(res, 400, { error: "path, width, height are required" });
+  }
+  if (!captionStyle) {
+    return json(res, 400, { error: "captionStyle is required" });
   }
 
-  // ✅ Server-only env vars
+  // ✅ Server env vars
   const SUPABASE_URL = process.env.SUPABASE_URL;
   const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
-  // ✅ bucket: env var first, fallback to your real bucket name
   const BUCKET =
     process.env.SUPABASE_UPLOAD_BUCKET ||
     process.env.USER_VIDEOS_BUCKET ||
     "user-uploads";
 
+  // You'll already have these for Creatomate in your other code:
+  const CREATOMATE_API_KEY = process.env.CREATOMATE_API_KEY;
+
   if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-    return json(res, 500, {
-      error: "Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY env vars",
-    });
+    return json(res, 500, { error: "Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY" });
+  }
+  if (!CREATOMATE_API_KEY) {
+    return json(res, 500, { error: "Missing CREATOMATE_API_KEY" });
   }
 
   const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
     auth: { persistSession: false },
   });
 
-  // Path in bucket
-  const safe = safeName(fileName);
-  const ext = (safe.split(".").pop() || "mp4").toLowerCase();
-  const base = safe.replace(/\.[^/.]+$/, "");
-  const path = `uploads/${Date.now()}_${base}.${ext}`;
+  // ✅ Build a public (or signed) URL to the uploaded video for Creatomate
+  // Option A (works if your bucket is public): getPublicUrl
+  // Option B (works if private): createSignedUrl
+  let videoUrl = null;
 
-  // ✅ Create signed upload URL (client will PUT to signedUrl)
-  const { data, error } = await supabaseAdmin.storage
-    .from(BUCKET)
-    .createSignedUploadUrl(path);
-
-  if (error || !data?.signedUrl) {
-    return json(res, 500, {
-      error: "Failed to create signed upload URL",
-      details: error?.message || null,
-    });
+  // Try public first:
+  const pub = supabaseAdmin.storage.from(BUCKET).getPublicUrl(path);
+  if (pub?.data?.publicUrl) {
+    videoUrl = pub.data.publicUrl;
   }
 
-  // IMPORTANT: client uses PUT to signedUrl, so return signedUrl
+  // If bucket is private, fall back to signed:
+  if (!videoUrl) {
+    const { data: signed, error: signErr } = await supabaseAdmin
+      .storage
+      .from(BUCKET)
+      .createSignedUrl(path, 60 * 60); // 1 hour
+
+    if (signErr || !signed?.signedUrl) {
+      return json(res, 500, { error: "Failed to create signed video URL", details: signErr?.message });
+    }
+    videoUrl = signed.signedUrl;
+  }
+
+  // TODO: Start your Creatomate render here (same way you do for AI videos),
+  // using videoUrl + captionStyle + captionSettings.
+  //
+  // For now, respond so you can confirm the endpoint works end-to-end:
   return json(res, 200, {
-    bucket: BUCKET,
-    path,
-    signedUrl: data.signedUrl,
-    contentType: contentType || "video/mp4",
+    ok: true,
+    received: { path, width, height, captionStyle },
+    videoUrl,
+    captionSettings: captionSettings || {},
+    // You will return: { renderId: "..." } once you wire Creatomate render.
   });
 };
