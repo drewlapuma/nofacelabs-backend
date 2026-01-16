@@ -1,21 +1,16 @@
-// api/user-video-caption.js (CommonJS, Node 18+)
-const { createClient } = require("@supabase/supabase-js");
+// api/user-video-caption.js
+const https = require("https");
 
 const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || "*")
-  .split(",")
-  .map((s) => s.trim())
-  .filter(Boolean);
+  .split(",").map(s => s.trim()).filter(Boolean);
 
 function setCors(req, res) {
   const origin = req.headers.origin;
-
-  if (ALLOW_ORIGINS.includes("*")) {
-    res.setHeader("Access-Control-Allow-Origin", "*");
-  } else if (origin && ALLOW_ORIGINS.includes(origin)) {
+  if (ALLOW_ORIGINS.includes("*")) res.setHeader("Access-Control-Allow-Origin", "*");
+  else if (origin && ALLOW_ORIGINS.includes(origin)) {
     res.setHeader("Access-Control-Allow-Origin", origin);
     res.setHeader("Vary", "Origin");
   }
-
   res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 }
@@ -28,99 +23,101 @@ function json(res, status, body) {
 
 async function readJson(req) {
   if (req.body && typeof req.body === "object") return req.body;
-
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
   const raw = Buffer.concat(chunks).toString("utf8").trim();
   if (!raw) return null;
+  try { return JSON.parse(raw); } catch { return "__INVALID__"; }
+}
 
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return "__INVALID__";
-  }
+function httpJson(method, url, headers, bodyObj) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(url);
+    const payload = bodyObj ? Buffer.from(JSON.stringify(bodyObj)) : null;
+
+    const req = https.request(
+      {
+        method,
+        hostname: u.hostname,
+        path: u.pathname + u.search,
+        headers: {
+          ...(headers || {}),
+          ...(payload ? { "Content-Type": "application/json", "Content-Length": payload.length } : {}),
+        },
+      },
+      (res) => {
+        let data = "";
+        res.on("data", (c) => (data += c));
+        res.on("end", () => {
+          let parsed = null;
+          try { parsed = JSON.parse(data); } catch {}
+          if (res.statusCode >= 200 && res.statusCode < 300) return resolve(parsed || {});
+          return reject(new Error(parsed?.error || parsed?.message || data || ("HTTP " + res.statusCode)));
+        });
+      }
+    );
+
+    req.on("error", reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
 }
 
 module.exports = async function handler(req, res) {
   setCors(req, res);
-
-  if (req.method === "OPTIONS") return json(res, 200, { ok: true });
+  if (req.method === "OPTIONS") return res.end();
   if (req.method !== "POST") return json(res, 405, { error: "Method not allowed" });
 
   const body = await readJson(req);
   if (!body) return json(res, 400, { error: "Missing body" });
   if (body === "__INVALID__") return json(res, 400, { error: "Invalid JSON" });
 
-  const {
-    path,
-    width,
-    height,
-    captionStyle,
-    captionSettings
-  } = body;
+  const { path, width, height, captionStyle, captionSettings } = body;
 
   if (!path || !width || !height) {
     return json(res, 400, { error: "path, width, height are required" });
   }
-  if (!captionStyle) {
-    return json(res, 400, { error: "captionStyle is required" });
-  }
 
-  // ✅ Server env vars
-  const SUPABASE_URL = process.env.SUPABASE_URL;
-  const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  const BUCKET =
-    process.env.SUPABASE_UPLOAD_BUCKET ||
-    process.env.USER_VIDEOS_BUCKET ||
-    "user-uploads";
-
-  // You'll already have these for Creatomate in your other code:
   const CREATOMATE_API_KEY = process.env.CREATOMATE_API_KEY;
+  const CREATOMATE_TEMPLATE_ID = process.env.CREATOMATE_CAPTION_TEMPLATE_ID; // make a template for “user upload captions”
+  const SUPABASE_URL = process.env.SUPABASE_URL;
+  const BUCKET = process.env.USER_VIDEOS_BUCKET || "user-uploads";
 
-  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-    return json(res, 500, { error: "Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY" });
-  }
-  if (!CREATOMATE_API_KEY) {
-    return json(res, 500, { error: "Missing CREATOMATE_API_KEY" });
-  }
+  if (!CREATOMATE_API_KEY) return json(res, 500, { error: "Missing CREATOMATE_API_KEY env var" });
+  if (!CREATOMATE_TEMPLATE_ID) return json(res, 500, { error: "Missing CREATOMATE_CAPTION_TEMPLATE_ID env var" });
+  if (!SUPABASE_URL) return json(res, 500, { error: "Missing SUPABASE_URL env var" });
 
-  const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
-    auth: { persistSession: false },
-  });
+  // Public URL to the uploaded video (bucket must be public OR you must sign it server-side)
+  const videoUrl = `${SUPABASE_URL}/storage/v1/object/public/${BUCKET}/${path}`;
 
-  // ✅ Build a public (or signed) URL to the uploaded video for Creatomate
-  // Option A (works if your bucket is public): getPublicUrl
-  // Option B (works if private): createSignedUrl
-  let videoUrl = null;
+  // TODO: map captionStyle/captionSettings into your template variables exactly
+  // These keys MUST match your Creatomate template “Modifications” names.
+  const modifications = {
+    video: videoUrl,
+    captionStyle: captionStyle || "sentence",
+    captionSettings: JSON.stringify(captionSettings || {}),
+  };
 
-  // Try public first:
-  const pub = supabaseAdmin.storage.from(BUCKET).getPublicUrl(path);
-  if (pub?.data?.publicUrl) {
-    videoUrl = pub.data.publicUrl;
-  }
+  try {
+    const render = await httpJson(
+      "POST",
+      "https://api.creatomate.com/v1/renders",
+      { Authorization: `Bearer ${CREATOMATE_API_KEY}` },
+      {
+        template_id: CREATOMATE_TEMPLATE_ID,
+        modifications,
+      }
+    );
 
-  // If bucket is private, fall back to signed:
-  if (!videoUrl) {
-    const { data: signed, error: signErr } = await supabaseAdmin
-      .storage
-      .from(BUCKET)
-      .createSignedUrl(path, 60 * 60); // 1 hour
+    // Creatomate can return either an object or array depending on endpoint usage
+    const renderId = Array.isArray(render) ? render?.[0]?.id : render?.id;
 
-    if (signErr || !signed?.signedUrl) {
-      return json(res, 500, { error: "Failed to create signed video URL", details: signErr?.message });
+    if (!renderId) {
+      return json(res, 500, { error: "Missing renderId from Creatomate", debug: render });
     }
-    videoUrl = signed.signedUrl;
-  }
 
-  // TODO: Start your Creatomate render here (same way you do for AI videos),
-  // using videoUrl + captionStyle + captionSettings.
-  //
-  // For now, respond so you can confirm the endpoint works end-to-end:
-  return json(res, 200, {
-    ok: true,
-    received: { path, width, height, captionStyle },
-    videoUrl,
-    captionSettings: captionSettings || {},
-    // You will return: { renderId: "..." } once you wire Creatomate render.
-  });
+    return json(res, 200, { renderId });
+  } catch (err) {
+    return json(res, 500, { error: err.message || "CREATOMATE_RENDER_FAILED" });
+  }
 };
