@@ -8,78 +8,93 @@ const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || 
 
 function setCors(req, res) {
   const origin = req.headers.origin;
+
   if (ALLOW_ORIGINS.includes("*")) {
     res.setHeader("Access-Control-Allow-Origin", "*");
   } else if (origin && ALLOW_ORIGINS.includes(origin)) {
     res.setHeader("Access-Control-Allow-Origin", origin);
     res.setHeader("Vary", "Origin");
   }
+
   res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 }
 
-function json(res, status, body) {
-  res.statusCode = status;
-  res.setHeader("Content-Type", "application/json");
-  res.end(JSON.stringify(body));
+async function readJson(req) {
+  // Some Vercel setups don’t populate req.body for raw functions reliably.
+  // This works every time.
+  if (req.body && typeof req.body === "object") return req.body;
+
+  const chunks = [];
+  for await (const chunk of req) chunks.push(chunk);
+  const raw = Buffer.concat(chunks).toString("utf8").trim();
+  if (!raw) return null;
+
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return "__INVALID__";
+  }
 }
 
-function safeExt(filename) {
-  const m = String(filename || "").toLowerCase().match(/\.(mp4|mov|m4v|webm)$/);
-  return m ? m[1] : "mp4";
+function safeName(name) {
+  return String(name || "video.mp4")
+    .replace(/[^a-zA-Z0-9._-]/g, "_")
+    .slice(0, 120);
 }
 
 module.exports = async function handler(req, res) {
   setCors(req, res);
-  if (req.method === "OPTIONS") return res.end();
-  if (req.method !== "POST") return json(res, 405, { error: "Method not allowed" });
 
-  const SUPABASE_URL = process.env.SUPABASE_URL;
-  const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  const BUCKET = process.env.SUPABASE_UPLOAD_BUCKET;
-
-  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY || !BUCKET) {
-    return json(res, 500, { error: "Missing Supabase env vars" });
+  if (req.method === "OPTIONS") {
+    return res.status(200).json({ ok: true });
   }
 
-  let body;
-  try {
-    body = JSON.parse(req.body || "{}");
-  } catch {
-    return json(res, 400, { error: "Invalid JSON" });
+  if (req.method !== "POST") {
+    return res.status(405).json({ error: "Method not allowed" });
   }
 
-  const fileName = body.fileName;
-  const fileSize = Number(body.fileSize || 0);
-  const contentType = body.contentType || "video/mp4";
+  const body = await readJson(req);
+  if (!body) return res.status(400).json({ error: "Missing body" });
+  if (body === "__INVALID__") return res.status(400).json({ error: "Invalid JSON" });
+
+  const { fileName, fileSize, contentType } = body;
 
   if (!fileName || !fileSize) {
-    return json(res, 400, { error: "fileName and fileSize required" });
+    return res.status(400).json({ error: "fileName and fileSize are required" });
   }
 
-  // (Optional) basic size guard
-  // if (fileSize > 1024 * 1024 * 500) return json(res, 400, { error: "File too large" });
+  // ✅ Supabase service role (server only)
+  const SUPABASE_URL = process.env.SUPABASE_URL;
+  const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const BUCKET = process.env.USER_VIDEOS_BUCKET || "user-videos";
 
-  const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
-    auth: { persistSession: false },
-  });
-
-  const ext = safeExt(fileName);
-  const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  const path = `user-videos/${id}.${ext}`;
-
-  // Signed upload URL (valid ~2 hours per Supabase docs) :contentReference[oaicite:1]{index=1}
-  const { data, error } = await supabase.storage.from(BUCKET).createSignedUploadUrl(path);
-
-  if (error || !data?.signedUrl || !data?.token) {
-    return json(res, 500, { error: "CREATE_SIGNED_UPLOAD_URL_FAILED", details: error?.message });
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+    return res.status(500).json({ error: "Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY env vars" });
   }
 
-  return json(res, 200, {
+  const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+
+  // You should use a real member id here (Memberstack / session).
+  // For now, a simple timestamp-based path:
+  const ext = safeName(fileName).split(".").pop() || "mp4";
+  const base = safeName(fileName).replace(/\.[^/.]+$/, "");
+  const path = `uploads/${Date.now()}_${base}.${ext}`;
+
+  // Create a signed upload URL token (client uses uploadToSignedUrl)
+  const { data, error } = await supabaseAdmin.storage
+    .from(BUCKET)
+    .createSignedUploadUrl(path);
+
+  if (error || !data) {
+    return res.status(500).json({ error: error?.message || "Failed to create signed upload URL" });
+  }
+
+  return res.status(200).json({
     bucket: BUCKET,
     path,
-    signedUrl: data.signedUrl,
     token: data.token,
-    contentType,
+    // optional debugging:
+    // signedUrl: data.signedUrl
   });
 };
