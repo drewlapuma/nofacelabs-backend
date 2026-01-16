@@ -21,8 +21,7 @@ function setCors(req, res) {
 }
 
 async function readJson(req) {
-  // Some Vercel setups don’t populate req.body for raw functions reliably.
-  // This works every time.
+  // Works reliably on Vercel Node serverless
   if (req.body && typeof req.body === "object") return req.body;
 
   const chunks = [];
@@ -37,6 +36,12 @@ async function readJson(req) {
   }
 }
 
+function json(res, status, body) {
+  res.statusCode = status;
+  res.setHeader("Content-Type", "application/json");
+  res.end(JSON.stringify(body));
+}
+
 function safeName(name) {
   return String(name || "video.mp4")
     .replace(/[^a-zA-Z0-9._-]/g, "_")
@@ -47,54 +52,67 @@ module.exports = async function handler(req, res) {
   setCors(req, res);
 
   if (req.method === "OPTIONS") {
-    return res.status(200).json({ ok: true });
+    // Preflight
+    return json(res, 200, { ok: true });
   }
 
   if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method not allowed" });
+    return json(res, 405, { error: "Method not allowed" });
   }
 
   const body = await readJson(req);
-  if (!body) return res.status(400).json({ error: "Missing body" });
-  if (body === "__INVALID__") return res.status(400).json({ error: "Invalid JSON" });
+  if (!body) return json(res, 400, { error: "Missing body" });
+  if (body === "__INVALID__") return json(res, 400, { error: "Invalid JSON" });
 
   const { fileName, fileSize, contentType } = body;
 
   if (!fileName || !fileSize) {
-    return res.status(400).json({ error: "fileName and fileSize are required" });
+    return json(res, 400, { error: "fileName and fileSize are required" });
   }
 
-  // ✅ Supabase service role (server only)
+  // ✅ Server-only env vars
   const SUPABASE_URL = process.env.SUPABASE_URL;
   const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  const BUCKET = process.env.USER_VIDEOS_BUCKET || "user-videos";
+
+  // ✅ bucket: env var first, fallback to your real bucket name
+  const BUCKET =
+    process.env.SUPABASE_UPLOAD_BUCKET ||
+    process.env.USER_VIDEOS_BUCKET ||
+    "user-uploads";
 
   if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-    return res.status(500).json({ error: "Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY env vars" });
+    return json(res, 500, {
+      error: "Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY env vars",
+    });
   }
 
-  const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+  const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+    auth: { persistSession: false },
+  });
 
-  // You should use a real member id here (Memberstack / session).
-  // For now, a simple timestamp-based path:
-  const ext = safeName(fileName).split(".").pop() || "mp4";
-  const base = safeName(fileName).replace(/\.[^/.]+$/, "");
+  // Path in bucket
+  const safe = safeName(fileName);
+  const ext = (safe.split(".").pop() || "mp4").toLowerCase();
+  const base = safe.replace(/\.[^/.]+$/, "");
   const path = `uploads/${Date.now()}_${base}.${ext}`;
 
-  // Create a signed upload URL token (client uses uploadToSignedUrl)
+  // ✅ Create signed upload URL (client will PUT to signedUrl)
   const { data, error } = await supabaseAdmin.storage
     .from(BUCKET)
     .createSignedUploadUrl(path);
 
-  if (error || !data) {
-    return res.status(500).json({ error: error?.message || "Failed to create signed upload URL" });
+  if (error || !data?.signedUrl) {
+    return json(res, 500, {
+      error: "Failed to create signed upload URL",
+      details: error?.message || null,
+    });
   }
 
-  return res.status(200).json({
+  // IMPORTANT: client uses PUT to signedUrl, so return signedUrl
+  return json(res, 200, {
     bucket: BUCKET,
     path,
-    token: data.token,
-    // optional debugging:
-    // signedUrl: data.signedUrl
+    signedUrl: data.signedUrl,
+    contentType: contentType || "video/mp4",
   });
 };
