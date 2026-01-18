@@ -70,9 +70,7 @@ function httpJson(method, url, headers, bodyObj) {
             parsed = JSON.parse(data);
           } catch {}
 
-          if (res.statusCode >= 200 && res.statusCode < 300) {
-            return resolve(parsed || {});
-          }
+          if (res.statusCode >= 200 && res.statusCode < 300) return resolve(parsed || {});
           return reject(
             new Error(parsed?.error || parsed?.message || data || "HTTP " + res.statusCode)
           );
@@ -86,8 +84,7 @@ function httpJson(method, url, headers, bodyObj) {
   });
 }
 
-// Map UI captionStyle -> your Creatomate subtitle element IDs
-// These MUST match the IDs shown in the left panel in Creatomate.
+// Map UI captionStyle -> your Creatomate subtitle layer IDs (must match left panel IDs)
 const STYLE_TO_LAYER = {
   sentence: "Subtitles_Sentence",
   karaoke: "Subtitles_Karaoke",
@@ -111,12 +108,16 @@ const ALL_SUBTITLE_LAYERS = Array.from(new Set(Object.values(STYLE_TO_LAYER)));
 function normalizeStyleKey(s) {
   return String(s || "")
     .toLowerCase()
-    .replace(/[\s_-]+/g, ""); // "Bold White" -> "boldwhite"
+    .replace(/[\s_-]+/g, "");
 }
 
 function safeNum(n, fallback) {
   const x = Number(n);
   return Number.isFinite(x) ? x : fallback;
+}
+
+function safeStr(v) {
+  return typeof v === "string" ? v : v == null ? "" : String(v);
 }
 
 module.exports = async function handler(req, res) {
@@ -129,10 +130,11 @@ module.exports = async function handler(req, res) {
   if (!body) return sendJson(res, 400, { error: "Missing body" });
   if (body === "__INVALID__") return sendJson(res, 400, { error: "Invalid JSON" });
 
-  const { path, width, height, captionStyle, captionSettings } = body;
+  const { path, captionStyle, captionSettings } = body;
 
-  if (!path || !width || !height) {
-    return sendJson(res, 400, { error: "path, width, height are required" });
+  // Width/height are NOT required for Creatomate here (avoid accidental template resizing)
+  if (!path) {
+    return sendJson(res, 400, { error: "path is required" });
   }
 
   const CREATOMATE_API_KEY = process.env.CREATOMATE_API_KEY;
@@ -144,51 +146,70 @@ module.exports = async function handler(req, res) {
   if (!TEMPLATE_ID) return sendJson(res, 500, { error: "Missing CREATOMATE_CAPTION_TEMPLATE_ID env var" });
   if (!SUPABASE_URL) return sendJson(res, 500, { error: "Missing SUPABASE_URL env var" });
 
-  // IMPORTANT:
-  // This works only if the bucket/path is publicly readable.
-  // If your bucket is private, you must generate a signed GET URL server-side instead.
+  // Bucket/path must be public OR you must sign a GET URL server-side
   const videoUrl = `${SUPABASE_URL}/storage/v1/object/public/${BUCKET}/${path}`;
 
-  // Choose which subtitle layer to show
   const styleKey = normalizeStyleKey(captionStyle);
-  const chosenLayer = STYLE_TO_LAYER[styleKey] || STYLE_TO_LAYER["sentence"];
+  const chosenLayer = STYLE_TO_LAYER[styleKey] || STYLE_TO_LAYER.sentence;
 
-  // Base modifications:
-  // 1) swap the video source
-  // 2) set template size to match video (optional but usually good)
-  // 3) hide all subtitle layers, then show chosen
-  const modifications = {
-    "input_video.source": videoUrl,
+  // ✅ IMPORTANT FIXES:
+  // 1) DO NOT resize the template canvas (that often causes top-left snaps).
+  // 2) Always set safe default caption positions so they never evaluate to 0,0.
+  // 3) Apply position using BOTH common property paths so whichever one your layer supports will work.
 
-    // Optional: if your template canvas is “Auto” you may not need these,
-    // but it’s useful if you want output to match uploaded dims:
-  
+  const csIn = captionSettings && typeof captionSettings === "object" ? captionSettings : {};
+
+  // Safe defaults (bottom-center)
+  const cs = {
+    x: 50,
+    y: 85,
+    size: undefined,
+    fill: undefined,
+    stroke: undefined,
+    background: undefined,
+    shadow: undefined,
+    ...csIn,
   };
 
-  // Turn all subtitle layers OFF
+  const modifications = {
+    // Your video element id is "input_video"
+    // Most templates use ".source" for URL video providers
+    "input_video.source": videoUrl,
+  };
+
+  // Hide all subtitle layers
   for (const id of ALL_SUBTITLE_LAYERS) {
     modifications[`${id}.visible`] = false;
   }
-  // Turn chosen one ON
+  // Show the chosen layer
   modifications[`${chosenLayer}.visible`] = true;
 
-  // Optional: apply shared settings (if you store x/y/size in captionSettings)
-  // These property paths must match Creatomate’s properties for that element.
-  // If a key doesn’t exist, Creatomate will usually ignore it.
-  const cs = captionSettings && typeof captionSettings === "object" ? captionSettings : {};
+  // Position (set both styles of paths; Creatomate will ignore unknown ones)
+  const x = safeNum(cs.x, 50);
+  const y = safeNum(cs.y, 85);
 
-  // If you use normalized x/y positions (0-100), you can map them like this:
-  if (cs.x !== undefined) modifications[`${chosenLayer}.x`] = safeNum(cs.x, 50);
-  if (cs.y !== undefined) modifications[`${chosenLayer}.y`] = safeNum(cs.y, 90);
+  // Common paths
+  modifications[`${chosenLayer}.x`] = x;
+  modifications[`${chosenLayer}.y`] = y;
 
-  // If you want font size adjustments:
-  if (cs.size !== undefined) modifications[`${chosenLayer}.text_style.font_size`] = safeNum(cs.size, 70);
+  // Alternate paths some layers use
+  modifications[`${chosenLayer}.position.x`] = x;
+  modifications[`${chosenLayer}.position.y`] = y;
 
-  // If you want fill/stroke/bg/shadow:
-  if (cs.fill) modifications[`${chosenLayer}.text_style.fill_color`] = String(cs.fill);
-  if (cs.stroke) modifications[`${chosenLayer}.text_style.stroke_color`] = String(cs.stroke);
-  if (cs.background) modifications[`${chosenLayer}.text_style.background_color`] = String(cs.background);
-  if (cs.shadow) modifications[`${chosenLayer}.text_style.shadow_color`] = String(cs.shadow);
+  // Anchor/Alignment (helps prevent “top-left” behavior if the layer uses different defaults)
+  modifications[`${chosenLayer}.transform.anchor.x`] = 50;
+  modifications[`${chosenLayer}.transform.anchor.y`] = 50;
+  modifications[`${chosenLayer}.transform.alignment.x`] = 50;
+  modifications[`${chosenLayer}.transform.alignment.y`] = 50;
+
+  // Text style tweaks (ignored if not supported by that element)
+  if (cs.size !== undefined) {
+    modifications[`${chosenLayer}.text_style.font_size`] = safeNum(cs.size, 70);
+  }
+  if (cs.fill) modifications[`${chosenLayer}.text_style.fill_color`] = safeStr(cs.fill);
+  if (cs.stroke) modifications[`${chosenLayer}.text_style.stroke_color`] = safeStr(cs.stroke);
+  if (cs.background) modifications[`${chosenLayer}.text_style.background_color`] = safeStr(cs.background);
+  if (cs.shadow) modifications[`${chosenLayer}.text_style.shadow_color`] = safeStr(cs.shadow);
 
   try {
     const renderResp = await httpJson(
@@ -201,14 +222,10 @@ module.exports = async function handler(req, res) {
       }
     );
 
-    // Creatomate sometimes returns an array, sometimes an object depending on account/endpoint behavior
     const renderId = Array.isArray(renderResp) ? renderResp?.[0]?.id : renderResp?.id;
 
     if (!renderId) {
-      return sendJson(res, 500, {
-        error: "Missing renderId from Creatomate",
-        debug: renderResp,
-      });
+      return sendJson(res, 500, { error: "Missing renderId from Creatomate", debug: renderResp });
     }
 
     return sendJson(res, 200, { renderId });
