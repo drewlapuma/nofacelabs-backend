@@ -162,8 +162,7 @@ module.exports = async function handler(req, res) {
 
     // Optional: if your template canvas is “Auto” you may not need these,
     // but it’s useful if you want output to match uploaded dims:
-    "template.width": safeNum(width, 720),
-    "template.height": safeNum(height, 1280),
+  
   };
 
   // Turn all subtitle layers OFF
