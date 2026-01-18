@@ -1,44 +1,59 @@
-// api/user-video-render-status.js
-const https = require("https");
+// api/user-video-render-status.js (CommonJS, Node 18+)
 
-function json(res, status, body){
+const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || "*")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+function setCors(req, res) {
+  const origin = req.headers.origin;
+
+  if (ALLOW_ORIGINS.includes("*")) {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+  } else if (origin && ALLOW_ORIGINS.includes(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+  }
+
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+}
+
+function json(res, status, body) {
   res.statusCode = status;
-  res.setHeader("Content-Type","application/json");
+  res.setHeader("Content-Type", "application/json");
   res.end(JSON.stringify(body));
 }
 
-module.exports = async function handler(req,res){
-  if (req.method !== "GET") return json(res,405,{error:"Method not allowed"});
+module.exports = async function handler(req, res) {
+  setCors(req, res);
 
-  const id = (req.query?.id || new URL(req.url, "http://x").searchParams.get("id") || "").trim();
-  if (!id) return json(res,400,{error:"Missing id"});
+  if (req.method === "OPTIONS") return res.end();
+  if (req.method !== "GET") return json(res, 405, { error: "Method not allowed" });
 
-  const key = process.env.CREATOMATE_API_KEY;
-  if (!key) return json(res,500,{error:"Missing CREATOMATE_API_KEY"});
+  try {
+    const id = (req.query?.id || "").toString().trim();
+    if (!id) return json(res, 400, { error: "Missing id" });
 
-  const url = `https://api.creatomate.com/v1/renders/${encodeURIComponent(id)}`;
+    const CREATOMATE_API_KEY = process.env.CREATOMATE_API_KEY;
+    if (!CREATOMATE_API_KEY) return json(res, 500, { error: "Missing CREATOMATE_API_KEY env var" });
 
-  const data = await new Promise((resolve,reject)=>{
-    const u = new URL(url);
-    const r = https.request({
-      method:"GET",
-      hostname:u.hostname,
-      path:u.pathname + u.search,
-      headers:{ Authorization:`Bearer ${key}` }
-    }, (resp)=>{
-      let s=""; resp.on("data",c=>s+=c);
-      resp.on("end",()=>{
-        try{ resolve(JSON.parse(s)); } catch { resolve(null); }
-      });
+    // Creatomate status endpoint
+    const r = await fetch(`https://api.creatomate.com/v1/renders/${encodeURIComponent(id)}`, {
+      headers: { Authorization: `Bearer ${CREATOMATE_API_KEY}` },
     });
-    r.on("error",reject);
-    r.end();
-  });
 
-  if (!data) return json(res,500,{error:"Bad response from Creatomate"});
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) return json(res, r.status, { error: data?.message || "Status fetch failed", details: data });
 
-  const status = data.status; // "planned" | "processing" | "succeeded" | "failed"
-  if (status === "succeeded") return json(res,200,{status:"succeeded", url:data.url});
-  if (status === "failed") return json(res,200,{status:"failed", error:data.error || "Render failed"});
-  return json(res,200,{status: status || "processing"});
+    // Creatomate often uses: status + url (when done)
+    return json(res, 200, {
+      status: data.status,
+      url: data.url || null,
+      error: data.error || null,
+      raw: data, // optional for debugging
+    });
+  } catch (e) {
+    return json(res, 500, { error: e.message || "Server error" });
+  }
 };
