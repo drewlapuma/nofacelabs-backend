@@ -66,14 +66,10 @@ function httpJson(method, url, headers, bodyObj) {
         res.on("data", (c) => (data += c));
         res.on("end", () => {
           let parsed = null;
-          try {
-            parsed = JSON.parse(data);
-          } catch {}
+          try { parsed = JSON.parse(data); } catch {}
 
           if (res.statusCode >= 200 && res.statusCode < 300) return resolve(parsed || {});
-          return reject(
-            new Error(parsed?.error || parsed?.message || data || "HTTP " + res.statusCode)
-          );
+          return reject(new Error(parsed?.error || parsed?.message || data || "HTTP " + res.statusCode));
         });
       }
     );
@@ -84,7 +80,7 @@ function httpJson(method, url, headers, bodyObj) {
   });
 }
 
-// Map UI captionStyle -> your Creatomate subtitle layer IDs (must match left panel IDs)
+// UI style -> Creatomate layer name (must match left panel)
 const STYLE_TO_LAYER = {
   sentence: "Subtitles_Sentence",
   karaoke: "Subtitles_Karaoke",
@@ -106,9 +102,13 @@ const STYLE_TO_LAYER = {
 const ALL_SUBTITLE_LAYERS = Array.from(new Set(Object.values(STYLE_TO_LAYER)));
 
 function normalizeStyleKey(s) {
-  return String(s || "")
-    .toLowerCase()
-    .replace(/[\s_-]+/g, "");
+  return String(s || "").toLowerCase().replace(/[\s_-]+/g, "");
+}
+
+function pct(v, fallbackPct) {
+  const n = Number(v);
+  const use = Number.isFinite(n) ? n : fallbackPct;
+  return `${use}%`;
 }
 
 function safeNum(n, fallback) {
@@ -131,11 +131,7 @@ module.exports = async function handler(req, res) {
   if (body === "__INVALID__") return sendJson(res, 400, { error: "Invalid JSON" });
 
   const { path, captionStyle, captionSettings } = body;
-
-  // Width/height are NOT required for Creatomate here (avoid accidental template resizing)
-  if (!path) {
-    return sendJson(res, 400, { error: "path is required" });
-  }
+  if (!path) return sendJson(res, 400, { error: "path is required" });
 
   const CREATOMATE_API_KEY = process.env.CREATOMATE_API_KEY;
   const TEMPLATE_ID = process.env.CREATOMATE_CAPTION_TEMPLATE_ID;
@@ -146,34 +142,16 @@ module.exports = async function handler(req, res) {
   if (!TEMPLATE_ID) return sendJson(res, 500, { error: "Missing CREATOMATE_CAPTION_TEMPLATE_ID env var" });
   if (!SUPABASE_URL) return sendJson(res, 500, { error: "Missing SUPABASE_URL env var" });
 
-  // Bucket/path must be public OR you must sign a GET URL server-side
   const videoUrl = `${SUPABASE_URL}/storage/v1/object/public/${BUCKET}/${path}`;
 
   const styleKey = normalizeStyleKey(captionStyle);
   const chosenLayer = STYLE_TO_LAYER[styleKey] || STYLE_TO_LAYER.sentence;
 
-  // ✅ IMPORTANT FIXES:
-  // 1) DO NOT resize the template canvas (that often causes top-left snaps).
-  // 2) Always set safe default caption positions so they never evaluate to 0,0.
-  // 3) Apply position using BOTH common property paths so whichever one your layer supports will work.
+  const cs = (captionSettings && typeof captionSettings === "object") ? captionSettings : {};
 
-  const csIn = captionSettings && typeof captionSettings === "object" ? captionSettings : {};
-
-  // Safe defaults (bottom-center)
-  const cs = {
-    x: 50,
-    y: 85,
-    size: undefined,
-    fill: undefined,
-    stroke: undefined,
-    background: undefined,
-    shadow: undefined,
-    ...csIn,
-  };
-
+  // ✅ DO NOT override position unless user actually changed it.
+  // If they do, send percent strings ("50%") — not numbers (pixels).
   const modifications = {
-    // Your video element id is "input_video"
-    // Most templates use ".source" for URL video providers
     "input_video.source": videoUrl,
   };
 
@@ -181,52 +159,42 @@ module.exports = async function handler(req, res) {
   for (const id of ALL_SUBTITLE_LAYERS) {
     modifications[`${id}.visible`] = false;
   }
-  // Show the chosen layer
+  // Show chosen
   modifications[`${chosenLayer}.visible`] = true;
 
-  // Position (set both styles of paths; Creatomate will ignore unknown ones)
-  const x = safeNum(cs.x, 50);
-  const y = safeNum(cs.y, 85);
-
-  // Common paths
-  modifications[`${chosenLayer}.x`] = x;
-  modifications[`${chosenLayer}.y`] = y;
-
-  // Alternate paths some layers use
-  modifications[`${chosenLayer}.position.x`] = x;
-  modifications[`${chosenLayer}.position.y`] = y;
-
-  // Anchor/Alignment (helps prevent “top-left” behavior if the layer uses different defaults)
-  modifications[`${chosenLayer}.transform.anchor.x`] = 50;
-  modifications[`${chosenLayer}.transform.anchor.y`] = 50;
-  modifications[`${chosenLayer}.transform.alignment.x`] = 50;
-  modifications[`${chosenLayer}.transform.alignment.y`] = 50;
-
-  // Text style tweaks (ignored if not supported by that element)
-  if (cs.size !== undefined) {
-    modifications[`${chosenLayer}.text_style.font_size`] = safeNum(cs.size, 70);
+  // Only apply x/y if provided (and as percentages)
+  if (cs.x !== undefined) {
+    modifications[`${chosenLayer}.x`] = pct(cs.x, 50);
   }
-  if (cs.fill) modifications[`${chosenLayer}.text_style.fill_color`] = safeStr(cs.fill);
-  if (cs.stroke) modifications[`${chosenLayer}.text_style.stroke_color`] = safeStr(cs.stroke);
-  if (cs.background) modifications[`${chosenLayer}.text_style.background_color`] = safeStr(cs.background);
-  if (cs.shadow) modifications[`${chosenLayer}.text_style.shadow_color`] = safeStr(cs.shadow);
+  if (cs.y !== undefined) {
+    modifications[`${chosenLayer}.y`] = pct(cs.y, 85);
+  }
+
+  // If your template uses x_alignment/y_alignment (like your JSON), only set if provided
+  if (cs.x_alignment !== undefined) {
+    modifications[`${chosenLayer}.x_alignment`] = pct(cs.x_alignment, 50);
+  }
+  if (cs.y_alignment !== undefined) {
+    modifications[`${chosenLayer}.y_alignment`] = pct(cs.y_alignment, 50);
+  }
+
+  // Style tweaks (ignored if not supported)
+  if (cs.size !== undefined) modifications[`${chosenLayer}.font_size`] = safeStr(cs.size);
+  if (cs.fill) modifications[`${chosenLayer}.fill_color`] = safeStr(cs.fill);
+  if (cs.stroke) modifications[`${chosenLayer}.stroke_color`] = safeStr(cs.stroke);
+  if (cs.stroke_width) modifications[`${chosenLayer}.stroke_width`] = safeStr(cs.stroke_width);
+  if (cs.transcript_color) modifications[`${chosenLayer}.transcript_color`] = safeStr(cs.transcript_color);
 
   try {
     const renderResp = await httpJson(
       "POST",
       "https://api.creatomate.com/v1/renders",
       { Authorization: `Bearer ${CREATOMATE_API_KEY}` },
-      {
-        template_id: TEMPLATE_ID,
-        modifications,
-      }
+      { template_id: TEMPLATE_ID, modifications }
     );
 
     const renderId = Array.isArray(renderResp) ? renderResp?.[0]?.id : renderResp?.id;
-
-    if (!renderId) {
-      return sendJson(res, 500, { error: "Missing renderId from Creatomate", debug: renderResp });
-    }
+    if (!renderId) return sendJson(res, 500, { error: "Missing renderId from Creatomate", debug: renderResp });
 
     return sendJson(res, 200, { renderId });
   } catch (err) {
