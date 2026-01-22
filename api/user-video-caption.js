@@ -5,9 +5,10 @@
 // ✅ Fixes:
 // - Supports BOTH naming styles from your UI (fill vs fill_color vs fillColor, etc.)
 // - Normalizes colors to HEX where possible
-// - Adds units for font_size / stroke_width if user sends numbers (uses vmin by default to match your template)
-// - Uses correct fields for transcript color (active effect color): transcript_color
-// - Keeps your x/y behavior (percent strings)
+// - Uses px for font_size + stroke_width when user sends numbers (prevents gigantic vmin sizes)
+// - Uses correct field for active effect color: transcript_color
+// - Keeps x/y behavior (percent strings)
+// - Optional: maps font family if you send it (font_family / fontFamily)
 
 const https = require("https");
 
@@ -77,7 +78,9 @@ function httpJson(method, url, headers, bodyObj) {
             parsed = JSON.parse(data);
           } catch {}
           if (res.statusCode >= 200 && res.statusCode < 300) return resolve(parsed || {});
-          return reject(new Error(parsed?.error || parsed?.message || data || "HTTP " + res.statusCode));
+          return reject(
+            new Error(parsed?.error || parsed?.message || data || "HTTP " + res.statusCode)
+          );
         });
       }
     );
@@ -131,13 +134,22 @@ function safeStr(v) {
   return typeof v === "string" ? v : v == null ? "" : String(v);
 }
 
+function clampNumber(val, min, max) {
+  const n = Number(val);
+  if (!Number.isFinite(n)) return null;
+  return Math.min(max, Math.max(min, n));
+}
+
 function withUnit(val, defaultUnit) {
   if (val === undefined || val === null) return undefined;
+
+  // number => add unit
   if (typeof val === "number") return `${val} ${defaultUnit}`;
+
   const s = String(val).trim();
   if (!s) return undefined;
 
-  // already has unit or %
+  // already has any unit or %
   if (/[a-z%]/i.test(s)) return s;
 
   // numeric string => attach unit
@@ -154,7 +166,6 @@ function normHex(val) {
   // allow "ffffff" => "#ffffff"
   if (!s.startsWith("#") && /^[0-9a-f]{3,8}$/i.test(s)) s = `#${s}`;
 
-  // allow "rgb(...)" etc. (Creatomate may ignore these). We won't transform those.
   return s;
 }
 
@@ -187,9 +198,9 @@ module.exports = async function handler(req, res) {
 
   const cs = captionSettings && typeof captionSettings === "object" ? captionSettings : {};
 
-  // ✅ Use vmin by default because your template uses "6.94 vmin" and "0.9 vmin"
-  const FONT_UNIT = "vmin";
-  const STROKE_UNIT = "vmin";
+  // ✅ Use px to avoid gigantic sizes when UI sends plain numbers
+  const FONT_UNIT = "px";
+  const STROKE_UNIT = "px";
 
   const modifications = {
     "input_video.source": videoUrl,
@@ -214,19 +225,45 @@ module.exports = async function handler(req, res) {
   if (ya !== undefined) modifications[`${chosenLayer}.y_alignment`] = pct(ya, 50);
 
   // Style keys (support multiple names your UI might send)
-  const fontSize = pick(cs, "size", "fontSize", "font_size");
+  const fontFamily = pick(cs, "font", "fontFamily", "font_family");
+  const fontSizeRaw = pick(cs, "size", "fontSize", "font_size");
   const fill = normHex(pick(cs, "fill", "fillColor", "fill_color"));
   const stroke = normHex(pick(cs, "stroke", "strokeColor", "stroke_color"));
-  const strokeWidth = pick(cs, "stroke_width", "strokeWidth");
+  const strokeWidthRaw = pick(cs, "stroke_width", "strokeWidth");
   const activeColor = normHex(
     pick(cs, "transcript_color", "activeColor", "active_color", "effectColor", "effect_color")
   );
 
-  // Apply with correct formatting
-  if (fontSize !== undefined) modifications[`${chosenLayer}.font_size`] = withUnit(fontSize, FONT_UNIT);
+  // Font family (if you pass it)
+  if (fontFamily) modifications[`${chosenLayer}.font_family`] = safeStr(fontFamily);
+
+  // Font size:
+  // If UI sends a number, clamp to sane range, then add "px".
+  // If UI sends "6.94 vmin" or "72 px", we keep it.
+  if (fontSizeRaw !== undefined) {
+    if (typeof fontSizeRaw === "number" || /^\d+(\.\d+)?$/.test(String(fontSizeRaw).trim())) {
+      const n = clampNumber(fontSizeRaw, 10, 160); // adjust range if you want
+      if (n !== null) modifications[`${chosenLayer}.font_size`] = `${n} ${FONT_UNIT}`;
+    } else {
+      modifications[`${chosenLayer}.font_size`] = withUnit(fontSizeRaw, FONT_UNIT);
+    }
+  }
+
+  // Colors
   if (fill) modifications[`${chosenLayer}.fill_color`] = safeStr(fill);
   if (stroke) modifications[`${chosenLayer}.stroke_color`] = safeStr(stroke);
-  if (strokeWidth !== undefined) modifications[`${chosenLayer}.stroke_width`] = withUnit(strokeWidth, STROKE_UNIT);
+
+  // Stroke width (same clamp logic)
+  if (strokeWidthRaw !== undefined) {
+    if (typeof strokeWidthRaw === "number" || /^\d+(\.\d+)?$/.test(String(strokeWidthRaw).trim())) {
+      const n = clampNumber(strokeWidthRaw, 0, 20);
+      if (n !== null) modifications[`${chosenLayer}.stroke_width`] = `${n} ${STROKE_UNIT}`;
+    } else {
+      modifications[`${chosenLayer}.stroke_width`] = withUnit(strokeWidthRaw, STROKE_UNIT);
+    }
+  }
+
+  // Active/karaoke effect color
   if (activeColor) modifications[`${chosenLayer}.transcript_color`] = safeStr(activeColor);
 
   try {
