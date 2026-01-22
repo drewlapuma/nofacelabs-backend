@@ -1,6 +1,13 @@
 // api/user-video-caption.js (CommonJS, Node 18+)
-// POST { path, width, height, captionStyle, captionSettings }
+// POST { path, captionStyle, captionSettings }
 // Returns { renderId }
+//
+// ✅ Fixes:
+// - Supports BOTH naming styles from your UI (fill vs fill_color vs fillColor, etc.)
+// - Normalizes colors to HEX where possible
+// - Adds units for font_size / stroke_width if user sends numbers (uses vmin by default to match your template)
+// - Uses correct fields for transcript color (active effect color): transcript_color
+// - Keeps your x/y behavior (percent strings)
 
 const https = require("https");
 
@@ -66,8 +73,9 @@ function httpJson(method, url, headers, bodyObj) {
         res.on("data", (c) => (data += c));
         res.on("end", () => {
           let parsed = null;
-          try { parsed = JSON.parse(data); } catch {}
-
+          try {
+            parsed = JSON.parse(data);
+          } catch {}
           if (res.statusCode >= 200 && res.statusCode < 300) return resolve(parsed || {});
           return reject(new Error(parsed?.error || parsed?.message || data || "HTTP " + res.statusCode));
         });
@@ -111,13 +119,43 @@ function pct(v, fallbackPct) {
   return `${use}%`;
 }
 
-function safeNum(n, fallback) {
-  const x = Number(n);
-  return Number.isFinite(x) ? x : fallback;
+// pick first defined key from captionSettings
+function pick(cs, ...keys) {
+  for (const k of keys) {
+    if (cs && cs[k] !== undefined && cs[k] !== null && cs[k] !== "") return cs[k];
+  }
+  return undefined;
 }
 
 function safeStr(v) {
   return typeof v === "string" ? v : v == null ? "" : String(v);
+}
+
+function withUnit(val, defaultUnit) {
+  if (val === undefined || val === null) return undefined;
+  if (typeof val === "number") return `${val} ${defaultUnit}`;
+  const s = String(val).trim();
+  if (!s) return undefined;
+
+  // already has unit or %
+  if (/[a-z%]/i.test(s)) return s;
+
+  // numeric string => attach unit
+  if (/^\d+(\.\d+)?$/.test(s)) return `${s} ${defaultUnit}`;
+
+  return s;
+}
+
+function normHex(val) {
+  if (val === undefined || val === null) return undefined;
+  let s = String(val).trim();
+  if (!s) return undefined;
+
+  // allow "ffffff" => "#ffffff"
+  if (!s.startsWith("#") && /^[0-9a-f]{3,8}$/i.test(s)) s = `#${s}`;
+
+  // allow "rgb(...)" etc. (Creatomate may ignore these). We won't transform those.
+  return s;
 }
 
 module.exports = async function handler(req, res) {
@@ -147,10 +185,12 @@ module.exports = async function handler(req, res) {
   const styleKey = normalizeStyleKey(captionStyle);
   const chosenLayer = STYLE_TO_LAYER[styleKey] || STYLE_TO_LAYER.sentence;
 
-  const cs = (captionSettings && typeof captionSettings === "object") ? captionSettings : {};
+  const cs = captionSettings && typeof captionSettings === "object" ? captionSettings : {};
 
-  // ✅ DO NOT override position unless user actually changed it.
-  // If they do, send percent strings ("50%") — not numbers (pixels).
+  // ✅ Use vmin by default because your template uses "6.94 vmin" and "0.9 vmin"
+  const FONT_UNIT = "vmin";
+  const STROKE_UNIT = "vmin";
+
   const modifications = {
     "input_video.source": videoUrl,
   };
@@ -162,28 +202,32 @@ module.exports = async function handler(req, res) {
   // Show chosen
   modifications[`${chosenLayer}.visible`] = true;
 
-  // Only apply x/y if provided (and as percentages)
-  if (cs.x !== undefined) {
-    modifications[`${chosenLayer}.x`] = pct(cs.x, 50);
-  }
-  if (cs.y !== undefined) {
-    modifications[`${chosenLayer}.y`] = pct(cs.y, 85);
-  }
+  // Positioning (percent strings)
+  const x = pick(cs, "x");
+  const y = pick(cs, "y");
+  if (x !== undefined) modifications[`${chosenLayer}.x`] = pct(x, 50);
+  if (y !== undefined) modifications[`${chosenLayer}.y`] = pct(y, 85);
 
-  // If your template uses x_alignment/y_alignment (like your JSON), only set if provided
-  if (cs.x_alignment !== undefined) {
-    modifications[`${chosenLayer}.x_alignment`] = pct(cs.x_alignment, 50);
-  }
-  if (cs.y_alignment !== undefined) {
-    modifications[`${chosenLayer}.y_alignment`] = pct(cs.y_alignment, 50);
-  }
+  const xa = pick(cs, "x_alignment", "xAlignment");
+  const ya = pick(cs, "y_alignment", "yAlignment");
+  if (xa !== undefined) modifications[`${chosenLayer}.x_alignment`] = pct(xa, 50);
+  if (ya !== undefined) modifications[`${chosenLayer}.y_alignment`] = pct(ya, 50);
 
-  // Style tweaks (ignored if not supported)
-  if (cs.size !== undefined) modifications[`${chosenLayer}.font_size`] = safeStr(cs.size);
-  if (cs.fill) modifications[`${chosenLayer}.fill_color`] = safeStr(cs.fill);
-  if (cs.stroke) modifications[`${chosenLayer}.stroke_color`] = safeStr(cs.stroke);
-  if (cs.stroke_width) modifications[`${chosenLayer}.stroke_width`] = safeStr(cs.stroke_width);
-  if (cs.transcript_color) modifications[`${chosenLayer}.transcript_color`] = safeStr(cs.transcript_color);
+  // Style keys (support multiple names your UI might send)
+  const fontSize = pick(cs, "size", "fontSize", "font_size");
+  const fill = normHex(pick(cs, "fill", "fillColor", "fill_color"));
+  const stroke = normHex(pick(cs, "stroke", "strokeColor", "stroke_color"));
+  const strokeWidth = pick(cs, "stroke_width", "strokeWidth");
+  const activeColor = normHex(
+    pick(cs, "transcript_color", "activeColor", "active_color", "effectColor", "effect_color")
+  );
+
+  // Apply with correct formatting
+  if (fontSize !== undefined) modifications[`${chosenLayer}.font_size`] = withUnit(fontSize, FONT_UNIT);
+  if (fill) modifications[`${chosenLayer}.fill_color`] = safeStr(fill);
+  if (stroke) modifications[`${chosenLayer}.stroke_color`] = safeStr(stroke);
+  if (strokeWidth !== undefined) modifications[`${chosenLayer}.stroke_width`] = withUnit(strokeWidth, STROKE_UNIT);
+  if (activeColor) modifications[`${chosenLayer}.transcript_color`] = safeStr(activeColor);
 
   try {
     const renderResp = await httpJson(
@@ -194,7 +238,9 @@ module.exports = async function handler(req, res) {
     );
 
     const renderId = Array.isArray(renderResp) ? renderResp?.[0]?.id : renderResp?.id;
-    if (!renderId) return sendJson(res, 500, { error: "Missing renderId from Creatomate", debug: renderResp });
+    if (!renderId) {
+      return sendJson(res, 500, { error: "Missing renderId from Creatomate", debug: renderResp });
+    }
 
     return sendJson(res, 200, { renderId });
   } catch (err) {
