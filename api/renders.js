@@ -31,7 +31,6 @@ function setCors(req, res) {
     res.setHeader("Vary", "Origin");
   }
 
-  // ✅ add DELETE
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   res.setHeader("Access-Control-Max-Age", "86400");
@@ -44,17 +43,52 @@ const ms = MEMBERSTACK_SECRET_KEY ? memberstackAdmin.init(MEMBERSTACK_SECRET_KEY
 function getBearerToken(req) {
   const h = req.headers.authorization || req.headers.Authorization || "";
   const m = String(h).match(/^Bearer\s+(.+)$/i);
-  return m ? m[1] : null;
+  return m ? m[1].trim() : null;
+}
+
+function isExpiredJwtError(err) {
+  const code = err?.code;
+  const msg = String(err?.message || "").toLowerCase();
+
+  // jose-style + common variants
+  if (code === "ERR_JWT_EXPIRED") return true;
+  if (msg.includes("jwtexpired") || msg.includes("jwt expired")) return true;
+  if (msg.includes('"exp"') && msg.includes("failed")) return true;
+  if (msg.includes("token_expired")) return true;
+
+  return false;
 }
 
 async function requireMemberId(req) {
   const token = getBearerToken(req);
-  if (!token) throw new Error("MISSING_AUTH");
-  if (!ms) throw new Error("MISSING_MEMBERSTACK_SECRET_KEY");
+  if (!token) {
+    const e = new Error("MISSING_AUTH");
+    e.code = "MISSING_AUTH";
+    throw e;
+  }
+  if (!ms) {
+    const e = new Error("MISSING_MEMBERSTACK_SECRET_KEY");
+    e.code = "MISSING_MEMBERSTACK_SECRET_KEY";
+    throw e;
+  }
 
-  const { id } = await ms.verifyToken({ token });
-  if (!id) throw new Error("INVALID_MEMBER_TOKEN");
-  return String(id);
+  try {
+    const out = await ms.verifyToken({ token });
+    const id = out?.id;
+    if (!id) {
+      const e = new Error("INVALID_MEMBER_TOKEN");
+      e.code = "INVALID_MEMBER_TOKEN";
+      throw e;
+    }
+    return String(id);
+  } catch (err) {
+    if (isExpiredJwtError(err)) {
+      const e = new Error("TOKEN_EXPIRED");
+      e.code = "TOKEN_EXPIRED";
+      throw e;
+    }
+    throw err;
+  }
 }
 
 // -------------------- Creatomate (kept) --------------------
@@ -127,7 +161,6 @@ function safeJsonParse(s) {
 }
 
 async function deleteRenderForMember({ sb, member_id, id }) {
-  // Fetch row (so we can delete associated storage)
   const { data: row, error: readErr } = await sb
     .from("renders")
     .select("*")
@@ -138,12 +171,10 @@ async function deleteRenderForMember({ sb, member_id, id }) {
   if (readErr || !row) return { ok: false, status: 404, error: "NOT_FOUND" };
 
   // Delete voice file (best-effort)
-  // Your create-video.js stores it at `${db_id}/voice.mp3` in VOICE_BUCKET
   try {
     await sb.storage.from(VOICE_BUCKET).remove([`${id}/voice.mp3`]);
   } catch (e) {
     console.error("[RENDERS_DELETE] voice remove failed", { id, message: String(e?.message || e) });
-    // keep going: we still delete the DB row
   }
 
   // Delete DB row
@@ -208,13 +239,10 @@ module.exports = async function handler(req, res) {
 
     // ---------------- POST ----------------
     if (req.method === "POST") {
-      const body =
-        typeof req.body === "string"
-          ? (safeJsonParse(req.body) || {})
-          : (req.body || {});
+      const body = typeof req.body === "string" ? safeJsonParse(req.body) || {} : req.body || {};
       const action = String(body?.action || "").trim();
 
-      // ✅ NEW: delete fallback
+      // ✅ delete fallback
       if (action === "delete") {
         const id = String(body?.id || "").trim();
         if (!id) return res.status(400).json({ ok: false, error: "MISSING_ID" });
@@ -276,6 +304,7 @@ module.exports = async function handler(req, res) {
           [`${CREATO_VIDEO_ELEMENT_ID}.source`]: String(row.video_url),
         };
 
+        // hide all known variants
         mods["Subtitles_Sentence.visible"] = false;
         mods["Subtitles_Karaoke.visible"] = false;
         mods["Subtitles_Word.visible"] = false;
@@ -342,9 +371,27 @@ module.exports = async function handler(req, res) {
     return res.status(405).json({ ok: false, error: "METHOD_NOT_ALLOWED" });
   } catch (err) {
     const msg = String(err?.message || err);
+    const code = err?.code;
 
-    if (msg.includes("MISSING_AUTH") || msg.includes("MEMBERSTACK") || msg.includes("INVALID_MEMBER")) {
-      return res.status(401).json({ ok: false, error: "UNAUTHORIZED", message: msg });
+    // ✅ Expired tokens = 401 (not 500)
+    if (code === "TOKEN_EXPIRED" || msg.includes("TOKEN_EXPIRED")) {
+      return res.status(401).json({
+        ok: false,
+        error: "TOKEN_EXPIRED",
+        message: "Session expired. Refresh the page and try again.",
+      });
+    }
+
+    if (code === "MISSING_AUTH" || msg.includes("MISSING_AUTH")) {
+      return res.status(401).json({ ok: false, error: "MISSING_AUTH" });
+    }
+
+    if (code === "INVALID_MEMBER_TOKEN" || msg.includes("INVALID_MEMBER")) {
+      return res.status(401).json({ ok: false, error: "INVALID_MEMBER_TOKEN" });
+    }
+
+    if (code === "MISSING_MEMBERSTACK_SECRET_KEY") {
+      return res.status(500).json({ ok: false, error: "MISSING_MEMBERSTACK_SECRET_KEY" });
     }
 
     console.error("[RENDERS] SERVER_ERROR", err);
