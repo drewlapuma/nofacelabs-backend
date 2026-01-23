@@ -8,6 +8,7 @@
 // - Uses px for font_size + stroke_width when user sends numbers (prevents gigantic vmin sizes)
 // - Uses correct field for active effect color: transcript_color
 // - Keeps x/y behavior (percent strings)
+// - Defaults font size to 48px if none provided
 // - Optional: maps font family if you send it (font_family / fontFamily)
 
 const https = require("https");
@@ -143,7 +144,6 @@ function clampNumber(val, min, max) {
 function withUnit(val, defaultUnit) {
   if (val === undefined || val === null) return undefined;
 
-  // number => add unit
   if (typeof val === "number") return `${val} ${defaultUnit}`;
 
   const s = String(val).trim();
@@ -163,9 +163,7 @@ function normHex(val) {
   let s = String(val).trim();
   if (!s) return undefined;
 
-  // allow "ffffff" => "#ffffff"
   if (!s.startsWith("#") && /^[0-9a-f]{3,8}$/i.test(s)) s = `#${s}`;
-
   return s;
 }
 
@@ -198,9 +196,9 @@ module.exports = async function handler(req, res) {
 
   const cs = captionSettings && typeof captionSettings === "object" ? captionSettings : {};
 
-  // ✅ Use px to avoid gigantic sizes when UI sends plain numbers
   const FONT_UNIT = "px";
   const STROKE_UNIT = "px";
+  const DEFAULT_FONT_SIZE = 48; // ✅ your new default
 
   const modifications = {
     "input_video.source": videoUrl,
@@ -227,33 +225,35 @@ module.exports = async function handler(req, res) {
   // Style keys (support multiple names your UI might send)
   const fontFamily = pick(cs, "font", "fontFamily", "font_family");
   const fontSizeRaw = pick(cs, "size", "fontSize", "font_size");
-  const fill = normHex(pick(cs, "fill", "fillColor", "fill_color"));
-  const stroke = normHex(pick(cs, "stroke", "strokeColor", "stroke_color"));
+
+  const fill = normHex(pick(cs, "fill", "fillColor", "fill_color", "fillColorHex"));
+  const stroke = normHex(pick(cs, "stroke", "strokeColor", "stroke_color", "strokeColorHex"));
   const strokeWidthRaw = pick(cs, "stroke_width", "strokeWidth");
+
   const activeColor = normHex(
     pick(cs, "transcript_color", "activeColor", "active_color", "effectColor", "effect_color")
   );
 
-  // Font family (if you pass it)
+  // Font family
   if (fontFamily) modifications[`${chosenLayer}.font_family`] = safeStr(fontFamily);
 
-  // Font size:
-  // If UI sends a number, clamp to sane range, then add "px".
-  // If UI sends "6.94 vmin" or "72 px", we keep it.
+  // ✅ Font size: DEFAULT to 48px if missing
   if (fontSizeRaw !== undefined) {
     if (typeof fontSizeRaw === "number" || /^\d+(\.\d+)?$/.test(String(fontSizeRaw).trim())) {
-      const n = clampNumber(fontSizeRaw, 10, 160); // adjust range if you want
+      const n = clampNumber(fontSizeRaw, 10, 160);
       if (n !== null) modifications[`${chosenLayer}.font_size`] = `${n} ${FONT_UNIT}`;
     } else {
       modifications[`${chosenLayer}.font_size`] = withUnit(fontSizeRaw, FONT_UNIT);
     }
+  } else {
+    modifications[`${chosenLayer}.font_size`] = `${DEFAULT_FONT_SIZE} ${FONT_UNIT}`;
   }
 
   // Colors
   if (fill) modifications[`${chosenLayer}.fill_color`] = safeStr(fill);
   if (stroke) modifications[`${chosenLayer}.stroke_color`] = safeStr(stroke);
 
-  // Stroke width (same clamp logic)
+  // Stroke width
   if (strokeWidthRaw !== undefined) {
     if (typeof strokeWidthRaw === "number" || /^\d+(\.\d+)?$/.test(String(strokeWidthRaw).trim())) {
       const n = clampNumber(strokeWidthRaw, 0, 20);
@@ -263,7 +263,7 @@ module.exports = async function handler(req, res) {
     }
   }
 
-  // Active/karaoke effect color
+  // Active / karaoke effect color
   if (activeColor) modifications[`${chosenLayer}.transcript_color`] = safeStr(activeColor);
 
   try {
