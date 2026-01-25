@@ -1,16 +1,26 @@
 // api/composite.js (CommonJS, Node 18 on Vercel)
 //
+// ✅ Uses Creatomate template to create a 9:16 composite (main + gameplay)
+// ✅ Accepts Supabase STORAGE PATHS + BUCKET names from /api/user-video-upload-url
+// ✅ Signs READ urls server-side (fixes "Object not found" when bucket mismatches)
+// ✅ Requires Memberstack auth (Option A): Authorization: Bearer <memberstack_jwt>
+//
 // POST /api/composite
 // Body (JSON):
 // {
-//   mainPath: "user_uploads/....mp4"               // preferred (Supabase storage path)
-//   backgroundPath: "user_uploads/....mp4"         // OR
-//   backgroundVideoUrl: "https://....mp4"          // optional if using library URL
+//   mainPath: "uploads/....mp4",
+//   mainBucket: "user-uploads",          // optional but recommended
+//
+//   backgroundPath: "uploads/....mp4",   // optional if backgroundVideoUrl provided
+//   backgroundBucket: "user-uploads",    // optional but recommended
+//   backgroundVideoUrl: "https://...mp4",// optional (library URL)
+//
 //   layout: "sideBySide" | "topBottom",
 //   mainSlot: "left"|"right"|"top"|"bottom",
 //   mainSpeed: 1.0,
 //   bgSpeed: 1.25,
 //   bgMuted: true,
+//
 //   captions: {
 //     enabled: true,
 //     style: "karaoke"|"sentence"|...,
@@ -18,11 +28,12 @@
 //   }
 // }
 //
-// GET /api/composite?id=CREATOMATE_RENDER_ID
-// -> { status, url?, error? }
+// GET /api/composite?id=<renderId>
+// Returns status + url when ready: { ok:true, status:"succeeded", url:"https://..." }
 
 const https = require("https");
 const { createClient } = require("@supabase/supabase-js");
+const memberstackAdmin = require("@memberstack/admin");
 
 // -------------------- CORS --------------------
 const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || "*")
@@ -44,24 +55,40 @@ function setCors(req, res) {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 }
 
-// -------------------- ENV --------------------
+function json(res, status, body) {
+  res.statusCode = status;
+  res.setHeader("Content-Type", "application/json");
+  res.end(JSON.stringify(body));
+}
+
+// -------------------- env --------------------
 const CREATOMATE_API_KEY = process.env.CREATOMATE_API_KEY;
 const TEMPLATE_ID = process.env.CREATOMATE_TEMPLATE_ID_COMPOSITE;
 
-// Supabase (service role) for signing read URLs from storage paths
+// Supabase signing (service role)
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const SUPABASE_BUCKET = process.env.SUPABASE_BUCKET || "videos"; // set this to your real bucket name
-const SIGNED_URL_TTL_SECONDS = Number(process.env.SIGNED_URL_TTL_SECONDS || 60 * 30); // 30 min
 
-function getSupabaseAdmin() {
-  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) return null;
-  return createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
-    auth: { persistSession: false },
-  });
-}
+// Fallback bucket (only used if body does not send bucket)
+const SUPABASE_BUCKET_FALLBACK =
+  process.env.SUPABASE_UPLOAD_BUCKET ||
+  process.env.USER_VIDEOS_BUCKET ||
+  process.env.SUPABASE_BUCKET ||
+  "user-uploads";
 
-// -------------------- Caption presets --------------------
+const SIGNED_URL_TTL_SECONDS = Number(process.env.SIGNED_URL_TTL_SECONDS || 60 * 60); // 1h default
+
+// Memberstack admin (Option A)
+const MEMBERSTACK_SECRET_KEY = process.env.MEMBERSTACK_SECRET_KEY;
+const memberstack = MEMBERSTACK_SECRET_KEY
+  ? memberstackAdmin.init(MEMBERSTACK_SECRET_KEY)
+  : null;
+
+// 9:16 fixed canvas for vmin conversion
+const CANVAS_W = 1080;
+const CANVAS_H = 1920;
+
+// -------------------- styles --------------------
 const STYLE_PRESETS = {
   sentence: { fontFamily: "Inter", fontSize: 48, fillColor: "#ffffff", strokeWidth: 7.2, strokeColor: "#000000", fontWeight: 700 },
   word: { fontFamily: "Staatliches", fontSize: 48, fillColor: "#ffffff", strokeWidth: 8.1, strokeColor: "#000000", fontWeight: 400 },
@@ -140,40 +167,13 @@ const SUBTITLE_NAME_MAP = {
 };
 
 // -------------------- helpers --------------------
-function readJson(req) {
-  return new Promise((resolve, reject) => {
-    let data = "";
-    req.on("data", (chunk) => (data += chunk));
-    req.on("end", () => {
-      try {
-        resolve(data ? JSON.parse(data) : {});
-      } catch (e) {
-        reject(e);
-      }
-    });
-  });
-}
-
-function httpsJson({ method, hostname, path, headers, body }) {
-  return new Promise((resolve, reject) => {
-    const req = https.request({ method, hostname, path, headers }, (res) => {
-      let raw = "";
-      res.on("data", (d) => (raw += d));
-      res.on("end", () => {
-        let parsed = null;
-        try { parsed = raw ? JSON.parse(raw) : null; } catch (_) {}
-
-        if (res.statusCode >= 200 && res.statusCode < 300) {
-          resolve(parsed);
-        } else {
-          reject(new Error(`HTTP ${res.statusCode} ${method} ${path} :: ${raw || "no body"}`));
-        }
-      });
-    });
-    req.on("error", reject);
-    if (body) req.write(JSON.stringify(body));
-    req.end();
-  });
+async function readJson(req) {
+  if (req.body && typeof req.body === "object") return req.body;
+  const chunks = [];
+  for await (const c of req) chunks.push(c);
+  const raw = Buffer.concat(chunks).toString("utf8").trim();
+  if (!raw) return {};
+  return JSON.parse(raw);
 }
 
 function clamp(n, min, max) {
@@ -186,7 +186,7 @@ function toPercentString(v) {
   return `${clamp(v, 0, 100)}%`;
 }
 
-function pxToVmin(px, canvasW = 1080, canvasH = 1920) {
+function pxToVmin(px, canvasW = CANVAS_W, canvasH = CANVAS_H) {
   const vminPx = Math.min(canvasW, canvasH) / 100;
   return Number(px) / vminPx;
 }
@@ -199,14 +199,97 @@ function snapSpeed(x) {
   let bestD = Infinity;
   for (const s of SPEED_STEPS) {
     const d = Math.abs(s - n);
-    if (d < bestD) { bestD = d; best = s; }
+    if (d < bestD) {
+      bestD = d;
+      best = s;
+    }
   }
   return best;
 }
 
-function buildSubtitleProps(styleKey, overrides = {}, canvasW = 1080, canvasH = 1920) {
+function httpsJson({ method, hostname, path, headers, body }) {
+  return new Promise((resolve, reject) => {
+    const req = https.request({ method, hostname, path, headers }, (res) => {
+      let raw = "";
+      res.on("data", (d) => (raw += d));
+      res.on("end", () => {
+        let parsed = null;
+        try { parsed = raw ? JSON.parse(raw) : null; } catch (_) {}
+        if (res.statusCode >= 200 && res.statusCode < 300) resolve(parsed);
+        else reject(new Error(`HTTP ${res.statusCode} ${method} ${path} :: ${raw || "no body"}`));
+      });
+    });
+    req.on("error", reject);
+    if (body) req.write(JSON.stringify(body));
+    req.end();
+  });
+}
+
+// -------------------- auth (Option A) --------------------
+function getBearerToken(req) {
+  const h = req.headers.authorization || req.headers.Authorization;
+  if (!h) return null;
+  const s = String(h);
+  if (!s.toLowerCase().startsWith("bearer ")) return null;
+  return s.slice(7).trim();
+}
+
+async function requireMember(req) {
+  if (!memberstack) throw new Error("Server missing MEMBERSTACK_SECRET_KEY");
+
+  const token = getBearerToken(req);
+  if (!token) {
+    const e = new Error("MISSING_AUTH");
+    e.status = 401;
+    throw e;
+  }
+
+  // Memberstack admin JWT verification
+  try {
+    const result = await memberstack.verifyToken({ token });
+    const memberId = result?.data?.id || result?.id || null;
+    if (!memberId) {
+      const e = new Error("INVALID_AUTH");
+      e.status = 401;
+      throw e;
+    }
+    return { memberId };
+  } catch (err) {
+    const e = new Error("INVALID_AUTH");
+    e.status = 401;
+    throw e;
+  }
+}
+
+// -------------------- supabase signing --------------------
+function getSupabaseAdmin() {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) return null;
+  return createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+    auth: { persistSession: false },
+  });
+}
+
+async function signReadUrlFromPath(path, bucketOverride) {
+  const supabase = getSupabaseAdmin();
+  if (!supabase) {
+    throw new Error("Missing SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY for signing read URLs.");
+  }
+
+  const bucket = String(bucketOverride || SUPABASE_BUCKET_FALLBACK || "").trim();
+  if (!bucket) throw new Error("Missing bucket for signing.");
+
+  const { data, error } = await supabase.storage.from(bucket).createSignedUrl(path, SIGNED_URL_TTL_SECONDS);
+
+  if (error) throw new Error("Signed read URL error: " + error.message);
+  if (!data?.signedUrl) throw new Error("Signed read URL missing signedUrl");
+  return data.signedUrl;
+}
+
+// -------------------- template mutation --------------------
+function buildSubtitleProps(styleKey, overrides = {}, canvasW = CANVAS_W, canvasH = CANVAS_H) {
   const preset = STYLE_PRESETS[styleKey] || {};
   const merged = { ...BASE_DEFAULTS, ...preset, ...overrides };
+
   const effect = EFFECT_MAP[styleKey] || "sentence";
 
   const fontSizeVmin = pxToVmin(merged.fontSize, canvasW, canvasH);
@@ -215,6 +298,8 @@ function buildSubtitleProps(styleKey, overrides = {}, canvasW = 1080, canvasH = 
   const props = {
     x_alignment: toPercentString(merged.x),
     y_alignment: toPercentString(merged.y),
+    width: merged.width ? String(merged.width) : undefined,
+    height: merged.height ? String(merged.height) : undefined,
 
     font_family: merged.fontFamily,
     font_weight: String(merged.fontWeight ?? 400),
@@ -225,8 +310,8 @@ function buildSubtitleProps(styleKey, overrides = {}, canvasW = 1080, canvasH = 
     stroke_width: `${strokeVmin.toFixed(2)} vmin`,
 
     transcript_effect: effect,
-    transcript_color: merged.activeColor,   // active highlight color
-    transcript_source: "input_video",       // ✅ use your existing template input video
+    transcript_color: merged.activeColor,
+    transcript_source: "input_video",
     dynamic: true,
   };
 
@@ -237,53 +322,12 @@ function buildSubtitleProps(styleKey, overrides = {}, canvasW = 1080, canvasH = 
   return props;
 }
 
-function getSlotRects(layout, mainSlot) {
-  if (layout === "topBottom") {
-    if (mainSlot === "bottom") {
-      return {
-        main: { x: 50, y: 75, w: 100, h: 50 },
-        bg:   { x: 50, y: 25, w: 100, h: 50 },
-      };
-    }
-    return {
-      main: { x: 50, y: 25, w: 100, h: 50 },
-      bg:   { x: 50, y: 75, w: 100, h: 50 },
-    };
-  }
-
-  if (mainSlot === "right") {
-    return {
-      main: { x: 75, y: 50, w: 50, h: 100 },
-      bg:   { x: 25, y: 50, w: 50, h: 100 },
-    };
-  }
-  return {
-    main: { x: 25, y: 50, w: 50, h: 100 },
-    bg:   { x: 75, y: 50, w: 50, h: 100 },
-  };
-}
-
-function applyVideoSlot(el, rect, { muted, speed }) {
-  el.x_alignment = toPercentString(rect.x);
-  el.y_alignment = toPercentString(rect.y);
-  el.width = `${rect.w}%`;
-  el.height = `${rect.h}%`;
-
-  el.playback_rate = speed;
-
-  if (muted) {
-    el.volume = 0;
-    el.muted = true;
-  }
-}
-
 function applyCaptions(template, styleKey, overrides, canvasW, canvasH) {
   const chosenName = SUBTITLE_NAME_MAP[styleKey] || null;
 
   for (const el of template.elements || []) {
     if (!el || typeof el !== "object") continue;
     const name = String(el.name || "");
-
     if (!name.startsWith("Subtitles_")) continue;
 
     const isChosen = chosenName && name.toLowerCase() === chosenName.toLowerCase();
@@ -293,6 +337,38 @@ function applyCaptions(template, styleKey, overrides, canvasW, canvasH) {
       const props = buildSubtitleProps(styleKey, overrides, canvasW, canvasH);
       Object.assign(el, props);
     }
+  }
+}
+
+function getSlotRects(layout, mainSlot) {
+  if (layout === "topBottom") {
+    if (mainSlot === "bottom") {
+      return { main: { x: 50, y: 75, w: 100, h: 50 }, bg: { x: 50, y: 25, w: 100, h: 50 } };
+    }
+    return { main: { x: 50, y: 25, w: 100, h: 50 }, bg: { x: 50, y: 75, w: 100, h: 50 } };
+  }
+
+  // sideBySide
+  if (mainSlot === "right") {
+    return { main: { x: 75, y: 50, w: 50, h: 100 }, bg: { x: 25, y: 50, w: 50, h: 100 } };
+  }
+  return { main: { x: 25, y: 50, w: 50, h: 100 }, bg: { x: 75, y: 50, w: 50, h: 100 } };
+}
+
+function applyVideoSlot(el, rect, { muted, speed }) {
+  el.x_alignment = toPercentString(rect.x);
+  el.y_alignment = toPercentString(rect.y);
+  el.width = `${rect.w}%`;
+  el.height = `${rect.h}%`;
+
+  if (el.fit) el.fit = "cover";
+  if (el.scale_mode) el.scale_mode = "cover";
+
+  el.playback_rate = speed;
+
+  if (muted) {
+    el.volume = 0;
+    el.muted = true;
   }
 }
 
@@ -344,96 +420,91 @@ async function getRenderStatus(renderId) {
       "Content-Type": "application/json",
     },
   });
-
-  // typical fields: status, url, error
-  return {
-    status: data?.status || "unknown",
-    url: data?.url || data?.result_url || null,
-    error: data?.error || null,
-  };
-}
-
-// -------------------- Supabase signed read URL --------------------
-async function signReadUrlFromPath(path, bucketOverride) {
-  const supabase = getSupabaseAdmin();
-  if (!supabase) {
-    throw new Error("Missing SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY for signing read URLs.");
-  }
-
-  const bucket = String(bucketOverride || SUPABASE_BUCKET || "").trim();
-  if (!bucket) throw new Error("Missing SUPABASE_BUCKET (or bucketOverride).");
-
-  const { data, error } = await supabase.storage
-    .from(bucket)
-    .createSignedUrl(path, SIGNED_URL_TTL_SECONDS);
-
-  if (error) throw new Error("Signed read URL error: " + error.message);
-  if (!data?.signedUrl) throw new Error("Signed read URL missing signedUrl");
-  return data.signedUrl;
+  // common fields: status + url (when done)
+  return data || {};
 }
 
 // -------------------- handler --------------------
 module.exports = async (req, res) => {
   setCors(req, res);
-  if (req.method === "OPTIONS") return res.status(200).end();
+  if (req.method === "OPTIONS") return json(res, 200, { ok: true });
 
   try {
-    if (!CREATOMATE_API_KEY) return res.status(500).json({ error: "Missing CREATOMATE_API_KEY" });
-    if (!TEMPLATE_ID) return res.status(500).json({ error: "Missing CREATOMATE_TEMPLATE_ID_COMPOSITE" });
+    // ✅ Require auth for both GET and POST (Option A)
+    await requireMember(req);
 
-    // GET: poll render status
+    if (!CREATOMATE_API_KEY) return json(res, 500, { ok: false, error: "Missing CREATOMATE_API_KEY" });
+    if (!TEMPLATE_ID) return json(res, 500, { ok: false, error: "Missing CREATOMATE_TEMPLATE_ID_COMPOSITE" });
+
+    // -------- GET status --------
     if (req.method === "GET") {
-      const id = String(req.query?.id || "").trim();
-      if (!id) return res.status(400).json({ error: "id required" });
+      const urlObj = new URL(req.url, "http://localhost");
+      const id = urlObj.searchParams.get("id");
+      if (!id) return json(res, 400, { ok: false, error: "Missing id" });
 
       const s = await getRenderStatus(id);
-      return res.status(200).json(s);
+      const status = String(s.status || "").toLowerCase();
+
+      const out = {
+        ok: true,
+        id,
+        status: s.status || status,
+        url: s.url || s.result_url || s.download_url || null,
+        error: s.error || null,
+      };
+      return json(res, 200, out);
     }
 
-    // POST: start render
-    if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+    // -------- POST create render --------
+    if (req.method !== "POST") {
+      return json(res, 405, { ok: false, error: "Method not allowed" });
+    }
 
     const body = await readJson(req);
 
-    // Accept either paths or urls
     const mainPath = String(body.mainPath || "").trim();
+    const mainBucket = String(body.mainBucket || "").trim();
+
     const backgroundPath = String(body.backgroundPath || "").trim();
-    const mainVideoUrlRaw = String(body.mainVideoUrl || "").trim();
+    const backgroundBucket = String(body.backgroundBucket || "").trim();
+
     const backgroundVideoUrlRaw = String(body.backgroundVideoUrl || "").trim();
 
-    if (!mainPath && !mainVideoUrlRaw) return res.status(400).json({ error: "mainPath or mainVideoUrl required" });
-    if (!backgroundPath && !backgroundVideoUrlRaw) return res.status(400).json({ error: "backgroundPath or backgroundVideoUrl required" });
-
     const layout = (body.layout === "topBottom" ? "topBottom" : "sideBySide");
-    const mainSlot = String(body.mainSlot || (layout === "topBottom" ? "top" : "left")).toLowerCase();
+    const mainSlotRaw = String(body.mainSlot || (layout === "topBottom" ? "top" : "left")).toLowerCase();
+    const mainSlot = (layout === "topBottom")
+      ? (mainSlotRaw === "bottom" ? "bottom" : "top")
+      : (mainSlotRaw === "right" ? "right" : "left");
 
     const mainSpeed = snapSpeed(body.mainSpeed);
     const bgSpeed = snapSpeed(body.bgSpeed);
-
-    const bgMuted = body.bgMuted !== false; // default true
+    const bgMuted = (body.bgMuted !== false); // default true
 
     const captions = body.captions || {};
     const captionsEnabled = !!captions.enabled;
     const captionStyle = String(captions.style || "sentence").toLowerCase();
-    const captionOverrides = captions.settings && typeof captions.settings === "object" ? captions.settings : {};
+    const captionOverrides = (captions.settings && typeof captions.settings === "object") ? captions.settings : {};
 
-    // Resolve sources
-    const mainBucket = String(body.mainBucket || "").trim();
-const backgroundBucket = String(body.backgroundBucket || "").trim();
+    if (!mainPath) return json(res, 400, { ok: false, error: "mainPath required" });
+    if (!backgroundVideoUrlRaw && !backgroundPath) {
+      return json(res, 400, { ok: false, error: "backgroundPath or backgroundVideoUrl required" });
+    }
 
-const mainVideoUrl = mainVideoUrlRaw || await signReadUrlFromPath(mainPath, mainBucket);
-const backgroundVideoUrl = backgroundVideoUrlRaw || await signReadUrlFromPath(backgroundPath, backgroundBucket);
+    // ✅ Sign READ URLs from correct bucket (fixes your current error)
+    const mainVideoUrl = await signReadUrlFromPath(mainPath, mainBucket || SUPABASE_BUCKET_FALLBACK);
+    const backgroundVideoUrl = backgroundVideoUrlRaw
+      ? backgroundVideoUrlRaw
+      : await signReadUrlFromPath(backgroundPath, backgroundBucket || SUPABASE_BUCKET_FALLBACK);
 
-
-    // 1) Load template JSON
+    // 1) Load template JSON from Creatomate
     const template = await fetchTemplateJson(TEMPLATE_ID);
+
+    // 2) Find main + bg elements by name
     const elements = Array.isArray(template.elements) ? template.elements : [];
 
-    // 2) Find required input_video
     const mainEl = elements.find((e) => String(e.name || "") === "input_video");
-    if (!mainEl) return res.status(500).json({ error: "Template missing required element named 'input_video'" });
+    if (!mainEl) return json(res, 500, { ok: false, error: "Template missing required element named 'input_video'" });
 
-    // 3) Ensure bg_video exists
     let bgEl = elements.find((e) => String(e.name || "") === "bg_video");
     if (!bgEl) {
       bgEl = {
@@ -451,29 +522,28 @@ const backgroundVideoUrl = backgroundVideoUrlRaw || await signReadUrlFromPath(ba
       template.elements = elements;
     }
 
-    // 4) Set sources
+    // 3) Set sources
     mainEl.source = mainVideoUrl;
     mainEl.src = mainVideoUrl;
 
     bgEl.source = backgroundVideoUrl;
     bgEl.src = backgroundVideoUrl;
 
-    // 5) Slot layout
+    // 4) Slot rects + apply
     const rects = getSlotRects(layout, mainSlot);
 
-    // Ensure layering: bg below main
     bgEl.track = 1;
     mainEl.track = 2;
 
-    applyVideoSlot(bgEl, rects.bg, { muted: bgMuted, speed: bgSpeed });
+    applyVideoSlot(bgEl, rects.bg, { muted: !!bgMuted, speed: bgSpeed });
     applyVideoSlot(mainEl, rects.main, { muted: false, speed: mainSpeed });
 
-    // 6) Captions
+    // 5) Captions
     if (captionsEnabled) {
       if (!STYLE_PRESETS[captionStyle]) {
-        return res.status(400).json({ error: `Unknown caption style: ${captionStyle}` });
+        return json(res, 400, { ok: false, error: `Unknown caption style: ${captionStyle}` });
       }
-      applyCaptions(template, captionStyle, captionOverrides, 1080, 1920);
+      applyCaptions(template, captionStyle, captionOverrides, CANVAS_W, CANVAS_H);
     } else {
       for (const el of template.elements || []) {
         const name = String(el.name || "");
@@ -481,13 +551,15 @@ const backgroundVideoUrl = backgroundVideoUrlRaw || await signReadUrlFromPath(ba
       }
     }
 
-    // 7) Render
+    // 6) Render
     const renderId = await createRenderFromTemplate(template);
+    return json(res, 200, { ok: true, renderId });
 
-    return res.status(200).json({ renderId });
   } catch (err) {
-    return res.status(500).json({
-      error: err && err.message ? err.message : "Unknown error",
+    const status = err?.status ? Number(err.status) : 500;
+    return json(res, status, {
+      ok: false,
+      error: err?.message || "Unknown error",
     });
   }
 };
