@@ -2,10 +2,12 @@
 // REQUIRED query params:
 //   ?id=<renders.id>&kind=main
 //   ?id=<renders.id>&kind=caption
+//   ?id=<renders.id>&kind=composite
 //
 // Updates:
 // - MAIN: status + video_url (+ render_id if missing)
 // - CAPTION: caption_status + captioned_video_url
+// - COMPOSITE: composite_status + composite_video_url (+ composite_job_id optional)
 //
 // IMPORTANT: If the webhook body already says succeeded/failed AND contains a URL,
 // we update immediately (do NOT call GET, do NOT downgrade status).
@@ -49,7 +51,7 @@ module.exports = async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ ok: false, error: "METHOD_NOT_ALLOWED" });
 
   const dbId = String(req.query?.id || "").trim();
-  const kind = String(req.query?.kind || "").trim().toLowerCase(); // "main" | "caption"
+  const kind = String(req.query?.kind || "").trim().toLowerCase(); // "main" | "caption" | "composite"
   if (!dbId) return res.status(200).json({ ok: true, skipped: "MISSING_DB_ID" });
 
   const sb = getAdminSupabase();
@@ -72,9 +74,27 @@ module.exports = async function handler(req, res) {
     });
 
     // ✅ Select ONLY columns that exist in your table
+    // Added composite_* fields
     const { data: row, error: readErr } = await sb
       .from("renders")
-      .select("id, member_id, render_id, status, video_url, caption_status, captioned_video_url, error, caption_error, caption_template_id")
+      .select(
+        [
+          "id",
+          "member_id",
+          "render_id",
+          "status",
+          "video_url",
+          "error",
+          "caption_status",
+          "captioned_video_url",
+          "caption_error",
+          "caption_template_id",
+          "composite_status",
+          "composite_video_url",
+          "composite_error",
+          "composite_job_id",
+        ].join(",")
+      )
       .eq("id", dbId)
       .single();
 
@@ -85,7 +105,12 @@ module.exports = async function handler(req, res) {
     }
 
     const mainId = String(row.render_id || "").trim();
-    const renderIdToFetch = incomingRenderId || mainId || "";
+    const compositeId = String(row.composite_job_id || "").trim();
+    // If Creatomate doesn't always send id, fallback to row-stored ids:
+    const renderIdToFetch =
+      incomingRenderId ||
+      (kind === "composite" ? compositeId : mainId) ||
+      "";
 
     // ------------------------------------------------------------
     // ✅ MAIN
@@ -233,7 +258,81 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ ok: true });
     }
 
-    console.warn("[CREATOMATE_WEBHOOK] missing kind, retry", { dbId });
+    // ------------------------------------------------------------
+    // ✅ COMPOSITE
+    // ------------------------------------------------------------
+    if (kind === "composite") {
+      // ✅ If webhook says terminal + URL, TRUST IT
+      if (bodyStatus === "succeeded" && bodyUrl) {
+        const patch = {
+          composite_status: "completed",
+          composite_video_url: String(bodyUrl),
+          composite_error: null,
+          composite_job_id: compositeId || incomingRenderId || null,
+        };
+
+        const { error: updErr } = await sb.from("renders").update(patch).eq("id", dbId);
+        if (updErr) {
+          console.error("[CREATOMATE_WEBHOOK] composite immediate update failed", updErr);
+          return res.status(500).json({ ok: false, error: "DB_UPDATE_FAILED_RETRY" });
+        }
+
+        console.log("[CREATOMATE_WEBHOOK] composite updated (body)", { dbId, status: patch.composite_status });
+        return res.status(200).json({ ok: true });
+      }
+
+      // Otherwise: GET (optional)
+      let rObj = null;
+      let getStatus = "";
+      let getUrl = null;
+
+      if (renderIdToFetch) {
+        try {
+          rObj = await creatomateGetRender(renderIdToFetch);
+          getStatus = normStatus(rObj?.status || "");
+          getUrl = extractOutputUrl(rObj);
+        } catch (e) {
+          console.warn("[CREATOMATE_WEBHOOK] composite GET failed, fallback to body", { message: String(e?.message || e) });
+        }
+      }
+
+      const finalStatus =
+        bodyStatus === "succeeded" || bodyStatus === "failed"
+          ? bodyStatus
+          : getStatus || "rendering";
+
+      const finalUrl = bodyUrl || getUrl || null;
+
+      const patch = {
+        composite_job_id: compositeId || incomingRenderId || null,
+        composite_status: finalStatus === "succeeded" ? "completed" : finalStatus,
+      };
+
+      if (finalStatus === "succeeded" && finalUrl) {
+        patch.composite_status = "completed";
+        patch.composite_video_url = String(finalUrl);
+        patch.composite_error = null;
+      } else if (finalStatus === "failed") {
+        patch.composite_status = "failed";
+        patch.composite_error = JSON.stringify(rObj || body || {});
+      }
+
+      const { error: updErr } = await sb.from("renders").update(patch).eq("id", dbId);
+      if (updErr) {
+        console.error("[CREATOMATE_WEBHOOK] composite update failed", updErr);
+        return res.status(500).json({ ok: false, error: "DB_UPDATE_FAILED_RETRY" });
+      }
+
+      console.log("[CREATOMATE_WEBHOOK] composite updated", {
+        dbId,
+        status: patch.composite_status,
+        hasComposite: Boolean(patch.composite_video_url),
+      });
+
+      return res.status(200).json({ ok: true });
+    }
+
+    console.warn("[CREATOMATE_WEBHOOK] missing/unknown kind, retry", { dbId, kind });
     return res.status(500).json({ ok: false, error: "MISSING_KIND_RETRY" });
   } catch (e) {
     console.error("[CREATOMATE_WEBHOOK] fatal", String(e?.message || e));
