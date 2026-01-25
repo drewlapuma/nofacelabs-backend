@@ -1,40 +1,28 @@
 // api/composite.js (CommonJS, Node 18 on Vercel)
 //
-// POST /api/composite (JSON)
+// POST /api/composite
+// Body (JSON):
 // {
-//   mainPath: "user/..../main.mp4"            // preferred (Supabase Storage path)
-//   OR mainVideoUrl: "https://...mp4"         // optional
-//
-//   backgroundPath: "user/..../bg.mp4"        // preferred
-//   OR backgroundVideoUrl: "https://...mp4"   // optional
-//
+//   mainPath: "user_uploads/....mp4"               // preferred (Supabase storage path)
+//   backgroundPath: "user_uploads/....mp4"         // OR
+//   backgroundVideoUrl: "https://....mp4"          // optional if using library URL
 //   layout: "sideBySide" | "topBottom",
 //   mainSlot: "left"|"right"|"top"|"bottom",
-//   mainSpeed: 1,
-//   bgSpeed: 1,
+//   mainSpeed: 1.0,
+//   bgSpeed: 1.25,
 //   bgMuted: true,
-//
 //   captions: {
 //     enabled: true,
-//     style: "sentence"|"karaoke"|...,
+//     style: "karaoke"|"sentence"|...,
 //     settings: { x:50, y:82, fontSize:48, fillColor:"#fff", strokeWidth:8.1, strokeColor:"#000", activeColor:"#00FF49", fontFamily:"...", fontWeight:700 }
 //   }
 // }
 //
-// Returns: { ok:true, renderId }
-//
-// GET /api/composite?id=<renderId>
-// Returns: { ok:true, status:"rendering|succeeded|failed", url? }
-//
-// Notes:
-// - Uses Creatomate template_id + modifications (fast + reliable)
-// - Expects template has elements named: "input_video" and "bg_video"
-// - Expects subtitle variants named like: "Subtitles_Sentence", "Subtitles_Karaoke", etc.
-// - Background ALWAYS muted (volume=0, muted=true)
+// GET /api/composite?id=CREATOMATE_RENDER_ID
+// -> { status, url?, error? }
 
 const https = require("https");
-const memberstackAdmin = require("@memberstack/admin");
-const { getAdminSupabase } = require("./_lib/supabase");
+const { createClient } = require("@supabase/supabase-js");
 
 // -------------------- CORS --------------------
 const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || "*")
@@ -50,65 +38,53 @@ function setCors(req, res) {
   } else if (origin && ALLOW_ORIGINS.includes(origin)) {
     res.setHeader("Access-Control-Allow-Origin", origin);
     res.setHeader("Vary", "Origin");
-  } else {
-    // fallback: allow same-origin + non-browser
-    res.setHeader("Access-Control-Allow-Origin", "*");
   }
 
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-  res.setHeader("Access-Control-Max-Age", "86400");
 }
 
-// -------------------- Memberstack auth (optional) --------------------
-const MEMBERSTACK_SECRET_KEY = process.env.MEMBERSTACK_SECRET_KEY;
-const ms = MEMBERSTACK_SECRET_KEY ? memberstackAdmin.init(MEMBERSTACK_SECRET_KEY) : null;
+// -------------------- ENV --------------------
+const CREATOMATE_API_KEY = process.env.CREATOMATE_API_KEY;
+const TEMPLATE_ID = process.env.CREATOMATE_TEMPLATE_ID_COMPOSITE;
 
-function getBearerToken(req) {
-  const h = req.headers.authorization || req.headers.Authorization || "";
-  const m = String(h).match(/^Bearer\s+(.+)$/i);
-  return m ? m[1].trim() : null;
+// Supabase (service role) for signing read URLs from storage paths
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const SUPABASE_BUCKET = process.env.SUPABASE_BUCKET || "videos"; // set this to your real bucket name
+const SIGNED_URL_TTL_SECONDS = Number(process.env.SIGNED_URL_TTL_SECONDS || 60 * 30); // 30 min
+
+function getSupabaseAdmin() {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) return null;
+  return createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+    auth: { persistSession: false },
+  });
 }
 
-async function requireMemberIdIfConfigured(req) {
-  if (!ms) return null; // allow if not configured
-  const token = getBearerToken(req);
-  if (!token) {
-    const e = new Error("MISSING_AUTH");
-    e.code = "MISSING_AUTH";
-    throw e;
-  }
-  const out = await ms.verifyToken({ token });
-  return out?.id ? String(out.id) : null;
-}
-
-// -------------------- Creatomate --------------------
-const CREATOMATE_API_KEY = (process.env.CREATOMATE_API_KEY || "").trim();
-const TEMPLATE_ID = (process.env.CREATOMATE_TEMPLATE_ID_COMPOSITE || process.env.CREATO_COMPOSITE_TEMPLATE_916 || "").trim();
-
-// If your storage bucket for uploaded videos differs, set VIDEO_BUCKET env
-const VIDEO_BUCKET = (process.env.VIDEO_BUCKET || process.env.USER_VIDEO_BUCKET || "user_videos").trim();
-
-// Canvas dims for px->vmin conversions (9:16)
-const CANVAS_W = 1080;
-const CANVAS_H = 1920;
-
-// -------------------- Your caption presets --------------------
+// -------------------- Caption presets --------------------
 const STYLE_PRESETS = {
   sentence: { fontFamily: "Inter", fontSize: 48, fillColor: "#ffffff", strokeWidth: 7.2, strokeColor: "#000000", fontWeight: 700 },
   word: { fontFamily: "Staatliches", fontSize: 48, fillColor: "#ffffff", strokeWidth: 8.1, strokeColor: "#000000", fontWeight: 400 },
   boldwhite: { fontFamily: "Luckiest Guy", fontSize: 48, fillColor: "#ffffff", strokeWidth: 9.9, strokeColor: "#00000040", fontWeight: 400 },
+
   karaoke: { fontFamily: "The Bold Font", fontSize: 48, fillColor: "#ffffff", strokeWidth: 8.1, strokeColor: "#000000", activeColor: "#00FF49", fontWeight: 700 },
+
   yellowpop: { fontFamily: "Komika Axis", fontSize: 48, fillColor: "#ffffff", strokeWidth: 10.8, strokeColor: "#000000", activeColor: "#FFFB00", fontWeight: 400 },
   minttag: { fontFamily: "Titan One", fontSize: 48, fillColor: "#ffffff", strokeWidth: 8.1, strokeColor: "#000000", activeColor: "#00D9FF", fontWeight: 400 },
   highlighter: { fontFamily: "Luckiest Guy", fontSize: 48, fillColor: "#ffffff", strokeWidth: 7.2, strokeColor: "#000000", activeColor: "#FDFF00", fontWeight: 400 },
+
   purplepop: { fontFamily: "Komika Axis", fontSize: 48, fillColor: "#ffffff", strokeWidth: 9, strokeColor: "#000000", activeColor: "#3F00FF", fontWeight: 400 },
+
   outlinepunch: { fontFamily: "Anton", fontSize: 48, fillColor: "#ffffff", strokeWidth: 11.7, strokeColor: "#000000", fontWeight: 400 },
+
   blackbar: { fontFamily: "Poppins", fontSize: 48, fillColor: "#ffffff", strokeWidth: 0, strokeColor: "#000000", backgroundColor: "#000000", fontWeight: 700 },
   neonglow: { fontFamily: "Titan One", fontSize: 48, fillColor: "#ffffff", strokeWidth: 0, strokeColor: "#000000", shadowColor: "#00D9FF", fontWeight: 400 },
+
   compactlowerthird: { fontFamily: "Inter", fontSize: 46, fillColor: "#ffffff", strokeWidth: 0, strokeColor: "#000000", fontWeight: 700 },
+
   bouncepop: { fontFamily: "Luckiest Guy", fontSize: 48, fillColor: "#ffffff", strokeWidth: 7.2, strokeColor: "#333333", fontWeight: 400 },
   redalert: { fontFamily: "Sigmar One", fontSize: 48, fillColor: "#ff2d2d", strokeWidth: 11.7, strokeColor: "#000000", fontWeight: 400 },
+
   redtag: { fontFamily: "Titan One", fontSize: 48, fillColor: "#ffffff", strokeWidth: 8.1, strokeColor: "#000000", activeColor: "#F6295C", fontWeight: 400 },
 };
 
@@ -164,8 +140,40 @@ const SUBTITLE_NAME_MAP = {
 };
 
 // -------------------- helpers --------------------
-function safeJsonParse(s) {
-  try { return JSON.parse(s); } catch { return null; }
+function readJson(req) {
+  return new Promise((resolve, reject) => {
+    let data = "";
+    req.on("data", (chunk) => (data += chunk));
+    req.on("end", () => {
+      try {
+        resolve(data ? JSON.parse(data) : {});
+      } catch (e) {
+        reject(e);
+      }
+    });
+  });
+}
+
+function httpsJson({ method, hostname, path, headers, body }) {
+  return new Promise((resolve, reject) => {
+    const req = https.request({ method, hostname, path, headers }, (res) => {
+      let raw = "";
+      res.on("data", (d) => (raw += d));
+      res.on("end", () => {
+        let parsed = null;
+        try { parsed = raw ? JSON.parse(raw) : null; } catch (_) {}
+
+        if (res.statusCode >= 200 && res.statusCode < 300) {
+          resolve(parsed);
+        } else {
+          reject(new Error(`HTTP ${res.statusCode} ${method} ${path} :: ${raw || "no body"}`));
+        }
+      });
+    });
+    req.on("error", reject);
+    if (body) req.write(JSON.stringify(body));
+    req.end();
+  });
 }
 
 function clamp(n, min, max) {
@@ -178,8 +186,8 @@ function toPercentString(v) {
   return `${clamp(v, 0, 100)}%`;
 }
 
-function pxToVmin(px, canvasW = CANVAS_W, canvasH = CANVAS_H) {
-  const vminPx = Math.min(canvasW, canvasH) / 100; // 10.8 for 1080x1920
+function pxToVmin(px, canvasW = 1080, canvasH = 1920) {
+  const vminPx = Math.min(canvasW, canvasH) / 100;
   return Number(px) / vminPx;
 }
 
@@ -196,41 +204,13 @@ function snapSpeed(x) {
   return best;
 }
 
-function getSlotRects(layout, mainSlot) {
-  // returns center-based percent rects: { x,y,w,h }
-  if (layout === "topBottom") {
-    if (mainSlot === "bottom") {
-      return {
-        main: { x: 50, y: 75, w: 100, h: 50 },
-        bg:   { x: 50, y: 25, w: 100, h: 50 },
-      };
-    }
-    return {
-      main: { x: 50, y: 25, w: 100, h: 50 },
-      bg:   { x: 50, y: 75, w: 100, h: 50 },
-    };
-  }
-
-  // sideBySide
-  if (mainSlot === "right") {
-    return {
-      main: { x: 75, y: 50, w: 50, h: 100 },
-      bg:   { x: 25, y: 50, w: 50, h: 100 },
-    };
-  }
-  return {
-    main: { x: 25, y: 50, w: 50, h: 100 },
-    bg:   { x: 75, y: 50, w: 50, h: 100 },
-  };
-}
-
-function buildSubtitleProps(styleKey, overrides = {}) {
+function buildSubtitleProps(styleKey, overrides = {}, canvasW = 1080, canvasH = 1920) {
   const preset = STYLE_PRESETS[styleKey] || {};
-  const merged = { ...BASE_DEFAULTS, ...preset, ...(overrides || {}) };
-
+  const merged = { ...BASE_DEFAULTS, ...preset, ...overrides };
   const effect = EFFECT_MAP[styleKey] || "sentence";
-  const fontSizeVmin = pxToVmin(merged.fontSize);
-  const strokeVmin = pxToVmin(merged.strokeWidth);
+
+  const fontSizeVmin = pxToVmin(merged.fontSize, canvasW, canvasH);
+  const strokeVmin = pxToVmin(merged.strokeWidth, canvasW, canvasH);
 
   const props = {
     x_alignment: toPercentString(merged.x),
@@ -245,239 +225,261 @@ function buildSubtitleProps(styleKey, overrides = {}) {
     stroke_width: `${strokeVmin.toFixed(2)} vmin`,
 
     transcript_effect: effect,
-    transcript_color: merged.activeColor,    // ✅ active highlight color
-    transcript_source: "input_video",
+    transcript_color: merged.activeColor,   // active highlight color
+    transcript_source: "input_video",       // ✅ use your existing template input video
     dynamic: true,
   };
 
-  // keep blackbar + neonglow behavior
   if (styleKey === "blackbar") props.background_color = merged.backgroundColor || "#000000";
   if (styleKey === "neonglow") props.shadow_color = merged.shadowColor || "#00D9FF";
 
-  // strip undefined
-  Object.keys(props).forEach(k => props[k] === undefined && delete props[k]);
+  Object.keys(props).forEach((k) => props[k] === undefined && delete props[k]);
   return props;
 }
 
-function httpsJson({ method, hostname, path, headers, bodyObj }) {
-  return new Promise((resolve, reject) => {
-    const body = bodyObj ? JSON.stringify(bodyObj) : null;
+function getSlotRects(layout, mainSlot) {
+  if (layout === "topBottom") {
+    if (mainSlot === "bottom") {
+      return {
+        main: { x: 50, y: 75, w: 100, h: 50 },
+        bg:   { x: 50, y: 25, w: 100, h: 50 },
+      };
+    }
+    return {
+      main: { x: 50, y: 25, w: 100, h: 50 },
+      bg:   { x: 50, y: 75, w: 100, h: 50 },
+    };
+  }
 
-    const req = https.request(
-      { method, hostname, path, headers },
-      (res) => {
-        let raw = "";
-        res.setEncoding("utf8");
-        res.on("data", (d) => (raw += d));
-        res.on("end", () => {
-          let parsed = {};
-          try { parsed = raw ? JSON.parse(raw) : {}; } catch { parsed = { raw }; }
+  if (mainSlot === "right") {
+    return {
+      main: { x: 75, y: 50, w: 50, h: 100 },
+      bg:   { x: 25, y: 50, w: 50, h: 100 },
+    };
+  }
+  return {
+    main: { x: 25, y: 50, w: 50, h: 100 },
+    bg:   { x: 75, y: 50, w: 50, h: 100 },
+  };
+}
 
-          if (res.statusCode >= 200 && res.statusCode < 300) {
-            resolve(parsed);
-          } else {
-            reject(new Error(`HTTP ${res.statusCode} ${method} ${path} :: ${raw || "no body"}`));
-          }
-        });
-      }
-    );
+function applyVideoSlot(el, rect, { muted, speed }) {
+  el.x_alignment = toPercentString(rect.x);
+  el.y_alignment = toPercentString(rect.y);
+  el.width = `${rect.w}%`;
+  el.height = `${rect.h}%`;
 
-    req.on("error", reject);
-    if (body) req.write(body);
-    req.end();
+  el.playback_rate = speed;
+
+  if (muted) {
+    el.volume = 0;
+    el.muted = true;
+  }
+}
+
+function applyCaptions(template, styleKey, overrides, canvasW, canvasH) {
+  const chosenName = SUBTITLE_NAME_MAP[styleKey] || null;
+
+  for (const el of template.elements || []) {
+    if (!el || typeof el !== "object") continue;
+    const name = String(el.name || "");
+
+    if (!name.startsWith("Subtitles_")) continue;
+
+    const isChosen = chosenName && name.toLowerCase() === chosenName.toLowerCase();
+    el.visible = !!isChosen;
+
+    if (isChosen) {
+      const props = buildSubtitleProps(styleKey, overrides, canvasW, canvasH);
+      Object.assign(el, props);
+    }
+  }
+}
+
+// -------------------- Creatomate --------------------
+async function fetchTemplateJson(templateId) {
+  const data = await httpsJson({
+    method: "GET",
+    hostname: "api.creatomate.com",
+    path: `/v1/templates/${encodeURIComponent(templateId)}`,
+    headers: {
+      Authorization: `Bearer ${CREATOMATE_API_KEY}`,
+      "Content-Type": "application/json",
+    },
   });
+
+  if (data && typeof data.template === "object") return data.template;
+  if (data && typeof data.source === "object") return data.source;
+  if (data && typeof data === "object" && data.elements) return data;
+
+  throw new Error("Could not read template JSON from Creatomate response.");
 }
 
-async function signedReadUrl(sb, path, expiresSec = 60 * 60) {
-  const clean = String(path || "").replace(/^\/+/, "");
-  const { data, error } = await sb.storage.from(VIDEO_BUCKET).createSignedUrl(clean, expiresSec);
-  if (error || !data?.signedUrl) throw new Error("SIGNED_READ_URL_FAILED: " + (error?.message || "unknown"));
-  return data.signedUrl;
+async function createRenderFromTemplate(templateObj) {
+  const body = { template: templateObj, source: templateObj };
+
+  const data = await httpsJson({
+    method: "POST",
+    hostname: "api.creatomate.com",
+    path: "/v1/renders",
+    headers: {
+      Authorization: `Bearer ${CREATOMATE_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body,
+  });
+
+  const renderId = data && (data.id || data.render_id || data.renderId);
+  if (!renderId) throw new Error(`Creatomate render response missing id: ${JSON.stringify(data)}`);
+  return renderId;
 }
 
-async function creatomateGetRender(renderId) {
+async function getRenderStatus(renderId) {
   const data = await httpsJson({
     method: "GET",
     hostname: "api.creatomate.com",
     path: `/v1/renders/${encodeURIComponent(renderId)}`,
-    headers: { Authorization: `Bearer ${CREATOMATE_API_KEY}` },
+    headers: {
+      Authorization: `Bearer ${CREATOMATE_API_KEY}`,
+      "Content-Type": "application/json",
+    },
   });
-  return data;
+
+  // typical fields: status, url, error
+  return {
+    status: data?.status || "unknown",
+    url: data?.url || data?.result_url || null,
+    error: data?.error || null,
+  };
 }
 
-function normStatus(s) {
-  const x = String(s || "").toLowerCase();
-  if (!x) return "";
-  if (x.includes("succeed") || x.includes("complete") || x === "done") return "succeeded";
-  if (x.includes("fail") || x.includes("error")) return "failed";
-  if (x.includes("queue") || x.includes("process") || x.includes("render") || x.includes("wait")) return "rendering";
-  return x;
+// -------------------- Supabase signed read URL --------------------
+async function signReadUrlFromPath(path) {
+  const supabase = getSupabaseAdmin();
+  if (!supabase) {
+    throw new Error("Missing SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY for signing read URLs.");
+  }
+  const { data, error } = await supabase.storage
+    .from(SUPABASE_BUCKET)
+    .createSignedUrl(path, SIGNED_URL_TTL_SECONDS);
+
+  if (error) throw new Error("Signed read URL error: " + error.message);
+  if (!data?.signedUrl) throw new Error("Signed read URL missing signedUrl");
+  return data.signedUrl;
 }
 
-function extractOutputUrl(obj) {
-  const fromOutputs =
-    Array.isArray(obj?.outputs) && obj.outputs.length
-      ? obj.outputs[0]?.url || obj.outputs[0]?.output
-      : null;
-
-  return obj?.output || obj?.url || obj?.video_url || obj?.download_url || fromOutputs || null;
-}
-
-// -------------------- MAIN --------------------
-module.exports = async function handler(req, res) {
+// -------------------- handler --------------------
+module.exports = async (req, res) => {
   setCors(req, res);
-  if (req.method === "OPTIONS") return res.status(204).end();
+  if (req.method === "OPTIONS") return res.status(200).end();
 
   try {
-    // optional auth (only enforced if MEMBERSTACK_SECRET_KEY set)
-    await requireMemberIdIfConfigured(req);
+    if (!CREATOMATE_API_KEY) return res.status(500).json({ error: "Missing CREATOMATE_API_KEY" });
+    if (!TEMPLATE_ID) return res.status(500).json({ error: "Missing CREATOMATE_TEMPLATE_ID_COMPOSITE" });
 
-    if (!CREATOMATE_API_KEY) return res.status(500).json({ ok:false, error: "MISSING_CREATOMATE_API_KEY" });
-    if (!TEMPLATE_ID) return res.status(500).json({ ok:false, error: "MISSING_CREATOMATE_TEMPLATE_ID_COMPOSITE" });
-
-    // ---------- GET status proxy ----------
+    // GET: poll render status
     if (req.method === "GET") {
       const id = String(req.query?.id || "").trim();
-      if (!id) return res.status(400).json({ ok:false, error: "MISSING_ID" });
+      if (!id) return res.status(400).json({ error: "id required" });
 
-      const rObj = await creatomateGetRender(id);
-      const st = normStatus(rObj?.status || "");
-      const url = extractOutputUrl(rObj);
-
-      return res.status(200).json({
-        ok: true,
-        status: st || rObj?.status || "rendering",
-        url: st === "succeeded" ? (url || null) : (url || null),
-        error: st === "failed" ? (rObj?.error || rObj?.message || null) : null,
-        raw_status: rObj?.status || null,
-      });
+      const s = await getRenderStatus(id);
+      return res.status(200).json(s);
     }
 
-    // ---------- POST create render ----------
-    if (req.method !== "POST") return res.status(405).json({ ok:false, error: "METHOD_NOT_ALLOWED" });
+    // POST: start render
+    if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
-    const body = typeof req.body === "string" ? (safeJsonParse(req.body) || {}) : (req.body || {});
+    const body = await readJson(req);
 
-    const sb = getAdminSupabase();
+    // Accept either paths or urls
+    const mainPath = String(body.mainPath || "").trim();
+    const backgroundPath = String(body.backgroundPath || "").trim();
+    const mainVideoUrlRaw = String(body.mainVideoUrl || "").trim();
+    const backgroundVideoUrlRaw = String(body.backgroundVideoUrl || "").trim();
 
-    const layout = (String(body.layout || "sideBySide") === "topBottom") ? "topBottom" : "sideBySide";
-    const mainSlotRaw = String(body.mainSlot || (layout === "topBottom" ? "top" : "left")).toLowerCase();
-    const mainSlot = (layout === "topBottom")
-      ? (mainSlotRaw === "bottom" ? "bottom" : "top")
-      : (mainSlotRaw === "right" ? "right" : "left");
+    if (!mainPath && !mainVideoUrlRaw) return res.status(400).json({ error: "mainPath or mainVideoUrl required" });
+    if (!backgroundPath && !backgroundVideoUrlRaw) return res.status(400).json({ error: "backgroundPath or backgroundVideoUrl required" });
+
+    const layout = (body.layout === "topBottom" ? "topBottom" : "sideBySide");
+    const mainSlot = String(body.mainSlot || (layout === "topBottom" ? "top" : "left")).toLowerCase();
 
     const mainSpeed = snapSpeed(body.mainSpeed);
     const bgSpeed = snapSpeed(body.bgSpeed);
 
-    const bgMuted = true; // ✅ always muted per your requirement
+    const bgMuted = body.bgMuted !== false; // default true
 
-    // Resolve main/background URLs
-    const mainPath = String(body.mainPath || "").trim();
-    const bgPath = String(body.backgroundPath || "").trim();
-
-    let mainVideoUrl = String(body.mainVideoUrl || "").trim();
-    let backgroundVideoUrl = String(body.backgroundVideoUrl || "").trim();
-
-    if (!mainVideoUrl) {
-      if (!mainPath) return res.status(400).json({ ok:false, error: "mainPath or mainVideoUrl required" });
-      mainVideoUrl = await signedReadUrl(sb, mainPath);
-    }
-    if (!backgroundVideoUrl) {
-      if (!bgPath) return res.status(400).json({ ok:false, error: "backgroundPath or backgroundVideoUrl required" });
-      backgroundVideoUrl = await signedReadUrl(sb, bgPath);
-    }
-
-    // Captions
-    const captions = (body.captions && typeof body.captions === "object") ? body.captions : {};
+    const captions = body.captions || {};
     const captionsEnabled = !!captions.enabled;
     const captionStyle = String(captions.style || "sentence").toLowerCase();
-    const captionOverrides = (captions.settings && typeof captions.settings === "object") ? captions.settings : {};
+    const captionOverrides = captions.settings && typeof captions.settings === "object" ? captions.settings : {};
 
-    if (captionsEnabled && !STYLE_PRESETS[captionStyle]) {
-      return res.status(400).json({ ok:false, error: `Unknown caption style: ${captionStyle}` });
+    // Resolve sources
+    const mainVideoUrl = mainVideoUrlRaw || await signReadUrlFromPath(mainPath);
+    const backgroundVideoUrl = backgroundVideoUrlRaw || await signReadUrlFromPath(backgroundPath);
+
+    // 1) Load template JSON
+    const template = await fetchTemplateJson(TEMPLATE_ID);
+    const elements = Array.isArray(template.elements) ? template.elements : [];
+
+    // 2) Find required input_video
+    const mainEl = elements.find((e) => String(e.name || "") === "input_video");
+    if (!mainEl) return res.status(500).json({ error: "Template missing required element named 'input_video'" });
+
+    // 3) Ensure bg_video exists
+    let bgEl = elements.find((e) => String(e.name || "") === "bg_video");
+    if (!bgEl) {
+      bgEl = {
+        id: `bg_${Date.now()}`,
+        name: "bg_video",
+        type: "video",
+        track: 1,
+        time: 0,
+        width: "100%",
+        height: "100%",
+        x_alignment: "50%",
+        y_alignment: "50%",
+      };
+      elements.unshift(bgEl);
+      template.elements = elements;
     }
 
+    // 4) Set sources
+    mainEl.source = mainVideoUrl;
+    mainEl.src = mainVideoUrl;
+
+    bgEl.source = backgroundVideoUrl;
+    bgEl.src = backgroundVideoUrl;
+
+    // 5) Slot layout
     const rects = getSlotRects(layout, mainSlot);
 
-    // Build modifications (Creatomate)
-    const mods = {};
+    // Ensure layering: bg below main
+    bgEl.track = 1;
+    mainEl.track = 2;
 
-    // Video sources (template must have these element names)
-    mods["input_video.source"] = mainVideoUrl;
-    mods["bg_video.source"] = backgroundVideoUrl;
+    applyVideoSlot(bgEl, rects.bg, { muted: bgMuted, speed: bgSpeed });
+    applyVideoSlot(mainEl, rects.main, { muted: false, speed: mainSpeed });
 
-    // Ensure fill/crop
-    mods["input_video.fit"] = "cover";
-    mods["bg_video.fit"] = "cover";
-
-    // Slot placement
-    mods["input_video.x_alignment"] = toPercentString(rects.main.x);
-    mods["input_video.y_alignment"] = toPercentString(rects.main.y);
-    mods["input_video.width"] = `${rects.main.w}%`;
-    mods["input_video.height"] = `${rects.main.h}%`;
-
-    mods["bg_video.x_alignment"] = toPercentString(rects.bg.x);
-    mods["bg_video.y_alignment"] = toPercentString(rects.bg.y);
-    mods["bg_video.width"] = `${rects.bg.w}%`;
-    mods["bg_video.height"] = `${rects.bg.h}%`;
-
-    // Speeds
-    mods["input_video.playback_rate"] = mainSpeed;
-    mods["bg_video.playback_rate"] = bgSpeed;
-
-    // Background muted always
-    mods["bg_video.volume"] = 0;
-    mods["bg_video.muted"] = true;
-
-    // Captions: show exactly one Subtitles_* layer and apply settings
-    const chosenSubtitleName = SUBTITLE_NAME_MAP[captionStyle] || null;
-
-    // Hide all known variants
-    Object.values(SUBTITLE_NAME_MAP).forEach((name) => {
-      mods[`${name}.visible`] = false;
-    });
-
-    if (captionsEnabled && chosenSubtitleName) {
-      mods[`${chosenSubtitleName}.visible`] = true;
-
-      const props = buildSubtitleProps(captionStyle, captionOverrides);
-
-      // Apply caption props via modifications: "ElementName.property"
-      Object.keys(props).forEach((k) => {
-        mods[`${chosenSubtitleName}.${k}`] = props[k];
-      });
+    // 6) Captions
+    if (captionsEnabled) {
+      if (!STYLE_PRESETS[captionStyle]) {
+        return res.status(400).json({ error: `Unknown caption style: ${captionStyle}` });
+      }
+      applyCaptions(template, captionStyle, captionOverrides, 1080, 1920);
+    } else {
+      for (const el of template.elements || []) {
+        const name = String(el.name || "");
+        if (name.startsWith("Subtitles_")) el.visible = false;
+      }
     }
 
-    const payload = {
-      template_id: TEMPLATE_ID,
-      modifications: mods,
-      output_format: "mp4",
-    };
+    // 7) Render
+    const renderId = await createRenderFromTemplate(template);
 
-    const created = await httpsJson({
-      method: "POST",
-      hostname: "api.creatomate.com",
-      path: "/v1/renders",
-      headers: {
-        Authorization: `Bearer ${CREATOMATE_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      bodyObj: payload,
-    });
-
-    // Creatomate sometimes returns array
-    const renderId = Array.isArray(created) ? created[0]?.id : created?.id;
-    if (!renderId) return res.status(502).json({ ok:false, error: "NO_RENDER_ID", details: created });
-
-    return res.status(200).json({ ok:true, renderId });
+    return res.status(200).json({ renderId });
   } catch (err) {
-    const msg = String(err?.message || err);
-
-    if (err?.code === "MISSING_AUTH" || msg.includes("MISSING_AUTH")) {
-      return res.status(401).json({ ok:false, error: "MISSING_AUTH" });
-    }
-
-    console.error("[COMPOSITE] error", err);
-    return res.status(500).json({ ok:false, error: msg || "SERVER_ERROR" });
+    return res.status(500).json({
+      error: err && err.message ? err.message : "Unknown error",
+    });
   }
 };
