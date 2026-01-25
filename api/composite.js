@@ -354,13 +354,17 @@ async function getRenderStatus(renderId) {
 }
 
 // -------------------- Supabase signed read URL --------------------
-async function signReadUrlFromPath(path) {
+async function signReadUrlFromPath(path, bucketOverride) {
   const supabase = getSupabaseAdmin();
   if (!supabase) {
     throw new Error("Missing SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY for signing read URLs.");
   }
+
+  const bucket = String(bucketOverride || SUPABASE_BUCKET || "").trim();
+  if (!bucket) throw new Error("Missing SUPABASE_BUCKET (or bucketOverride).");
+
   const { data, error } = await supabase.storage
-    .from(SUPABASE_BUCKET)
+    .from(bucket)
     .createSignedUrl(path, SIGNED_URL_TTL_SECONDS);
 
   if (error) throw new Error("Signed read URL error: " + error.message);
@@ -414,8 +418,12 @@ module.exports = async (req, res) => {
     const captionOverrides = captions.settings && typeof captions.settings === "object" ? captions.settings : {};
 
     // Resolve sources
-    const mainVideoUrl = mainVideoUrlRaw || await signReadUrlFromPath(mainPath);
-    const backgroundVideoUrl = backgroundVideoUrlRaw || await signReadUrlFromPath(backgroundPath);
+    const mainBucket = String(body.mainBucket || "").trim();
+const backgroundBucket = String(body.backgroundBucket || "").trim();
+
+const mainVideoUrl = mainVideoUrlRaw || await signReadUrlFromPath(mainPath, mainBucket);
+const backgroundVideoUrl = backgroundVideoUrlRaw || await signReadUrlFromPath(backgroundPath, backgroundBucket);
+
 
     // 1) Load template JSON
     const template = await fetchTemplateJson(TEMPLATE_ID);
