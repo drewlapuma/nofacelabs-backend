@@ -1,17 +1,23 @@
-// api/renders.js (CommonJS, Node 18 on Vercel)
-// Handles:
-//  - GET    /api/renders                 => list renders for member
-//  - GET    /api/renders?id=...          => single render for member
-//  - DELETE /api/renders?id=...          => delete render for member (DB + voiceover mp3)
-//  - POST   /api/renders {action:"delete", id}  => delete fallback (same behavior)
+// api/composite.js (CommonJS, Node 18 on Vercel)
 //
-// ✅ NOTE: captions endpoints kept (so nothing breaks elsewhere) but your /myvideos page no longer uses them.
-// ✅ NOTE: This deletes ONLY:
-//    - the "renders" row
-//    - the voiceover mp3 in Supabase Storage (VOICE_BUCKET) at `${id}/voice.mp3`
-// If you also store MP4s somewhere, tell me where and I’ll add that deletion too.
+// POST /api/composite
+// Requires Authorization: Bearer <memberstack token>
+//
+// Body:
+// {
+//   mainVideoUrl,
+//   backgroundVideoUrl,
+//   layout: "sideBySide"|"topBottom",
+//   mainSlot: "left"|"right"|"top"|"bottom",
+//   mainSpeed: 1|1.25|...,
+//   bgSpeed: 1|1.25|...,
+//   captions: { enabled: true, style: "karaoke", settings: { x:50, y:82, ... } }
+// }
+//
+// Returns: { ok:true, id:<renderRowId>, composite_status:"compositing" }
 
 const https = require("https");
+const crypto = require("crypto");
 const memberstackAdmin = require("@memberstack/admin");
 const { getAdminSupabase } = require("./_lib/supabase");
 
@@ -31,12 +37,12 @@ function setCors(req, res) {
     res.setHeader("Vary", "Origin");
   }
 
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+  res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   res.setHeader("Access-Control-Max-Age", "86400");
 }
 
-// -------------------- Memberstack auth --------------------
+// -------------------- Memberstack auth (same as /renders) --------------------
 const MEMBERSTACK_SECRET_KEY = process.env.MEMBERSTACK_SECRET_KEY;
 const ms = MEMBERSTACK_SECRET_KEY ? memberstackAdmin.init(MEMBERSTACK_SECRET_KEY) : null;
 
@@ -49,13 +55,10 @@ function getBearerToken(req) {
 function isExpiredJwtError(err) {
   const code = err?.code;
   const msg = String(err?.message || "").toLowerCase();
-
-  // jose-style + common variants
   if (code === "ERR_JWT_EXPIRED") return true;
   if (msg.includes("jwtexpired") || msg.includes("jwt expired")) return true;
   if (msg.includes('"exp"') && msg.includes("failed")) return true;
   if (msg.includes("token_expired")) return true;
-
   return false;
 }
 
@@ -91,27 +94,18 @@ async function requireMemberId(req) {
   }
 }
 
-// -------------------- Creatomate (kept) --------------------
+// -------------------- Creatomate --------------------
 const CREATOMATE_API_KEY = (process.env.CREATOMATE_API_KEY || "").trim();
+const COMPOSITE_TEMPLATE_916 = (process.env.CREATO_COMPOSITE_TEMPLATE_916 || "").trim();
 
-const CAPTIONS_TEMPLATE_916 = (process.env.CREATO_CAPTIONS_TEMPLATE_916 || "").trim();
-const CAPTIONS_TEMPLATE_11 = (process.env.CREATO_CAPTIONS_TEMPLATE_11 || "").trim();
-const CAPTIONS_TEMPLATE_169 = (process.env.CREATO_CAPTIONS_TEMPLATE_169 || "").trim();
-
-const CREATO_VIDEO_ELEMENT_ID = (process.env.CREATO_VIDEO_ELEMENT_ID || "Video-DHM").trim();
-const CREATO_CAPTIONS_JSON_ELEMENT_ID = (process.env.CREATO_CAPTIONS_JSON_ELEMENT_ID || "Subtitles-1").trim();
+// Element *names* used in your Creatomate template
+const MAIN_VIDEO_NAME = (process.env.CREATO_MAIN_VIDEO_NAME || "input_video").trim();
+const BG_VIDEO_NAME = (process.env.CREATO_BG_VIDEO_NAME || "bg_video").trim();
 
 const API_BASE = (process.env.API_BASE || "").trim();
 
-// -------------------- Storage cleanup --------------------
-const VOICE_BUCKET = (process.env.VOICE_BUCKET || "voiceovers").trim();
-
-function pickCaptionsTemplateIdByAspect(aspectRatio) {
-  const ar = String(aspectRatio || "9:16").trim();
-  if (ar === "9:16") return CAPTIONS_TEMPLATE_916;
-  if (ar === "1:1") return CAPTIONS_TEMPLATE_11;
-  if (ar === "16:9") return CAPTIONS_TEMPLATE_169;
-  return CAPTIONS_TEMPLATE_916 || CAPTIONS_TEMPLATE_11 || CAPTIONS_TEMPLATE_169 || "";
+function safeJsonParse(s) {
+  try { return JSON.parse(s); } catch { return null; }
 }
 
 function postJSON(url, headers, bodyObj) {
@@ -136,11 +130,7 @@ function postJSON(url, headers, bodyObj) {
         res.on("data", (chunk) => (buf += chunk));
         res.on("end", () => {
           let json = {};
-          try {
-            json = JSON.parse(buf || "{}");
-          } catch {
-            json = { raw: buf };
-          }
+          try { json = JSON.parse(buf || "{}"); } catch { json = { raw: buf }; }
           resolve({ status: res.statusCode, json });
         });
       }
@@ -152,249 +142,277 @@ function postJSON(url, headers, bodyObj) {
   });
 }
 
-function safeJsonParse(s) {
-  try {
-    return JSON.parse(s);
-  } catch {
-    return null;
+// ----- speed steps -----
+const SPEED_STEPS = [0.5, 0.75, 1, 1.25, 1.5, 2];
+function snapSpeed(x) {
+  const n = Number(x);
+  if (!Number.isFinite(n)) return 1;
+  let best = SPEED_STEPS[0];
+  let bestD = Infinity;
+  for (const s of SPEED_STEPS) {
+    const d = Math.abs(s - n);
+    if (d < bestD) { bestD = d; best = s; }
+  }
+  return best;
+}
+
+function pct(n) {
+  n = Number(n);
+  if (!Number.isFinite(n)) n = 50;
+  n = Math.max(0, Math.min(100, n));
+  return `${n}%`;
+}
+
+function getSlotRects(layout, mainSlot) {
+  const lay = layout === "topBottom" ? "topBottom" : "sideBySide";
+  const slot = String(mainSlot || (lay === "topBottom" ? "top" : "left")).toLowerCase();
+
+  if (lay === "topBottom") {
+    if (slot === "bottom") {
+      return {
+        main: { x: 50, y: 75, w: 100, h: 50 },
+        bg: { x: 50, y: 25, w: 100, h: 50 },
+      };
+    }
+    return {
+      main: { x: 50, y: 25, w: 100, h: 50 },
+      bg: { x: 50, y: 75, w: 100, h: 50 },
+    };
+  }
+
+  if (slot === "right") {
+    return {
+      main: { x: 75, y: 50, w: 50, h: 100 },
+      bg: { x: 25, y: 50, w: 50, h: 100 },
+    };
+  }
+  return {
+    main: { x: 25, y: 50, w: 50, h: 100 },
+    bg: { x: 75, y: 50, w: 50, h: 100 },
+  };
+}
+
+function setVideoMods(mods, name, rect, { url, speed, muted }) {
+  // position + size (cropped fill happens naturally when slot size differs from aspect)
+  mods[`${name}.x_alignment`] = pct(rect.x);
+  mods[`${name}.y_alignment`] = pct(rect.y);
+  mods[`${name}.width`] = `${rect.w}%`;
+  mods[`${name}.height`] = `${rect.h}%`;
+
+  // source
+  mods[`${name}.source`] = String(url);
+
+  // speed (Creatomate supports playback_rate on video elements)
+  mods[`${name}.playback_rate`] = speed;
+
+  // background muted always
+  if (muted) {
+    mods[`${name}.volume`] = 0;
+    mods[`${name}.muted`] = true;
   }
 }
 
-async function deleteRenderForMember({ sb, member_id, id }) {
-  const { data: row, error: readErr } = await sb
-    .from("renders")
-    .select("*")
-    .eq("id", id)
-    .eq("member_id", member_id)
-    .single();
-
-  if (readErr || !row) return { ok: false, status: 404, error: "NOT_FOUND" };
-
-  // Delete voice file (best-effort)
-  try {
-    await sb.storage.from(VOICE_BUCKET).remove([`${id}/voice.mp3`]);
-  } catch (e) {
-    console.error("[RENDERS_DELETE] voice remove failed", { id, message: String(e?.message || e) });
-  }
-
-  // Delete DB row
-  const { error: delErr } = await sb
-    .from("renders")
-    .delete()
-    .eq("id", id)
-    .eq("member_id", member_id);
-
-  if (delErr) {
-    console.error("[RENDERS_DELETE] DB delete failed", { id, delErr });
-    return { ok: false, status: 500, error: "DB_DELETE_FAILED", details: delErr };
-  }
-
-  return { ok: true, status: 200, deleted_id: id };
-}
-
-// -------------------- MAIN --------------------
 module.exports = async function handler(req, res) {
   setCors(req, res);
   if (req.method === "OPTIONS") return res.status(204).end();
 
   try {
+    if (req.method !== "POST") {
+      return res.status(405).json({ ok: false, error: "METHOD_NOT_ALLOWED" });
+    }
+
     const member_id = await requireMemberId(req);
     const sb = getAdminSupabase();
 
-    // ---------------- GET ----------------
-    if (req.method === "GET") {
-      const id = String(req.query?.id || "").trim();
+    if (!CREATOMATE_API_KEY) return res.status(500).json({ ok: false, error: "MISSING_CREATOMATE_API_KEY" });
+    if (!COMPOSITE_TEMPLATE_916) return res.status(500).json({ ok: false, error: "MISSING_CREATO_COMPOSITE_TEMPLATE_916" });
 
-      if (id) {
-        const { data: item, error } = await sb
-          .from("renders")
-          .select("*")
-          .eq("id", id)
-          .eq("member_id", member_id)
-          .single();
+    const body = typeof req.body === "string" ? safeJsonParse(req.body) || {} : req.body || {};
 
-        if (error || !item) return res.status(404).json({ ok: false, error: "NOT_FOUND" });
-        return res.status(200).json({ ok: true, item });
-      }
+    const mainVideoUrl = String(body.mainVideoUrl || "").trim();
+    const backgroundVideoUrl = String(body.backgroundVideoUrl || "").trim();
+    if (!mainVideoUrl) return res.status(400).json({ ok: false, error: "MISSING_MAIN_VIDEO_URL" });
+    if (!backgroundVideoUrl) return res.status(400).json({ ok: false, error: "MISSING_BACKGROUND_VIDEO_URL" });
 
-      const { data: items, error } = await sb
-        .from("renders")
-        .select("*")
-        .eq("member_id", member_id)
-        .order("created_at", { ascending: false })
-        .limit(60);
+    const layout = body.layout === "topBottom" ? "topBottom" : "sideBySide";
+    const mainSlot = String(body.mainSlot || (layout === "topBottom" ? "top" : "left")).trim();
 
-      if (error) return res.status(500).json({ ok: false, error: "DB_READ_FAILED", details: error });
-      return res.status(200).json({ ok: true, items: items || [] });
+    const mainSpeed = snapSpeed(body.mainSpeed);
+    const bgSpeed = snapSpeed(body.bgSpeed);
+
+    const captions = body.captions && typeof body.captions === "object" ? body.captions : {};
+    const captionsEnabled = !!captions.enabled;
+    const captionStyle = String(captions.style || "sentence").trim();
+    const captionSettings = captions.settings && typeof captions.settings === "object" ? captions.settings : {};
+
+    // Create a renders row so it shows up in /myvideos immediately (status compositing)
+    const id = crypto.randomUUID();
+
+    const choices = {
+      kind: "composite",
+      aspectRatio: "9:16",
+      mainVideoUrl,
+      backgroundVideoUrl,
+      layout,
+      mainSlot,
+      mainSpeed,
+      bgSpeed,
+      captions: {
+        enabled: captionsEnabled,
+        style: captionStyle,
+        settings: captionSettings,
+      },
+    };
+
+    const { error: insErr } = await sb.from("renders").insert([
+      {
+        id,
+        member_id,
+        // keep these consistent with your existing UI expectations:
+        created_at: new Date().toISOString(),
+        choices,
+
+        // new composite fields (recommended columns; if you don’t add them, remove these lines)
+        composite_status: "compositing",
+        composite_error: null,
+        composite_video_url: null,
+      },
+    ]);
+
+    if (insErr) {
+      console.error("[COMPOSITE] insert failed", insErr);
+      return res.status(500).json({ ok: false, error: "DB_INSERT_FAILED", details: insErr });
     }
 
-    // ---------------- DELETE ----------------
-    if (req.method === "DELETE") {
-      const id = String(req.query?.id || "").trim();
-      if (!id) return res.status(400).json({ ok: false, error: "MISSING_ID" });
+    // Build Creatomate modifications (same style as your captions-apply flow)
+    const rects = getSlotRects(layout, mainSlot);
 
-      const out = await deleteRenderForMember({ sb, member_id, id });
-      return res.status(out.status).json(out.ok ? { ok: true, id: out.deleted_id } : out);
+    const mods = {};
+
+    // background video element
+    setVideoMods(mods, BG_VIDEO_NAME, rects.bg, {
+      url: backgroundVideoUrl,
+      speed: bgSpeed,
+      muted: true,
+    });
+
+    // main video element (audio stays on)
+    setVideoMods(mods, MAIN_VIDEO_NAME, rects.main, {
+      url: mainVideoUrl,
+      speed: mainSpeed,
+      muted: false,
+    });
+
+    // captions visibility:
+    // hide all known subtitle layers in this template
+    const subtitleNames = [
+      "Subtitles_Sentence",
+      "Subtitles_Karaoke",
+      "Subtitles_Word",
+      "Subtitles_BoldWhite",
+      "Subtitles_YellowPop",
+      "Subtitles_MintTag",
+      "Subtitles_Highlighter",
+      "Subtitles_PurplePop",
+      "Subtitles_OutlinePunch",
+      "Subtitles_BlackBar",
+      "Subtitles_NeonGlow",
+      "Subtitles_CompactLowerThird",
+      "Subtitles_BouncePop",
+      "Subtitles_RedAlert",
+      "Subtitles_RedTag",
+    ];
+
+    for (const n of subtitleNames) mods[`${n}.visible`] = false;
+
+    if (captionsEnabled) {
+      // Turn on the selected one (match your Creatomate element naming)
+      const key = captionStyle.toLowerCase();
+      const map = {
+        sentence: "Subtitles_Sentence",
+        word: "Subtitles_Word",
+        boldwhite: "Subtitles_BoldWhite",
+        karaoke: "Subtitles_Karaoke",
+        yellowpop: "Subtitles_YellowPop",
+        minttag: "Subtitles_MintTag",
+        highlighter: "Subtitles_Highlighter",
+        purplepop: "Subtitles_PurplePop",
+        outlinepunch: "Subtitles_OutlinePunch",
+        blackbar: "Subtitles_BlackBar",
+        neonglow: "Subtitles_NeonGlow",
+        compactlowerthird: "Subtitles_CompactLowerThird",
+        bouncepop: "Subtitles_BouncePop",
+        redalert: "Subtitles_RedAlert",
+        redtag: "Subtitles_RedTag",
+      };
+
+      const chosen = map[key] || "Subtitles_Sentence";
+      mods[`${chosen}.visible`] = true;
+
+      // pass through caption position from your UI (x/y in numbers -> percent)
+      if (captionSettings.x != null) mods[`${chosen}.x_alignment`] = pct(captionSettings.x);
+      if (captionSettings.y != null) mods[`${chosen}.y_alignment`] = pct(captionSettings.y);
+
+      // If you want to also pass font/size/colors here, we can,
+      // but since your template already has the looks baked in, it’s optional.
+      // (Your existing captions UI sends a lot—add them when you’re ready.)
     }
 
-    // ---------------- POST ----------------
-    if (req.method === "POST") {
-      const body = typeof req.body === "string" ? safeJsonParse(req.body) || {} : req.body || {};
-      const action = String(body?.action || "").trim();
+    const publicBaseUrl = API_BASE || `https://${req.headers.host}`;
+    const webhook_url = `${publicBaseUrl}/api/creatomate-webhook?id=${encodeURIComponent(id)}&kind=composite`;
 
-      // ✅ delete fallback
-      if (action === "delete") {
-        const id = String(body?.id || "").trim();
-        if (!id) return res.status(400).json({ ok: false, error: "MISSING_ID" });
+    const payload = {
+      template_id: COMPOSITE_TEMPLATE_916,
+      modifications: mods,
+      output_format: "mp4",
+      webhook_url,
+    };
 
-        const out = await deleteRenderForMember({ sb, member_id, id });
-        return res.status(out.status).json(out.ok ? { ok: true, id: out.deleted_id } : out);
-      }
+    const resp = await postJSON(
+      "https://api.creatomate.com/v1/renders",
+      { Authorization: `Bearer ${CREATOMATE_API_KEY}` },
+      payload
+    );
 
-      // ---------- captions-apply (kept) ----------
-      if (action === "captions-apply") {
-        const id = String(body?.id || "").trim();
-        if (!id) return res.status(400).json({ ok: false, error: "MISSING_ID" });
+    if (resp.status !== 202 && resp.status !== 200) {
+      await sb.from("renders").update({
+        composite_status: "failed",
+        composite_error: JSON.stringify(resp.json),
+      }).eq("id", id).eq("member_id", member_id);
 
-        const style = String(body?.style || "sentence").trim().toLowerCase();
-        const styleSafe = ["sentence", "karaoke", "word"].includes(style) ? style : "sentence";
-
-        if (!CREATOMATE_API_KEY) return res.status(500).json({ ok: false, error: "MISSING_CREATOMATE_API_KEY" });
-
-        const { data: row, error } = await sb
-          .from("renders")
-          .select("*")
-          .eq("id", id)
-          .eq("member_id", member_id)
-          .single();
-
-        if (error || !row) return res.status(404).json({ ok: false, error: "NOT_FOUND" });
-        if (!row.video_url) return res.status(400).json({ ok: false, error: "VIDEO_NOT_READY" });
-
-        const prevStyle = String(row?.choices?.captionStyle || row?.choices?.caption_style || "").trim().toLowerCase();
-
-        if (row.captioned_video_url && prevStyle === styleSafe) {
-          return res.status(200).json({
-            ok: true,
-            already: true,
-            caption_status: row.caption_status || "completed",
-            captioned_video_url: row.captioned_video_url,
-            style: styleSafe,
-          });
-        }
-
-        const aspectRatio = row?.choices?.aspectRatio || row?.choices?.aspect_ratio || "9:16";
-        const template_id = pickCaptionsTemplateIdByAspect(aspectRatio);
-        if (!template_id) return res.status(500).json({ ok: false, error: "MISSING_CAPTIONS_TEMPLATE" });
-
-        const newChoices = { ...(row.choices || {}), captionStyle: styleSafe };
-
-        await sb
-          .from("renders")
-          .update({
-            caption_status: "captioning",
-            caption_error: null,
-            captioned_video_url: null,
-            caption_template_id: `creatomate:${template_id}`,
-            choices: newChoices,
-          })
-          .eq("id", row.id);
-
-        const mods = {
-          [`${CREATO_VIDEO_ELEMENT_ID}.source`]: String(row.video_url),
-        };
-
-        // hide all known variants
-        mods["Subtitles_Sentence.visible"] = false;
-        mods["Subtitles_Karaoke.visible"] = false;
-        mods["Subtitles_Word.visible"] = false;
-        mods["Subtitles-1.visible"] = false;
-
-        if (styleSafe === "karaoke") mods["Subtitles_Karaoke.visible"] = true;
-        else if (styleSafe === "word") mods["Subtitles_Word.visible"] = true;
-        else mods["Subtitles_Sentence.visible"] = true;
-
-        mods[`${CREATO_CAPTIONS_JSON_ELEMENT_ID}.text`] = "";
-
-        const publicBaseUrl = API_BASE || `https://${req.headers.host}`;
-        const webhook_url = `${publicBaseUrl}/api/creatomate-webhook?id=${encodeURIComponent(row.id)}&kind=caption`;
-
-        const payload = {
-          template_id,
-          modifications: mods,
-          output_format: "mp4",
-          webhook_url,
-        };
-
-        const resp = await postJSON(
-          "https://api.creatomate.com/v1/renders",
-          { Authorization: `Bearer ${CREATOMATE_API_KEY}` },
-          payload
-        );
-
-        if (resp.status !== 202 && resp.status !== 200) {
-          await sb
-            .from("renders")
-            .update({
-              caption_status: "failed",
-              caption_error: JSON.stringify(resp.json),
-            })
-            .eq("id", row.id);
-
-          return res.status(resp.status).json({ ok: false, error: "CREATOMATE_ERROR", details: resp.json });
-        }
-
-        const caption_job_id = Array.isArray(resp.json) ? resp.json[0]?.id : resp.json?.id;
-        if (!caption_job_id) {
-          await sb
-            .from("renders")
-            .update({
-              caption_status: "failed",
-              caption_error: "NO_CAPTION_JOB_ID",
-            })
-            .eq("id", row.id);
-
-          return res.status(502).json({ ok: false, error: "NO_CAPTION_JOB_ID", details: resp.json });
-        }
-
-        return res.status(200).json({
-          ok: true,
-          id: row.id,
-          caption_status: "captioning",
-          style: styleSafe,
-        });
-      }
-
-      return res.status(400).json({ ok: false, error: "UNKNOWN_ACTION" });
+      return res.status(resp.status).json({ ok: false, error: "CREATOMATE_ERROR", details: resp.json });
     }
 
-    return res.status(405).json({ ok: false, error: "METHOD_NOT_ALLOWED" });
+    const composite_job_id = Array.isArray(resp.json) ? resp.json[0]?.id : resp.json?.id;
+
+    await sb.from("renders").update({
+      composite_job_id: composite_job_id || null,
+      composite_status: "compositing",
+    }).eq("id", id).eq("member_id", member_id);
+
+    return res.status(200).json({
+      ok: true,
+      id,
+      composite_status: "compositing",
+    });
   } catch (err) {
     const msg = String(err?.message || err);
     const code = err?.code;
 
-    // ✅ Expired tokens = 401 (not 500)
     if (code === "TOKEN_EXPIRED" || msg.includes("TOKEN_EXPIRED")) {
-      return res.status(401).json({
-        ok: false,
-        error: "TOKEN_EXPIRED",
-        message: "Session expired. Refresh the page and try again.",
-      });
+      return res.status(401).json({ ok: false, error: "TOKEN_EXPIRED", message: "Session expired. Refresh the page and try again." });
     }
-
     if (code === "MISSING_AUTH" || msg.includes("MISSING_AUTH")) {
       return res.status(401).json({ ok: false, error: "MISSING_AUTH" });
     }
-
     if (code === "INVALID_MEMBER_TOKEN" || msg.includes("INVALID_MEMBER")) {
       return res.status(401).json({ ok: false, error: "INVALID_MEMBER_TOKEN" });
     }
-
     if (code === "MISSING_MEMBERSTACK_SECRET_KEY") {
       return res.status(500).json({ ok: false, error: "MISSING_MEMBERSTACK_SECRET_KEY" });
     }
 
-    console.error("[RENDERS] SERVER_ERROR", err);
+    console.error("[COMPOSITE] SERVER_ERROR", err);
     return res.status(500).json({ ok: false, error: "SERVER_ERROR", message: msg });
   }
 };
