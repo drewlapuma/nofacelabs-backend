@@ -2,14 +2,11 @@
 // POST { path, captionStyle, captionSettings }
 // Returns { renderId }
 //
-// ✅ Fixes:
-// - Supports BOTH naming styles from your UI (fill vs fill_color vs fillColor, etc.)
-// - Normalizes colors to HEX where possible
-// - Uses px for font_size + stroke_width when user sends numbers (prevents gigantic vmin sizes)
-// - Uses correct field for active effect color: transcript_color
-// - Keeps x/y behavior (percent strings)
-// - Defaults font size to 48px if none provided
-// - Optional: maps font family if you send it (font_family / fontFamily)
+// ✅ Fix:
+// - Prevents unwanted purple by NOT applying transcript_color globally
+// - Only uses transcript_color as "active highlight" on highlight styles
+// - For non-highlight styles, transcript_color is set to fill_color (safe)
+// - Keeps your existing normalization + px units
 
 const https = require("https");
 
@@ -75,13 +72,9 @@ function httpJson(method, url, headers, bodyObj) {
         res.on("data", (c) => (data += c));
         res.on("end", () => {
           let parsed = null;
-          try {
-            parsed = JSON.parse(data);
-          } catch {}
+          try { parsed = JSON.parse(data); } catch {}
           if (res.statusCode >= 200 && res.statusCode < 300) return resolve(parsed || {});
-          return reject(
-            new Error(parsed?.error || parsed?.message || data || "HTTP " + res.statusCode)
-          );
+          return reject(new Error(parsed?.error || parsed?.message || data || "HTTP " + res.statusCode));
         });
       }
     );
@@ -123,7 +116,6 @@ function pct(v, fallbackPct) {
   return `${use}%`;
 }
 
-// pick first defined key from captionSettings
 function pick(cs, ...keys) {
   for (const k of keys) {
     if (cs && cs[k] !== undefined && cs[k] !== null && cs[k] !== "") return cs[k];
@@ -149,10 +141,7 @@ function withUnit(val, defaultUnit) {
   const s = String(val).trim();
   if (!s) return undefined;
 
-  // already has any unit or %
   if (/[a-z%]/i.test(s)) return s;
-
-  // numeric string => attach unit
   if (/^\d+(\.\d+)?$/.test(s)) return `${s} ${defaultUnit}`;
 
   return s;
@@ -166,6 +155,16 @@ function normHex(val) {
   if (!s.startsWith("#") && /^[0-9a-f]{3,8}$/i.test(s)) s = `#${s}`;
   return s;
 }
+
+// ✅ Only these styles should use "active highlight" transcript_color
+const ACTIVE_COLOR_STYLES = new Set([
+  "karaoke",
+  "yellowpop",
+  "minttag",
+  "highlighter",
+  "purplepop",
+  "redtag",
+]);
 
 module.exports = async function handler(req, res) {
   setCors(req, res);
@@ -198,7 +197,7 @@ module.exports = async function handler(req, res) {
 
   const FONT_UNIT = "px";
   const STROKE_UNIT = "px";
-  const DEFAULT_FONT_SIZE = 48; // ✅ your new default
+  const DEFAULT_FONT_SIZE = 48;
 
   const modifications = {
     "input_video.source": videoUrl,
@@ -222,7 +221,7 @@ module.exports = async function handler(req, res) {
   if (xa !== undefined) modifications[`${chosenLayer}.x_alignment`] = pct(xa, 50);
   if (ya !== undefined) modifications[`${chosenLayer}.y_alignment`] = pct(ya, 50);
 
-  // Style keys (support multiple names your UI might send)
+  // Style keys
   const fontFamily = pick(cs, "font", "fontFamily", "font_family");
   const fontSizeRaw = pick(cs, "size", "fontSize", "font_size");
 
@@ -234,10 +233,9 @@ module.exports = async function handler(req, res) {
     pick(cs, "transcript_color", "activeColor", "active_color", "effectColor", "effect_color")
   );
 
-  // Font family
   if (fontFamily) modifications[`${chosenLayer}.font_family`] = safeStr(fontFamily);
 
-  // ✅ Font size: DEFAULT to 48px if missing
+  // Font size
   if (fontSizeRaw !== undefined) {
     if (typeof fontSizeRaw === "number" || /^\d+(\.\d+)?$/.test(String(fontSizeRaw).trim())) {
       const n = clampNumber(fontSizeRaw, 10, 160);
@@ -263,8 +261,14 @@ module.exports = async function handler(req, res) {
     }
   }
 
-  // Active / karaoke effect color
-  if (activeColor) modifications[`${chosenLayer}.transcript_color`] = safeStr(activeColor);
+  // ✅ KEY FIX:
+  // - If style uses active highlight, apply activeColor to transcript_color.
+  // - Otherwise, force transcript_color to match fill (so it can’t turn purple).
+  if (ACTIVE_COLOR_STYLES.has(styleKey)) {
+    if (activeColor) modifications[`${chosenLayer}.transcript_color`] = safeStr(activeColor);
+  } else {
+    if (fill) modifications[`${chosenLayer}.transcript_color`] = safeStr(fill);
+  }
 
   try {
     const renderResp = await httpJson(
