@@ -1,4 +1,4 @@
-// api/composite.js (CommonJS, Node 18+ on Vercel)
+buildModifications// api/composite.js (CommonJS, Node 18+ on Vercel)
 //
 // POST /api/composite
 // body: {
@@ -165,48 +165,54 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
   const GROUP_SIDE = process.env.COMPOSITE_GROUP_SIDE || "Layout_SideBySide";
   const GROUP_TB = process.env.COMPOSITE_GROUP_TOPBOTTOM || "Layout_TopBottom";
 
-  const MAIN_SIDE = process.env.COMPOSITE_MAIN_SIDE || "Main_Side";
-  const BG_SIDE = process.env.COMPOSITE_BG_SIDE || "BG_Side";
-  const MAIN_TB = process.env.COMPOSITE_MAIN_TB || "Main_TopBottom";
-  const BG_TB = process.env.COMPOSITE_BG_TB || "BG_TopBottom";
+  const MAIN = process.env.COMPOSITE_MAIN_LAYER || "input_video_visual";
+  const BG = process.env.COMPOSITE_BG_LAYER || "bg-video";
 
-  const SUB = process.env.COMPOSITE_SUBTITLES_LAYER || "Subtitles_Sentence";
+  // All your subtitle layers (from screenshot)
+  const SUBTITLE_LAYERS = [
+    "Subtitles_Sentence",
+    "Subtitles_Word",
+    "Subtitles_Karaoke",
+    "Subtitles_BoldWhite",
+    "Subtitles_YellowPop",
+    "Subtitles_MintTag",
+    "Subtitles_OutlinePunch",
+    "Subtitles_BlackBar",
+    "Subtitles_Highlighter",
+    "Subtitles_NeonGlow",
+    "Subtitles_PurplePop",
+    "Subtitles_CompactLowerThird",
+    "Subtitles_BouncePop",
+    "Subtitles_RedAlert",
+    "Subtitles_RedTag",
+  ];
 
   const layout = payload.layout === "topBottom" ? "topBottom" : "sideBySide";
   const mainSpeed = Number(payload.mainSpeed || 1);
   const bgSpeed = Number(payload.bgSpeed || 1);
-  const bgMuted = payload.bgMuted !== false; // default true
+  const bgMuted = payload.bgMuted !== false;
 
   const cap = payload.captions || {};
   const capEnabled = cap.enabled !== false;
   const settings = cap.settings || {};
 
+  // Style name coming from your UI
+  const styleRaw = String(cap.style || "").trim();
+  const pickedSubtitleLayer =
+    SUBTITLE_LAYERS.includes(styleRaw)
+      ? styleRaw
+      : (process.env.COMPOSITE_SUBTITLES_LAYER || "Subtitles_Sentence");
+
+  // transcript effect normalization (your helper)
   const effectRaw =
     settings.transcript_effect ??
     settings.transcriptEffect ??
     settings.active_effect ??
     settings.activeEffect ??
     settings.effect ??
-    cap.style;
+    styleRaw;
 
   const transcript_effect = normalizeTranscriptEffect(effectRaw) || "color";
-
-  const mods = [];
-
-  // Layout group visibility
-  mods.push({ name: GROUP_SIDE, visible: layout === "sideBySide" });
-  mods.push({ name: GROUP_TB, visible: layout === "topBottom" });
-
-  // Apply sources to BOTH sets (only one set will be visible)
-  mods.push({ name: MAIN_SIDE, source: mainUrl, playback_rate: mainSpeed });
-  mods.push({ name: BG_SIDE, source: bgUrl, playback_rate: bgSpeed, volume: bgMuted ? 0 : 1 });
-
-  mods.push({ name: MAIN_TB, source: mainUrl, playback_rate: mainSpeed });
-  mods.push({ name: BG_TB, source: bgUrl, playback_rate: bgSpeed, volume: bgMuted ? 0 : 1 });
-
-  // Captions
-  mods.push({ name: SUB, visible: !!capEnabled });
-  mods.push({ name: SUB, transcript_effect });
 
   const transcriptColor =
     settings.transcript_color ??
@@ -214,12 +220,32 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
     settings.activeColor ??
     settings.active_color;
 
-  if (transcriptColor) {
-    mods.push({ name: SUB, transcript_color: String(transcriptColor) });
+  // ✅ Creatomate expects an OBJECT
+  const mods = {};
+
+  // Layout visibility
+  mods[GROUP_SIDE] = { visible: layout === "sideBySide" };
+  mods[GROUP_TB] = { visible: layout === "topBottom" };
+
+  // Video sources (applies to both groups because names are duplicated)
+  mods[MAIN] = { source: mainUrl, playback_rate: mainSpeed };
+  mods[BG] = { source: bgUrl, playback_rate: bgSpeed, volume: bgMuted ? 0 : 1 };
+
+  // Captions: turn ALL off, then turn ONE on
+  for (const name of SUBTITLE_LAYERS) {
+    mods[name] = { visible: false };
   }
+
+  mods[pickedSubtitleLayer] = {
+    visible: !!capEnabled,
+    transcript_effect,
+    ...(transcriptColor ? { transcript_color: String(transcriptColor) } : {}),
+  };
 
   return mods;
 }
+
+
 
 // -------------------- Handler --------------------
 module.exports = async function handler(req, res) {
@@ -259,11 +285,12 @@ module.exports = async function handler(req, res) {
 
       const modifications = buildModifications({ mainUrl, bgUrl, payload: body });
 
-      const createPayload = {
-        template_id: templateId,
-        modifications,
-        output_format: "mp4",
-      };
+const created = await creatomateRequest("POST", "/v1/renders", {
+  template_id: templateId,
+  modifications,     // ✅ object now
+  output_format: "mp4",
+});
+
 
       const created = await creatomateRequest("POST", "/v1/renders", createPayload);
 
