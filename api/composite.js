@@ -131,32 +131,47 @@ function normalizeTranscriptEffect(v) {
   return allowed.has(s) ? s : null;
 }
 
-// -------------------- Build modifications (FLAT OBJECT) --------------------
+// -------------------- Build modifications (OBJECT) --------------------
+// Expects your template to have these groups + layers:
+//
+// Layout_SideBySide
+//   Main_Left:  input_video_visual_side_left,  bg_video_side_left
+//   Main_Right: input_video_visual_side_right, bg_video_side_right
+//
+// Layout_TopBottom
+//   Main_Top:    input_video_visual_tb_top,    bg_video_tb_top
+//   Main_Bottom: input_video_visual_tb_bottom, bg_video_tb_bottom
+//
+// Root audio/transcript feeder (hidden): input_video
+//
+// Subtitle layers unchanged (Subtitles_*)
+
 function buildModifications({ mainUrl, bgUrl, payload }) {
-  // Layout groups you already have
+  // ---- layout groups
   const GROUP_SIDE = process.env.COMPOSITE_GROUP_SIDE || "Layout_SideBySide";
-  const GROUP_TB = process.env.COMPOSITE_GROUP_TOPBOTTOM || "Layout_TopBottom";
+  const GROUP_TB   = process.env.COMPOSITE_GROUP_TOPBOTTOM || "Layout_TopBottom";
 
-  // Slot groups YOU MUST CREATE in template
-  const G_SIDE_LEFT = process.env.COMPOSITE_SIDE_LEFT_GROUP || "Main_Left";
-  const G_SIDE_RIGHT = process.env.COMPOSITE_SIDE_RIGHT_GROUP || "Main_Right";
-  const G_TB_TOP = process.env.COMPOSITE_TB_TOP_GROUP || "Main_Top";
-  const G_TB_BOTTOM = process.env.COMPOSITE_TB_BOTTOM_GROUP || "Main_Bottom";
+  // ---- slot groups (NEW)
+  const SIDE_LEFT_GROUP  = process.env.COMPOSITE_SIDE_LEFT_GROUP  || "Main_Left";
+  const SIDE_RIGHT_GROUP = process.env.COMPOSITE_SIDE_RIGHT_GROUP || "Main_Right";
+  const TB_TOP_GROUP     = process.env.COMPOSITE_TB_TOP_GROUP     || "Main_Top";
+  const TB_BOTTOM_GROUP  = process.env.COMPOSITE_TB_BOTTOM_GROUP  || "Main_Bottom";
 
-  // Video layers (unique per slot) YOU MUST CREATE in template
-  const MAIN_SIDE_LEFT = process.env.COMPOSITE_MAIN_SIDE_LEFT || "input_video_visual_side_left";
-  const MAIN_SIDE_RIGHT = process.env.COMPOSITE_MAIN_SIDE_RIGHT || "input_video_visual_side_right";
-  const MAIN_TB_TOP = process.env.COMPOSITE_MAIN_TB_TOP || "input_video_visual_tb_top";
-  const MAIN_TB_BOTTOM = process.env.COMPOSITE_MAIN_TB_BOTTOM || "input_video_visual_tb_bottom";
+  // ---- main visual layers (NEW names)
+  const MAIN_SIDE_LEFT   = process.env.COMPOSITE_MAIN_SIDE_LEFT   || "input_video_visual_side_left";
+  const MAIN_SIDE_RIGHT  = process.env.COMPOSITE_MAIN_SIDE_RIGHT  || "input_video_visual_side_right";
+  const MAIN_TB_TOP      = process.env.COMPOSITE_MAIN_TB_TOP      || "input_video_visual_tb_top";
+  const MAIN_TB_BOTTOM   = process.env.COMPOSITE_MAIN_TB_BOTTOM   || "input_video_visual_tb_bottom";
 
-  // Background videos (existing)
-  const BG_SIDE = process.env.COMPOSITE_BG_LAYER_SIDE || "bg-video_side";
-  const BG_TB = process.env.COMPOSITE_BG_LAYER_TB || "bg-video_tb";
+  // ---- background visual layers (NEW names)
+  const BG_SIDE_LEFT     = process.env.COMPOSITE_BG_SIDE_LEFT     || "bg_video_side_left";
+  const BG_SIDE_RIGHT    = process.env.COMPOSITE_BG_SIDE_RIGHT    || "bg_video_side_right";
+  const BG_TB_TOP        = process.env.COMPOSITE_BG_TB_TOP        || "bg_video_tb_top";
+  const BG_TB_BOTTOM     = process.env.COMPOSITE_BG_TB_BOTTOM     || "bg_video_tb_bottom";
 
-  // Audio/transcription feeder (existing)
+  // ---- audio/transcription feeder (root)
   const MAIN_AUDIO = process.env.COMPOSITE_MAIN_AUDIO_LAYER || "input_video";
 
-  // Subtitle layers (existing)
   const SUBTITLE_LAYERS = [
     "Subtitles_Sentence",
     "Subtitles_Word",
@@ -176,12 +191,18 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
   ];
 
   const layout = payload.layout === "topBottom" ? "topBottom" : "sideBySide";
-  const mainSlot = String(payload.mainSlot || (layout === "topBottom" ? "top" : "left")).toLowerCase();
 
-  // IMPORTANT: read speeds as numbers
-  const mainSpeed = Number(payload.mainSpeed || 1);
-  const bgSpeed = Number(payload.bgSpeed || 1);
-  const bgMuted = payload.bgMuted !== false;
+  // NEW: mainSlot controls where the MAIN VIDEO appears
+  // Accepts: "left" | "right" | "top" | "bottom"
+  const mainSlotRaw = String(payload.mainSlot || payload.main_slot || "left").toLowerCase();
+  const mainSlot =
+    ["left", "right", "top", "bottom"].includes(mainSlotRaw) ? mainSlotRaw : "left";
+
+  const mainSpeed = Number(payload.mainSpeed || payload.main_speed || 1);
+  const bgSpeed   = Number(payload.bgSpeed || payload.bg_speed || 1);
+
+  // background muted default true
+  const bgMuted = (payload.bgMuted ?? payload.bg_muted) !== false;
 
   const cap = payload.captions || {};
   const capEnabled = cap.enabled !== false;
@@ -206,63 +227,73 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
     settings.activeColor ??
     settings.active_color;
 
-  const m = {};
+  const mods = {};
 
-  // Layout group toggles
-  m[`${GROUP_SIDE}.visible`] = layout === "sideBySide";
-  m[`${GROUP_TB}.visible`] = layout === "topBottom";
+  // ---- layout group visibility
+  mods[GROUP_SIDE] = { visible: layout === "sideBySide" };
+  mods[GROUP_TB]   = { visible: layout === "topBottom" };
 
-  // Slot group toggles
-  m[`${G_SIDE_LEFT}.visible`] = layout === "sideBySide" && mainSlot === "left";
-  m[`${G_SIDE_RIGHT}.visible`] = layout === "sideBySide" && mainSlot === "right";
-  m[`${G_TB_TOP}.visible`] = layout === "topBottom" && mainSlot === "top";
-  m[`${G_TB_BOTTOM}.visible`] = layout === "topBottom" && mainSlot === "bottom";
+  // ---- slot group visibility (only show chosen slot within chosen layout)
+  // Side-by-side slots
+  mods[SIDE_LEFT_GROUP]  = { visible: layout === "sideBySide" && mainSlot === "left" };
+  mods[SIDE_RIGHT_GROUP] = { visible: layout === "sideBySide" && mainSlot === "right" };
 
-  // Background videos (always loaded; which one is visible depends on layout group)
-  m[BG_SIDE] = bgUrl;
-  m[`${BG_SIDE}.visible`] = true;
-  m[`${BG_SIDE}.opacity`] = "100%";
-  m[`${BG_SIDE}.volume`] = bgMuted ? "0%" : "100%";
-  m[`${BG_SIDE}.playback_rate`] = bgSpeed;
+  // Top/bottom slots
+  mods[TB_TOP_GROUP]     = { visible: layout === "topBottom" && mainSlot === "top" };
+  mods[TB_BOTTOM_GROUP]  = { visible: layout === "topBottom" && mainSlot === "bottom" };
 
-  m[BG_TB] = bgUrl;
-  m[`${BG_TB}.visible`] = true;
-  m[`${BG_TB}.opacity`] = "100%";
-  m[`${BG_TB}.volume`] = bgMuted ? "0%" : "100%";
-  m[`${BG_TB}.playback_rate`] = bgSpeed;
+  // ---- assign MAIN video to ALL main visual layers
+  // (only the visible slot group will show, but we populate all for safety)
+  const mainVisualProps = {
+    source: mainUrl,
+    playback_rate: mainSpeed,
+    visible: true,
+    opacity: 1,
+    volume: 1,
+  };
 
-  // Main visual layers (set all sources/speeds; groups decide which shows)
-  for (const layer of [MAIN_SIDE_LEFT, MAIN_SIDE_RIGHT, MAIN_TB_TOP, MAIN_TB_BOTTOM]) {
-    m[layer] = mainUrl;
-    m[`${layer}.visible`] = true;
-    m[`${layer}.opacity`] = "100%";
-    m[`${layer}.volume`] = "0%"; // keep visuals muted so feeder is the only audio
-    m[`${layer}.playback_rate`] = mainSpeed;
-  }
+  mods[MAIN_SIDE_LEFT]  = { ...mainVisualProps };
+  mods[MAIN_SIDE_RIGHT] = { ...mainVisualProps };
+  mods[MAIN_TB_TOP]     = { ...mainVisualProps };
+  mods[MAIN_TB_BOTTOM]  = { ...mainVisualProps };
 
-  // Audio/transcript feeder: audible, hidden
-  m[MAIN_AUDIO] = mainUrl;
-  m[`${MAIN_AUDIO}.visible`] = true;
-  m[`${MAIN_AUDIO}.opacity`] = "0%";
-  m[`${MAIN_AUDIO}.volume`] = "100%";
-  m[`${MAIN_AUDIO}.playback_rate`] = mainSpeed;
+  // ---- assign BG video to ALL background visual layers
+  const bgVisualProps = {
+    source: bgUrl,
+    playback_rate: bgSpeed,
+    visible: true,
+    opacity: 1,
+    volume: bgMuted ? 0 : 1,
+  };
 
-  // Captions
-  for (const name of SUBTITLE_LAYERS) m[`${name}.visible`] = false;
+  mods[BG_SIDE_LEFT]  = { ...bgVisualProps };
+  mods[BG_SIDE_RIGHT] = { ...bgVisualProps };
+  mods[BG_TB_TOP]     = { ...bgVisualProps };
+  mods[BG_TB_BOTTOM]  = { ...bgVisualProps };
 
-  m[`${pickedSubtitleLayer}.visible`] = !!capEnabled;
-  m[`${pickedSubtitleLayer}.transcript_effect`] = transcript_effect;
-  m[`${pickedSubtitleLayer}.transcript_source`] = MAIN_AUDIO;
+  // ---- hidden audio/transcript feeder (root)
+  // Keep muted to avoid double audio; captions transcribe from this.
+  mods[MAIN_AUDIO] = {
+    source: mainUrl,
+    playback_rate: mainSpeed,
+    visible: true,
+    opacity: 0,
+    volume: 0,
+  };
 
-  if (transcriptColor) {
-    m[`${pickedSubtitleLayer}.transcript_color`] = String(transcriptColor);
-  }
+  // ---- captions: turn all off, enable one
+  for (const name of SUBTITLE_LAYERS) mods[name] = { visible: false };
 
-  // Optional debug text if you have it
-  m["DEBUG_TEXT.text"] = `layout=${layout} slot=${mainSlot} mainSpeed=${mainSpeed} bgSpeed=${bgSpeed}`;
+  mods[pickedSubtitleLayer] = {
+    visible: !!capEnabled,
+    transcript_effect,
+    ...(transcriptColor ? { transcript_color: String(transcriptColor) } : {}),
+    transcript_source: MAIN_AUDIO, // keep captions tied to the feeder
+  };
 
-  return m;
+  return mods;
 }
+
 
 module.exports = async function handler(req, res) {
   setCors(req, res);
