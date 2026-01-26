@@ -118,33 +118,6 @@ function creatomateRequest(method, path, bodyObj) {
   });
 }
 
-// -------------------- Template validation --------------------
-function collectNamesDeep(node, out) {
-  if (!node || typeof node !== "object") return;
-  if (typeof node.name === "string") out.add(node.name);
-
-  for (const k of Object.keys(node)) {
-    const v = node[k];
-    if (Array.isArray(v)) v.forEach((x) => collectNamesDeep(x, out));
-    else if (v && typeof v === "object") collectNamesDeep(v, out);
-  }
-}
-
-async function assertTemplateHasNames(templateId, requiredNames) {
-  const tpl = await creatomateRequest("GET", `/v1/templates/${encodeURIComponent(templateId)}`, null);
-  const names = new Set();
-  collectNamesDeep(tpl, names);
-
-  const missing = requiredNames.filter((n) => !names.has(n));
-  if (missing.length) {
-    const err = new Error(
-      `Template mismatch: these element names are NOT in template ${templateId}: ${missing.join(", ")}`
-    );
-    err.details = { missing, templateId };
-    throw err;
-  }
-}
-
 // -------------------- Captions effect normalization --------------------
 function normalizeTranscriptEffect(v) {
   const s = String(v || "").trim().toLowerCase();
@@ -155,8 +128,8 @@ function normalizeTranscriptEffect(v) {
   return allowed.has(s) ? s : null;
 }
 
-// -------------------- Build modifications --------------------
-function buildModifications({ mainUrl, bgUrl, payload }) {
+// -------------------- Build modifications (ARRAY, official) --------------------
+function buildModificationsArray({ mainUrl, bgUrl, payload }) {
   const GROUP_SIDE = process.env.COMPOSITE_GROUP_SIDE || "Layout_SideBySide";
   const GROUP_TB = process.env.COMPOSITE_GROUP_TOPBOTTOM || "Layout_TopBottom";
 
@@ -165,7 +138,6 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
   const MAIN_TB = process.env.COMPOSITE_MAIN_LAYER_TB || "input_video_visual_tb";
   const BG_TB = process.env.COMPOSITE_BG_LAYER_TB || "bg-video_tb";
 
-  // audio/transcription feeder (optional)
   const MAIN_AUDIO = process.env.COMPOSITE_MAIN_AUDIO_LAYER || "input_video";
 
   const SUBTITLE_LAYERS = [
@@ -195,8 +167,31 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
   const capEnabled = cap.enabled !== false;
   const settings = cap.settings || {};
 
+  // IMPORTANT: your UI sends "sentence", etc. Convert to actual layer name.
+  // If your UI uses "sentence", map it:
   const styleRaw = String(cap.style || "").trim();
-  const pickedSubtitleLayer = SUBTITLE_LAYERS.includes(styleRaw) ? styleRaw : "Subtitles_Sentence";
+  const styleMap = {
+    sentence: "Subtitles_Sentence",
+    word: "Subtitles_Word",
+    karaoke: "Subtitles_Karaoke",
+    boldwhite: "Subtitles_BoldWhite",
+    yellowpop: "Subtitles_YellowPop",
+    minttag: "Subtitles_MintTag",
+    outlinepunch: "Subtitles_OutlinePunch",
+    blackbar: "Subtitles_BlackBar",
+    highlighter: "Subtitles_Highlighter",
+    neonglow: "Subtitles_NeonGlow",
+    purplepop: "Subtitles_PurplePop",
+    compactlowerthird: "Subtitles_CompactLowerThird",
+    bouncepop: "Subtitles_BouncePop",
+    redalert: "Subtitles_RedAlert",
+    redtag: "Subtitles_RedTag",
+  };
+
+  const styleKey = styleRaw.toLowerCase().replace(/[^a-z]/g, "");
+  const pickedSubtitleLayer =
+    SUBTITLE_LAYERS.includes(styleRaw) ? styleRaw
+    : styleMap[styleKey] || "Subtitles_Sentence";
 
   const effectRaw =
     settings.transcript_effect ??
@@ -214,33 +209,35 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
     settings.activeColor ??
     settings.active_color;
 
-  const mods = {};
+  const mods = [];
 
-  // Layout group visibility
-  mods[GROUP_SIDE] = { visible: layout === "sideBySide" };
-  mods[GROUP_TB] = { visible: layout === "topBottom" };
+  // layout visibility
+  mods.push({ name: GROUP_SIDE, visible: layout === "sideBySide" });
+  mods.push({ name: GROUP_TB, visible: layout === "topBottom" });
 
-  // ✅ MAIN VISIBLE VIDEOS: AUDIO ON (volume 1)
-  mods[MAIN_SIDE] = { source: mainUrl, playback_rate: mainSpeed, volume: 1 };
-  mods[MAIN_TB] = { source: mainUrl, playback_rate: mainSpeed, volume: 1 };
+  // MAIN visible (audio ON)
+  mods.push({ name: MAIN_SIDE, source: mainUrl, playback_rate: mainSpeed, volume: "100%" });
+  mods.push({ name: MAIN_TB, source: mainUrl, playback_rate: mainSpeed, volume: "100%" });
 
-  // Background video (usually muted)
-  mods[BG_SIDE] = { source: bgUrl, playback_rate: bgSpeed, volume: bgMuted ? 0 : 1 };
-  mods[BG_TB] = { source: bgUrl, playback_rate: bgSpeed, volume: bgMuted ? 0 : 1 };
+  // background
+  mods.push({ name: BG_SIDE, source: bgUrl, playback_rate: bgSpeed, volume: bgMuted ? "0%" : "100%" });
+  mods.push({ name: BG_TB, source: bgUrl, playback_rate: bgSpeed, volume: bgMuted ? "0%" : "100%" });
 
-  // Optional audio/transcript feeder (keep invisible, but do NOT rely on it for audio anymore)
-  mods[MAIN_AUDIO] = { source: mainUrl, playback_rate: mainSpeed, opacity: 0, volume: 0, visible: true };
+  // hidden transcript feeder (don’t double-audio)
+  mods.push({ name: MAIN_AUDIO, source: mainUrl, playback_rate: mainSpeed, opacity: "0%", volume: "0%", visible: true });
 
-  // Captions: turn all off, enable one
-  for (const name of SUBTITLE_LAYERS) mods[name] = { visible: false };
+  // captions off then one on
+  for (const n of SUBTITLE_LAYERS) mods.push({ name: n, visible: false });
 
-  mods[pickedSubtitleLayer] = {
+  const picked = {
+    name: pickedSubtitleLayer,
     visible: !!capEnabled,
     transcript_effect,
-    ...(transcriptColor ? { transcript_color: String(transcriptColor) } : {}),
   };
+  if (transcriptColor) picked.transcript_color = String(transcriptColor);
+  mods.push(picked);
 
-  return { mods, requiredNames: [GROUP_SIDE, GROUP_TB, MAIN_SIDE, MAIN_TB, BG_SIDE, BG_TB, MAIN_AUDIO, ...SUBTITLE_LAYERS] };
+  return mods;
 }
 
 // -------------------- Handler --------------------
@@ -254,7 +251,6 @@ module.exports = async function handler(req, res) {
 
   try {
     const BUCKET = process.env.SUPABASE_UPLOAD_BUCKET || process.env.USER_VIDEOS_BUCKET || "user-uploads";
-    const url = new URL(req.url, "https://example.local");
 
     if (req.method === "POST") {
       const body = await readJson(req);
@@ -274,26 +270,28 @@ module.exports = async function handler(req, res) {
       }
 
       const mainUrl = await signedReadUrl(BUCKET, mainPath, 60 * 60);
-      const bgUrl = backgroundVideoUrl ? String(backgroundVideoUrl) : await signedReadUrl(BUCKET, backgroundPath, 60 * 60);
+      const bgUrl = backgroundVideoUrl
+        ? String(backgroundVideoUrl)
+        : await signedReadUrl(BUCKET, backgroundPath, 60 * 60);
 
-      const { mods: modifications, requiredNames } = buildModifications({ mainUrl, bgUrl, payload: body });
-
-      // ✅ if you are rendering the wrong template, this will throw and tell you exactly what names are missing
-      await assertTemplateHasNames(templateId, requiredNames);
+      const modifications = buildModificationsArray({ mainUrl, bgUrl, payload: body });
 
       const created = await creatomateRequest("POST", "/v1/renders", {
         template_id: templateId,
-        modifications,
+        modifications, // ✅ ARRAY FORMAT
         output_format: "mp4",
       });
 
       const item = Array.isArray(created) ? created[0] : created;
-      if (!item?.id) return json(res, 500, { ok: false, error: "Creatomate response missing id", details: created });
+      const renderId = item?.id;
+      const status = item?.status || "planned";
+      if (!renderId) return json(res, 500, { ok: false, error: "Creatomate response missing id", details: created });
 
-      return json(res, 200, { ok: true, renderId: item.id, status: item.status || "planned" });
+      return json(res, 200, { ok: true, renderId, status });
     }
 
     if (req.method === "GET") {
+      const url = new URL(req.url, "https://example.local");
       const id = String(url.searchParams.get("id") || "").trim();
       if (!id) return json(res, 400, { ok: false, error: "Missing id" });
 
