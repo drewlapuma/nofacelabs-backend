@@ -6,8 +6,7 @@
 //   backgroundPath OR backgroundVideoUrl,
 //   layout: "sideBySide" | "topBottom",
 //   mainSpeed, bgSpeed, bgMuted,
-//   captions: { enabled, style, settings },
-//   useSampleUrls?: boolean   // optional debug
+//   captions: { enabled, style, settings }
 // }
 //
 // GET /api/composite?id=RENDER_ID
@@ -24,15 +23,12 @@ const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || 
 function setCors(req, res) {
   const origin = req.headers.origin;
 
-  // Always set something (prevents “missing ACAO” confusion)
+  // ✅ simplest: no credentials
   if (ALLOW_ORIGINS.includes("*")) {
     res.setHeader("Access-Control-Allow-Origin", "*");
-    // Do NOT set Allow-Credentials when using "*"
   } else if (origin && ALLOW_ORIGINS.includes(origin)) {
     res.setHeader("Access-Control-Allow-Origin", origin);
     res.setHeader("Vary", "Origin");
-    // Only set this if you truly need cookies; your frontend uses credentials:"omit" so it’s fine either way
-    // res.setHeader("Access-Control-Allow-Credentials", "true");
   }
 
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
@@ -148,14 +144,15 @@ function normalizeTranscriptEffect(v) {
 // -------------------- Build modifications --------------------
 function buildModifications({ mainUrl, bgUrl, payload }) {
   const GROUP_SIDE = process.env.COMPOSITE_GROUP_SIDE || "Layout_SideBySide";
-  const GROUP_TB   = process.env.COMPOSITE_GROUP_TOPBOTTOM || "Layout_TopBottom";
+  const GROUP_TB = process.env.COMPOSITE_GROUP_TOPBOTTOM || "Layout_TopBottom";
 
+  // visual layers (inside groups)
   const MAIN_SIDE = process.env.COMPOSITE_MAIN_LAYER_SIDE || "input_video_visual_side";
-  const BG_SIDE   = process.env.COMPOSITE_BG_LAYER_SIDE   || "bg-video_side";
-  const MAIN_TB   = process.env.COMPOSITE_MAIN_LAYER_TB   || "input_video_visual_tb";
-  const BG_TB     = process.env.COMPOSITE_BG_LAYER_TB     || "bg-video_tb";
+  const BG_SIDE = process.env.COMPOSITE_BG_LAYER_SIDE || "bg-video_side";
+  const MAIN_TB = process.env.COMPOSITE_MAIN_LAYER_TB || "input_video_visual_tb";
+  const BG_TB = process.env.COMPOSITE_BG_LAYER_TB || "bg-video_tb";
 
-  // If your subtitle layers are configured to transcribe from this layer, we can still set it:
+  // hidden audio/transcription feeder at root
   const MAIN_AUDIO = process.env.COMPOSITE_MAIN_AUDIO_LAYER || "input_video";
 
   const SUBTITLE_LAYERS = [
@@ -176,10 +173,11 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
     "Subtitles_RedTag",
   ];
 
-  const layout    = payload.layout === "topBottom" ? "topBottom" : "sideBySide";
+  const layout = payload.layout === "topBottom" ? "topBottom" : "sideBySide";
   const mainSpeed = Number(payload.mainSpeed || 1);
-  const bgSpeed   = Number(payload.bgSpeed || 1);
-  const bgMuted   = payload.bgMuted !== false; // default true
+  const bgSpeed = Number(payload.bgSpeed || 1);
+
+  const bgMuted = payload.bgMuted !== false;
 
   const cap = payload.captions || {};
   const capEnabled = cap.enabled !== false;
@@ -199,35 +197,31 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
   const transcript_effect = normalizeTranscriptEffect(effectRaw) || "color";
 
   const transcriptColor =
-    settings.transcript_color ??
-    settings.transcriptColor ??
-    settings.activeColor ??
-    settings.active_color;
+    settings.transcript_color ?? settings.transcriptColor ?? settings.activeColor ?? settings.active_color;
 
   const mods = {};
 
-  // Layout visibility
+  // layout visibility
   mods[GROUP_SIDE] = { visible: layout === "sideBySide" };
-  mods[GROUP_TB]   = { visible: layout === "topBottom" };
+  mods[GROUP_TB] = { visible: layout === "topBottom" };
 
-  // ✅ MAIN VISIBLE VIDEO MUST HAVE AUDIO
+  // ✅ Visible main video (audio ON)
   mods[MAIN_SIDE] = {
     source: mainUrl,
     playback_rate: mainSpeed,
     visible: true,
     opacity: "100%",
-    volume: "100%",     // ✅ FIX
+    volume: "100%",
   };
-
   mods[MAIN_TB] = {
     source: mainUrl,
     playback_rate: mainSpeed,
     visible: true,
     opacity: "100%",
-    volume: "100%",     // ✅ FIX
+    volume: "100%",
   };
 
-  // Background video (muted by default)
+  // ✅ Background video (muted)
   mods[BG_SIDE] = {
     source: bgUrl,
     playback_rate: bgSpeed,
@@ -235,7 +229,6 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
     opacity: "100%",
     volume: bgMuted ? "0%" : "100%",
   };
-
   mods[BG_TB] = {
     source: bgUrl,
     playback_rate: bgSpeed,
@@ -244,17 +237,18 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
     volume: bgMuted ? "0%" : "100%",
   };
 
-  // Optional: keep the old "input_video" wired for captions if your subtitle elements reference it.
-  // IMPORTANT: do NOT rely on it for audio.
+  // ✅ Hidden audio/transcript feeder (invisible but audio ON so subtitles can transcribe)
+  // If you do NOT want double-audio, keep visible layers volume 0 and feeder 100.
+  // But you said you want audio, so we keep main visible layers at 100.
   mods[MAIN_AUDIO] = {
     source: mainUrl,
     playback_rate: mainSpeed,
     visible: true,
     opacity: "0%",
-    volume: "0%",       // keep silent to avoid doubling if it DOES mix
+    volume: "100%",
   };
 
-  // Captions: turn all off, enable one
+  // captions: turn all off, enable one
   for (const name of SUBTITLE_LAYERS) mods[name] = { visible: false };
 
   mods[pickedSubtitleLayer] = {
@@ -265,7 +259,6 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
 
   return mods;
 }
-
 
 // -------------------- Handler --------------------
 module.exports = async function handler(req, res) {
@@ -287,31 +280,25 @@ module.exports = async function handler(req, res) {
       const templateId = process.env.COMPOSITE_TEMPLATE_ID;
       if (!templateId) return json(res, 500, { ok: false, error: "Missing COMPOSITE_TEMPLATE_ID env var" });
 
-      let mainUrl, bgUrl;
+      const mainPath = body.mainPath;
+      const backgroundPath = body.backgroundPath;
+      const backgroundVideoUrl = body.backgroundVideoUrl;
 
-      // Optional debug mode to test without Supabase
-      if (body.useSampleUrls) {
-        mainUrl = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4";
-        bgUrl   = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4";
-      } else {
-        const mainPath = body.mainPath;
-        const backgroundPath = body.backgroundPath;
-        const backgroundVideoUrl = body.backgroundVideoUrl;
-
-        if (!mainPath) return json(res, 400, { ok: false, error: "mainPath is required" });
-        if (!backgroundPath && !backgroundVideoUrl) {
-          return json(res, 400, { ok: false, error: "backgroundPath or backgroundVideoUrl is required" });
-        }
-
-        mainUrl = await signedReadUrl(BUCKET, mainPath, 60 * 60);
-        bgUrl = backgroundVideoUrl ? String(backgroundVideoUrl) : await signedReadUrl(BUCKET, backgroundPath, 60 * 60);
+      if (!mainPath) return json(res, 400, { ok: false, error: "mainPath is required" });
+      if (!backgroundPath && !backgroundVideoUrl) {
+        return json(res, 400, { ok: false, error: "backgroundPath or backgroundVideoUrl is required" });
       }
+
+      const mainUrl = await signedReadUrl(BUCKET, mainPath, 60 * 60);
+      const bgUrl = backgroundVideoUrl
+        ? String(backgroundVideoUrl)
+        : await signedReadUrl(BUCKET, backgroundPath, 60 * 60);
 
       const modifications = buildModifications({ mainUrl, bgUrl, payload: body });
 
       const created = await creatomateRequest("POST", "/v1/renders", {
         template_id: templateId,
-        modifications,          // ✅ must be object
+        modifications,
         output_format: "mp4",
       });
 
@@ -319,7 +306,9 @@ module.exports = async function handler(req, res) {
       const renderId = item?.id;
       const status = item?.status || "planned";
 
-      if (!renderId) return json(res, 500, { ok: false, error: "Creatomate response missing id", details: created });
+      if (!renderId) {
+        return json(res, 500, { ok: false, error: "Creatomate response missing id", details: created });
+      }
 
       return json(res, 200, { ok: true, renderId, status });
     }
