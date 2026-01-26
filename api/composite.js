@@ -132,29 +132,25 @@ function normalizeTranscriptEffect(v) {
 }
 
 function buildModifications({ mainUrl, bgUrl, payload }) {
-  // ---- layout groups
   const GROUP_SIDE = process.env.COMPOSITE_GROUP_SIDE || "Layout_SideBySide";
   const GROUP_TB   = process.env.COMPOSITE_GROUP_TOPBOTTOM || "Layout_TopBottom";
 
-  // ---- slot groups (your exact names)
   const SIDE_LEFT_GROUP  = process.env.COMPOSITE_SIDE_LEFT_GROUP  || "Main_Left";
   const SIDE_RIGHT_GROUP = process.env.COMPOSITE_SIDE_RIGHT_GROUP || "Main_Right";
   const TB_TOP_GROUP     = process.env.COMPOSITE_TB_TOP_GROUP     || "Main_Top";
   const TB_BOTTOM_GROUP  = process.env.COMPOSITE_TB_BOTTOM_GROUP  || "Main_Bottom";
 
-  // ---- main visual layers (your exact names)
   const MAIN_SIDE_LEFT   = process.env.COMPOSITE_MAIN_SIDE_LEFT   || "input_video_visual_side_left";
   const MAIN_SIDE_RIGHT  = process.env.COMPOSITE_MAIN_SIDE_RIGHT  || "input_video_visual_side_right";
   const MAIN_TB_TOP      = process.env.COMPOSITE_MAIN_TB_TOP      || "input_video_visual_tb_top";
   const MAIN_TB_BOTTOM   = process.env.COMPOSITE_MAIN_TB_BOTTOM   || "input_video_visual_tb_bottom";
 
-  // ---- background visual layers (IMPORTANT: hyphens, matches your template)
+  // IMPORTANT: hyphens match your template names
   const BG_SIDE_LEFT     = process.env.COMPOSITE_BG_SIDE_LEFT     || "bg-video_side_left";
   const BG_SIDE_RIGHT    = process.env.COMPOSITE_BG_SIDE_RIGHT    || "bg-video_side_right";
   const BG_TB_TOP        = process.env.COMPOSITE_BG_TB_TOP        || "bg-video_tb_top";
   const BG_TB_BOTTOM     = process.env.COMPOSITE_BG_TB_BOTTOM     || "bg-video_tb_bottom";
 
-  // ---- audio/transcription feeder (root)
   const MAIN_AUDIO = process.env.COMPOSITE_MAIN_AUDIO_LAYER || "input_video";
 
   const SUBTITLE_LAYERS = [
@@ -177,17 +173,13 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
 
   const layout = payload.layout === "topBottom" ? "topBottom" : "sideBySide";
 
-  // mainSlot: sideBySide => left/right, topBottom => top/bottom
   const mainSlotRaw = String(payload.mainSlot || payload.main_slot || "left").toLowerCase();
-  const mainSlot = ["left","right","top","bottom"].includes(mainSlotRaw) ? mainSlotRaw : "left";
+  const mainSlot = ["left", "right", "top", "bottom"].includes(mainSlotRaw) ? mainSlotRaw : "left";
 
   const mainSpeed = Number(payload.mainSpeed || payload.main_speed || 1);
   const bgSpeed   = Number(payload.bgSpeed || payload.bg_speed || 1);
+  const bgMuted   = (payload.bgMuted ?? payload.bg_muted) !== false;
 
-  // If you want bg always muted, keep default true
-  const bgMuted = (payload.bgMuted ?? payload.bg_muted) !== false;
-
-  // captions selection
   const cap = payload.captions || {};
   const capEnabled = cap.enabled !== false;
   const settings = cap.settings || {};
@@ -214,72 +206,104 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
   const mods = {};
 
   // ---- layout visibility
-  mods[GROUP_SIDE] = { visible: layout === "sideBySide" };
-  mods[GROUP_TB]   = { visible: layout === "topBottom" };
+  mods[`${GROUP_SIDE}.visible`] = layout === "sideBySide";
+  mods[`${GROUP_TB}.visible`]   = layout === "topBottom";
 
-  // ✅ For split layouts, BOTH halves must be visible
-  mods[SIDE_LEFT_GROUP]  = { visible: layout === "sideBySide" };
-  mods[SIDE_RIGHT_GROUP] = { visible: layout === "sideBySide" };
-  mods[TB_TOP_GROUP]     = { visible: layout === "topBottom" };
-  mods[TB_BOTTOM_GROUP]  = { visible: layout === "topBottom" };
+  // ✅ For split views, BOTH halves must be visible
+  mods[`${SIDE_LEFT_GROUP}.visible`]  = layout === "sideBySide";
+  mods[`${SIDE_RIGHT_GROUP}.visible`] = layout === "sideBySide";
+  mods[`${TB_TOP_GROUP}.visible`]     = layout === "topBottom";
+  mods[`${TB_BOTTOM_GROUP}.visible`]  = layout === "topBottom";
 
-  // Helper to set a slot to show MAIN or show BG (and hide the other layer)
-  function setSlot({ mainLayer, bgLayer, showMain }) {
-    mods[mainLayer] = {
-      source: mainUrl,
-      playback_rate: mainSpeed,
-      visible: true,
-      opacity: showMain ? 1 : 0,
-      volume: showMain ? 1 : 0, // visual layers can carry audio, but we’ll manage feeder too
-    };
-
-    mods[bgLayer] = {
-      source: bgUrl,
-      playback_rate: bgSpeed,
-      visible: true,
-      opacity: showMain ? 0 : 1,
-      volume: showMain ? 0 : (bgMuted ? 0 : 1),
-    };
+  // Helper: reliably set a video layer using the “flat” style
+  function setVideoLayer(layerName, url, { volume, opacity, visible, playbackRate }) {
+    // Setting the layer directly to a URL sets its source reliably
+    mods[layerName] = url;
+    if (typeof volume !== "undefined") mods[`${layerName}.volume`] = volume;
+    if (typeof opacity !== "undefined") mods[`${layerName}.opacity`] = opacity;
+    if (typeof visible !== "undefined") mods[`${layerName}.visible`] = visible;
+    if (typeof playbackRate !== "undefined") mods[`${layerName}.playback_rate`] = playbackRate;
   }
 
-  // ---- SIDE BY SIDE mapping
-  if (layout === "sideBySide") {
-    setSlot({ mainLayer: MAIN_SIDE_LEFT,  bgLayer: BG_SIDE_LEFT,  showMain: mainSlot === "left" });
-    setSlot({ mainLayer: MAIN_SIDE_RIGHT, bgLayer: BG_SIDE_RIGHT, showMain: mainSlot === "right" });
-  } else {
-    // still set them (safe), but hidden by group visibility
-    setSlot({ mainLayer: MAIN_SIDE_LEFT,  bgLayer: BG_SIDE_LEFT,  showMain: true });
-    setSlot({ mainLayer: MAIN_SIDE_RIGHT, bgLayer: BG_SIDE_RIGHT, showMain: false });
-  }
+  // Decide which slot shows MAIN vs BG in each layout
+  const showMainLeft   = layout === "sideBySide" && mainSlot === "left";
+  const showMainRight  = layout === "sideBySide" && mainSlot === "right";
+  const showMainTop    = layout === "topBottom" && mainSlot === "top";
+  const showMainBottom = layout === "topBottom" && mainSlot === "bottom";
 
-  // ---- TOP / BOTTOM mapping
-  if (layout === "topBottom") {
-    setSlot({ mainLayer: MAIN_TB_TOP,    bgLayer: BG_TB_TOP,    showMain: mainSlot === "top" });
-    setSlot({ mainLayer: MAIN_TB_BOTTOM, bgLayer: BG_TB_BOTTOM, showMain: mainSlot === "bottom" });
-  } else {
-    // safe defaults
-    setSlot({ mainLayer: MAIN_TB_TOP,    bgLayer: BG_TB_TOP,    showMain: true });
-    setSlot({ mainLayer: MAIN_TB_BOTTOM, bgLayer: BG_TB_BOTTOM, showMain: false });
-  }
+  // ---- SIDE BY SIDE
+  // Left slot: either main or bg
+  setVideoLayer(MAIN_SIDE_LEFT, mainUrl, {
+    visible: true,
+    opacity: showMainLeft ? 1 : 0,
+    volume: showMainLeft ? 1 : 0,
+    playbackRate: mainSpeed,
+  });
+  setVideoLayer(BG_SIDE_LEFT, bgUrl, {
+    visible: true,
+    opacity: showMainLeft ? 0 : 1,
+    volume: showMainLeft ? 0 : (bgMuted ? 0 : 1),
+    playbackRate: bgSpeed,
+  });
 
-  // ---- feeder for captions (keep muted to avoid double audio)
-  mods[MAIN_AUDIO] = {
-    source: mainUrl,
-    playback_rate: mainSpeed,
+  // Right slot
+  setVideoLayer(MAIN_SIDE_RIGHT, mainUrl, {
+    visible: true,
+    opacity: showMainRight ? 1 : 0,
+    volume: showMainRight ? 1 : 0,
+    playbackRate: mainSpeed,
+  });
+  setVideoLayer(BG_SIDE_RIGHT, bgUrl, {
+    visible: true,
+    opacity: showMainRight ? 0 : 1,
+    volume: showMainRight ? 0 : (bgMuted ? 0 : 1),
+    playbackRate: bgSpeed,
+  });
+
+  // ---- TOP / BOTTOM
+  // Top slot
+  setVideoLayer(MAIN_TB_TOP, mainUrl, {
+    visible: true,
+    opacity: showMainTop ? 1 : 0,
+    volume: showMainTop ? 1 : 0,
+    playbackRate: mainSpeed,
+  });
+  setVideoLayer(BG_TB_TOP, bgUrl, {
+    visible: true,
+    opacity: showMainTop ? 0 : 1,
+    volume: showMainTop ? 0 : (bgMuted ? 0 : 1),
+    playbackRate: bgSpeed,
+  });
+
+  // Bottom slot
+  setVideoLayer(MAIN_TB_BOTTOM, mainUrl, {
+    visible: true,
+    opacity: showMainBottom ? 1 : 0,
+    volume: showMainBottom ? 1 : 0,
+    playbackRate: mainSpeed,
+  });
+  setVideoLayer(BG_TB_BOTTOM, bgUrl, {
+    visible: true,
+    opacity: showMainBottom ? 0 : 1,
+    volume: showMainBottom ? 0 : (bgMuted ? 0 : 1),
+    playbackRate: bgSpeed,
+  });
+
+  // ---- feeder for captions (muted, hidden)
+  setVideoLayer(MAIN_AUDIO, mainUrl, {
     visible: true,
     opacity: 0,
     volume: 0,
-  };
+    playbackRate: mainSpeed,
+  });
 
-  // ---- captions: all off, one on
-  for (const name of SUBTITLE_LAYERS) mods[name] = { visible: false };
+  // ---- captions visibility
+  for (const name of SUBTITLE_LAYERS) mods[`${name}.visible`] = false;
 
-  mods[pickedSubtitleLayer] = {
-    visible: !!capEnabled,
-    transcript_effect,
-    ...(transcriptColor ? { transcript_color: String(transcriptColor) } : {}),
-    transcript_source: MAIN_AUDIO,
-  };
+  mods[`${pickedSubtitleLayer}.visible`] = !!capEnabled;
+  mods[`${pickedSubtitleLayer}.transcript_effect`] = transcript_effect;
+  mods[`${pickedSubtitleLayer}.transcript_source`] = MAIN_AUDIO;
+  if (transcriptColor) mods[`${pickedSubtitleLayer}.transcript_color`] = String(transcriptColor);
 
   return mods;
 }
