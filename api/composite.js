@@ -3,7 +3,6 @@
 const https = require("https");
 const { createClient } = require("@supabase/supabase-js");
 
-// -------------------- CORS --------------------
 const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || "*")
   .split(",")
   .map((s) => s.trim())
@@ -12,8 +11,10 @@ const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || 
 function setCors(req, res) {
   const origin = req.headers.origin;
 
+  // Always answer origin in a safe way
   if (ALLOW_ORIGINS.includes("*")) {
-    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Origin", origin || "*");
+    res.setHeader("Vary", "Origin");
   } else if (origin && ALLOW_ORIGINS.includes(origin)) {
     res.setHeader("Access-Control-Allow-Origin", origin);
     res.setHeader("Vary", "Origin");
@@ -124,20 +125,22 @@ function normalizeTranscriptEffect(v) {
   if (!s) return null;
 
   if (["highlighter", "yellowpop", "minttag", "purplepop", "redtag"].includes(s)) return "highlight";
+
   const allowed = new Set(["color", "karaoke", "highlight", "fade", "bounce", "slide", "enlarge"]);
   return allowed.has(s) ? s : null;
 }
 
-// -------------------- Build modifications (ARRAY, official) --------------------
-function buildModificationsArray({ mainUrl, bgUrl, payload }) {
+// -------------------- Build modifications (OBJECT) --------------------
+function buildModifications({ mainUrl, bgUrl, payload }) {
   const GROUP_SIDE = process.env.COMPOSITE_GROUP_SIDE || "Layout_SideBySide";
-  const GROUP_TB = process.env.COMPOSITE_GROUP_TOPBOTTOM || "Layout_TopBottom";
+  const GROUP_TB   = process.env.COMPOSITE_GROUP_TOPBOTTOM || "Layout_TopBottom";
 
   const MAIN_SIDE = process.env.COMPOSITE_MAIN_LAYER_SIDE || "input_video_visual_side";
-  const BG_SIDE = process.env.COMPOSITE_BG_LAYER_SIDE || "bg-video_side";
-  const MAIN_TB = process.env.COMPOSITE_MAIN_LAYER_TB || "input_video_visual_tb";
-  const BG_TB = process.env.COMPOSITE_BG_LAYER_TB || "bg-video_tb";
+  const BG_SIDE   = process.env.COMPOSITE_BG_LAYER_SIDE   || "bg-video_side";
+  const MAIN_TB   = process.env.COMPOSITE_MAIN_LAYER_TB   || "input_video_visual_tb";
+  const BG_TB     = process.env.COMPOSITE_BG_LAYER_TB     || "bg-video_tb";
 
+  // audio/transcription feeder (root)
   const MAIN_AUDIO = process.env.COMPOSITE_MAIN_AUDIO_LAYER || "input_video";
 
   const SUBTITLE_LAYERS = [
@@ -160,38 +163,15 @@ function buildModificationsArray({ mainUrl, bgUrl, payload }) {
 
   const layout = payload.layout === "topBottom" ? "topBottom" : "sideBySide";
   const mainSpeed = Number(payload.mainSpeed || 1);
-  const bgSpeed = Number(payload.bgSpeed || 1);
-  const bgMuted = payload.bgMuted !== false;
+  const bgSpeed   = Number(payload.bgSpeed || 1);
+  const bgMuted   = payload.bgMuted !== false; // default true
 
   const cap = payload.captions || {};
   const capEnabled = cap.enabled !== false;
   const settings = cap.settings || {};
 
-  // IMPORTANT: your UI sends "sentence", etc. Convert to actual layer name.
-  // If your UI uses "sentence", map it:
   const styleRaw = String(cap.style || "").trim();
-  const styleMap = {
-    sentence: "Subtitles_Sentence",
-    word: "Subtitles_Word",
-    karaoke: "Subtitles_Karaoke",
-    boldwhite: "Subtitles_BoldWhite",
-    yellowpop: "Subtitles_YellowPop",
-    minttag: "Subtitles_MintTag",
-    outlinepunch: "Subtitles_OutlinePunch",
-    blackbar: "Subtitles_BlackBar",
-    highlighter: "Subtitles_Highlighter",
-    neonglow: "Subtitles_NeonGlow",
-    purplepop: "Subtitles_PurplePop",
-    compactlowerthird: "Subtitles_CompactLowerThird",
-    bouncepop: "Subtitles_BouncePop",
-    redalert: "Subtitles_RedAlert",
-    redtag: "Subtitles_RedTag",
-  };
-
-  const styleKey = styleRaw.toLowerCase().replace(/[^a-z]/g, "");
-  const pickedSubtitleLayer =
-    SUBTITLE_LAYERS.includes(styleRaw) ? styleRaw
-    : styleMap[styleKey] || "Subtitles_Sentence";
+  const pickedSubtitleLayer = SUBTITLE_LAYERS.includes(styleRaw) ? styleRaw : "Subtitles_Sentence";
 
   const effectRaw =
     settings.transcript_effect ??
@@ -209,33 +189,64 @@ function buildModificationsArray({ mainUrl, bgUrl, payload }) {
     settings.activeColor ??
     settings.active_color;
 
-  const mods = [];
+  const mods = {};
 
-  // layout visibility
-  mods.push({ name: GROUP_SIDE, visible: layout === "sideBySide" });
-  mods.push({ name: GROUP_TB, visible: layout === "topBottom" });
+  // Layout groups
+  mods[GROUP_SIDE] = { visible: layout === "sideBySide" };
+  mods[GROUP_TB]   = { visible: layout === "topBottom" };
 
-  // MAIN visible (audio ON)
-  mods.push({ name: MAIN_SIDE, source: mainUrl, playback_rate: mainSpeed, volume: "100%" });
-  mods.push({ name: MAIN_TB, source: mainUrl, playback_rate: mainSpeed, volume: "100%" });
+  // IMPORTANT:
+  // - Make VISIBLE layers have REAL volume (100) and visible true.
+  // - Keep the hidden feeder invisible, but it can be muted; transcript still works.
+  mods[MAIN_SIDE] = {
+    source: mainUrl,
+    playback_rate: mainSpeed,
+    visible: true,
+    opacity: 1,
+    volume: 1,
+  };
 
-  // background
-  mods.push({ name: BG_SIDE, source: bgUrl, playback_rate: bgSpeed, volume: bgMuted ? "0%" : "100%" });
-  mods.push({ name: BG_TB, source: bgUrl, playback_rate: bgSpeed, volume: bgMuted ? "0%" : "100%" });
+  mods[MAIN_TB] = {
+    source: mainUrl,
+    playback_rate: mainSpeed,
+    visible: true,
+    opacity: 1,
+    volume: 1,
+  };
 
-  // hidden transcript feeder (don’t double-audio)
-  mods.push({ name: MAIN_AUDIO, source: mainUrl, playback_rate: mainSpeed, opacity: "0%", volume: "0%", visible: true });
+  mods[BG_SIDE] = {
+    source: bgUrl,
+    playback_rate: bgSpeed,
+    visible: true,
+    volume: bgMuted ? 0 : 1,
+  };
 
-  // captions off then one on
-  for (const n of SUBTITLE_LAYERS) mods.push({ name: n, visible: false });
+  mods[BG_TB] = {
+    source: bgUrl,
+    playback_rate: bgSpeed,
+    visible: true,
+    volume: bgMuted ? 0 : 1,
+  };
 
-  const picked = {
-    name: pickedSubtitleLayer,
+  // Hidden audio/transcript feeder
+  mods[MAIN_AUDIO] = {
+    source: mainUrl,
+    playback_rate: mainSpeed,
+    visible: true,
+    opacity: 0,
+    volume: 0, // keep it muted to avoid double audio
+  };
+
+  // Captions: all off then one on
+  for (const name of SUBTITLE_LAYERS) mods[name] = { visible: false };
+
+  mods[pickedSubtitleLayer] = {
     visible: !!capEnabled,
     transcript_effect,
+    ...(transcriptColor ? { transcript_color: String(transcriptColor) } : {}),
+    // This helps if your subtitle element is set to a source in UI:
+    transcript_source: MAIN_AUDIO,
   };
-  if (transcriptColor) picked.transcript_color = String(transcriptColor);
-  mods.push(picked);
 
   return mods;
 }
@@ -274,33 +285,37 @@ module.exports = async function handler(req, res) {
         ? String(backgroundVideoUrl)
         : await signedReadUrl(BUCKET, backgroundPath, 60 * 60);
 
-      const modifications = buildModificationsArray({ mainUrl, bgUrl, payload: body });
+      const modifications = buildModifications({ mainUrl, bgUrl, payload: body });
 
       const created = await creatomateRequest("POST", "/v1/renders", {
         template_id: templateId,
-        modifications, // ✅ ARRAY FORMAT
+        modifications, // MUST be an object
         output_format: "mp4",
       });
 
       const item = Array.isArray(created) ? created[0] : created;
       const renderId = item?.id;
       const status = item?.status || "planned";
+
       if (!renderId) return json(res, 500, { ok: false, error: "Creatomate response missing id", details: created });
 
       return json(res, 200, { ok: true, renderId, status });
     }
 
     if (req.method === "GET") {
-      const url = new URL(req.url, "https://example.local");
-      const id = String(url.searchParams.get("id") || "").trim();
+      const id = String(req.query?.id || "").trim();
       if (!id) return json(res, 400, { ok: false, error: "Missing id" });
 
       const r = await creatomateRequest("GET", `/v1/renders/${encodeURIComponent(id)}`, null);
       const status = String(r?.status || "").toLowerCase();
-      const outUrl = r?.url || r?.output_url || null;
+      const url = r?.url || r?.output_url || null;
 
-      if (status === "failed") return json(res, 200, { ok: true, status: "failed", error: r?.error || r?.message || "Render failed" });
-      if (status === "succeeded" && outUrl) return json(res, 200, { ok: true, status: "succeeded", url: outUrl });
+      if (status === "failed") {
+        return json(res, 200, { ok: true, status: "failed", error: r?.error || r?.message || "Render failed" });
+      }
+      if (status === "succeeded" && url) {
+        return json(res, 200, { ok: true, status: "succeeded", url, warnings: r?.warnings || null });
+      }
 
       return json(res, 200, { ok: true, status: r?.status || "processing" });
     }
@@ -310,6 +325,7 @@ module.exports = async function handler(req, res) {
     return json(res, 500, {
       ok: false,
       error: err?.message || String(err),
+      statusCode: err?.statusCode || null,
       details: err?.details || null,
     });
   }
