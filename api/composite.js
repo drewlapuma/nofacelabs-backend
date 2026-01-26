@@ -10,13 +10,6 @@
 // }
 //
 // GET /api/composite?id=RENDER_ID
-//
-// ✅ Updates:
-// - Keeps modifications as an OBJECT (required by Creatomate)
-// - Uses numeric volume/opacity (0..1), no "0%" strings
-// - Adds DEBUG_TEXT support (optional) so you can confirm correct template + element targeting
-// - GET now returns warnings/error/debug fields so we can see fetch/decode problems
-// - CORS: safe origin echo (works with credentials if you add them later)
 
 const https = require("https");
 const { createClient } = require("@supabase/supabase-js");
@@ -30,7 +23,7 @@ const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || 
 function setCors(req, res) {
   const origin = req.headers.origin;
 
-  // If wildcard, echo requesting origin to satisfy browsers when credentials are used later.
+  // Echo origin when wildcard to satisfy browsers
   if (ALLOW_ORIGINS.includes("*")) {
     res.setHeader("Access-Control-Allow-Origin", origin || "*");
     res.setHeader("Vary", "Origin");
@@ -159,11 +152,10 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
   const MAIN_TB = process.env.COMPOSITE_MAIN_LAYER_TB || "input_video_visual_tb";
   const BG_TB = process.env.COMPOSITE_BG_LAYER_TB || "bg-video_tb";
 
-  // audio/transcription feeder (root)
+  // hidden transcript/audio feeder at root
   const MAIN_AUDIO = process.env.COMPOSITE_MAIN_AUDIO_LAYER || "input_video";
 
-  // Optional debug element name you will create in the Creatomate editor
-  // Create a BIG Text element named exactly DEBUG_TEXT.
+  // optional debug element (you created this)
   const DEBUG_TEXT = process.env.COMPOSITE_DEBUG_TEXT || "DEBUG_TEXT";
 
   const SUBTITLE_LAYERS = [
@@ -214,37 +206,71 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
 
   const mods = {};
 
-  // Layout groups visibility
+  // Layout groups
   mods[GROUP_SIDE] = { visible: layout === "sideBySide" };
   mods[GROUP_TB] = { visible: layout === "topBottom" };
 
-  // Visible videos: DO NOT force opacity/visible unless you need it.
-  // Use numeric volume (0..1).
-  mods[MAIN_SIDE] = { source: mainUrl, playback_rate: mainSpeed, volume: 1 };
-  mods[MAIN_TB] = { source: mainUrl, playback_rate: mainSpeed, volume: 1 };
-
-  // Background: muted by default
-  mods[BG_SIDE] = { source: bgUrl, playback_rate: bgSpeed, volume: bgMuted ? 0 : 1 };
-  mods[BG_TB] = { source: bgUrl, playback_rate: bgSpeed, volume: bgMuted ? 0 : 1 };
-
-  // Hidden feeder: keep invisible and muted (captions can still transcribe from it if your subtitle uses it)
-  // NOTE: If your subtitle element in the template is set to transcribe from input_video, keep this.
-  mods[MAIN_AUDIO] = { source: mainUrl, playback_rate: mainSpeed, opacity: 0, volume: 0 };
-
-  // Optional: debug text to confirm template + element targeting
-  // Only apply if you created the element in the editor; if not, this will simply be ignored.
+  // Debug
   mods[DEBUG_TEXT] = { text: "API HIT ✅" };
 
-  // Captions: all off then one on
+  // Visible main videos (MATCH TEMPLATE FORMAT: percentages)
+  mods[MAIN_SIDE] = {
+    provider: "url",
+    source: mainUrl,
+    playback_rate: mainSpeed,
+    visible: true,
+    opacity: "100%",
+    volume: "100%",
+  };
+
+  mods[MAIN_TB] = {
+    provider: "url",
+    source: mainUrl,
+    playback_rate: mainSpeed,
+    visible: true,
+    opacity: "100%",
+    volume: "100%",
+  };
+
+  // Background videos (muted)
+  mods[BG_SIDE] = {
+    provider: "url",
+    source: bgUrl,
+    playback_rate: bgSpeed,
+    visible: true,
+    opacity: "100%",
+    volume: bgMuted ? "0%" : "100%",
+  };
+
+  mods[BG_TB] = {
+    provider: "url",
+    source: bgUrl,
+    playback_rate: bgSpeed,
+    visible: true,
+    opacity: "100%",
+    volume: bgMuted ? "0%" : "100%",
+  };
+
+  // Hidden transcript/audio feeder:
+  // - If your captions are set to transcribe from input_video, keep this.
+  // - Keep it silent so audio comes from the visible main layers.
+  mods[MAIN_AUDIO] = {
+    provider: "url",
+    source: mainUrl,
+    playback_rate: mainSpeed,
+    visible: true,
+    opacity: "0%",
+    volume: "0%",
+  };
+
+  // Captions: turn all off, enable one
   for (const name of SUBTITLE_LAYERS) mods[name] = { visible: false };
 
   mods[pickedSubtitleLayer] = {
     visible: !!capEnabled,
     transcript_effect,
     ...(transcriptColor ? { transcript_color: String(transcriptColor) } : {}),
-    // If Creatomate supports transcript_source for your subtitle elements, this helps.
-    // If it doesn't, it will be ignored (safe).
-    transcript_source: MAIN_AUDIO,
+    transcript_source: MAIN_AUDIO, // safe if ignored
   };
 
   return mods;
@@ -267,8 +293,7 @@ module.exports = async function handler(req, res) {
       if (!body) return json(res, 400, { ok: false, error: "Missing body" });
       if (body === "__INVALID__") return json(res, 400, { ok: false, error: "Invalid JSON" });
 
-      const templateId = process.env.COMPOSITE_TEMPLATE_ID;
-      if (!templateId) return json(res, 500, { ok: false, error: "Missing COMPOSITE_TEMPLATE_ID env var" });
+      const templateId = process.env.COMPOSITE_TEMPLATE_ID || "400f52c1-f789-4da8-80a3-7b4b2634a989";
 
       const mainPath = body.mainPath;
       const backgroundPath = body.backgroundPath;
@@ -296,13 +321,7 @@ module.exports = async function handler(req, res) {
       const renderId = item?.id;
       const status = item?.status || "planned";
 
-      if (!renderId) {
-        return json(res, 500, {
-          ok: false,
-          error: "Creatomate response missing id",
-          details: created,
-        });
-      }
+      if (!renderId) return json(res, 500, { ok: false, error: "Creatomate response missing id", details: created });
 
       return json(res, 200, { ok: true, renderId, status });
     }
@@ -319,12 +338,8 @@ module.exports = async function handler(req, res) {
         url: r?.url || r?.output_url || null,
         warnings: r?.warnings || null,
         error: r?.error || r?.message || null,
-        debug: {
-          fetch: r?.fetch || null,
-          inputs: r?.inputs || null,
-          file_size: r?.file_size || null,
-          duration: r?.duration || null,
-        },
+        file_size: r?.file_size || null,
+        duration: r?.duration || null,
       });
     }
 
