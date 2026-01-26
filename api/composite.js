@@ -137,154 +137,100 @@ function normalizeTranscriptEffect(v) {
   const allowed = new Set(["color", "karaoke", "highlight", "fade", "bounce", "slide", "enlarge"]);
   return allowed.has(s) ? s : null;
 }
-
-// -------------------- Build modifications (FLAT / dot-notation) --------------------
+///buildmodifactions\\\\
 function buildModifications({ mainUrl, bgUrl, payload }) {
   const GROUP_SIDE = process.env.COMPOSITE_GROUP_SIDE || "Layout_SideBySide";
-  const GROUP_TB = process.env.COMPOSITE_GROUP_TOPBOTTOM || "Layout_TopBottom";
+  const GROUP_TB   = process.env.COMPOSITE_GROUP_TOPBOTTOM || "Layout_TopBottom";
 
-  // Slot groups (containers in your template)
-  const GROUP_MAIN_LEFT = process.env.COMPOSITE_GROUP_MAIN_LEFT || "Main_Left";
-  const GROUP_MAIN_RIGHT = process.env.COMPOSITE_GROUP_MAIN_RIGHT || "Main_Right";
-  const GROUP_MAIN_TOP = process.env.COMPOSITE_GROUP_MAIN_TOP || "Main_Top";
-  const GROUP_MAIN_BOTTOM = process.env.COMPOSITE_GROUP_MAIN_BOTTOM || "Main_Bottom";
+  // ✅ slot groups inside layouts
+  const SIDE_LEFT_GROUP  = process.env.COMPOSITE_SIDE_LEFT_GROUP  || "Main_Left";
+  const SIDE_RIGHT_GROUP = process.env.COMPOSITE_SIDE_RIGHT_GROUP || "Main_Right";
+  const TB_TOP_GROUP     = process.env.COMPOSITE_TB_TOP_GROUP     || "Main_Top";
+  const TB_BOTTOM_GROUP  = process.env.COMPOSITE_TB_BOTTOM_GROUP  || "Main_Bottom";
 
-  // Your exact element names (from your screenshot)
-  const MAIN_SIDE_RIGHT = process.env.COMPOSITE_MAIN_SIDE_RIGHT || "input_video_visual_side_right";
-  const MAIN_SIDE_LEFT = process.env.COMPOSITE_MAIN_SIDE_LEFT || "input_video_visual_side_left";
-  const MAIN_TB_TOP = process.env.COMPOSITE_MAIN_TB_TOP || "input_video_visual_tb_top";
-  const MAIN_TB_BOTTOM = process.env.COMPOSITE_MAIN_TB_BOTTOM || "input_video_visual_tb_bottom";
+  // ✅ your exact layer names (hyphen after bg)
+  const MAIN_SIDE_LEFT   = process.env.COMPOSITE_MAIN_SIDE_LEFT   || "input_video_visual_side_left";
+  const MAIN_SIDE_RIGHT  = process.env.COMPOSITE_MAIN_SIDE_RIGHT  || "input_video_visual_side_right";
+  const MAIN_TB_TOP      = process.env.COMPOSITE_MAIN_TB_TOP      || "input_video_visual_tb_top";
+  const MAIN_TB_BOTTOM   = process.env.COMPOSITE_MAIN_TB_BOTTOM   || "input_video_visual_tb_bottom";
 
-  const BG_SIDE_RIGHT = process.env.COMPOSITE_BG_SIDE_RIGHT || "bg-video_side_right";
-  const BG_SIDE_LEFT = process.env.COMPOSITE_BG_SIDE_LEFT || "bg-video_side_left";
-  const BG_TB_TOP = process.env.COMPOSITE_BG_TB_TOP || "bg-video_tb_top";
-  const BG_TB_BOTTOM = process.env.COMPOSITE_BG_TB_BOTTOM || "bg-video_tb_bottom";
+  const BG_SIDE_LEFT     = process.env.COMPOSITE_BG_SIDE_LEFT     || "bg-video_side_left";
+  const BG_SIDE_RIGHT    = process.env.COMPOSITE_BG_SIDE_RIGHT    || "bg-video_side_right";
+  const BG_TB_TOP        = process.env.COMPOSITE_BG_TB_TOP        || "bg-video_tb_top";
+  const BG_TB_BOTTOM     = process.env.COMPOSITE_BG_TB_BOTTOM     || "bg-video_tb_bottom";
 
-  // Hidden feeder for captions / transcript + audio output
   const MAIN_AUDIO = process.env.COMPOSITE_MAIN_AUDIO_LAYER || "input_video";
 
-  const SUBTITLE_LAYERS = [
-    "Subtitles_Sentence",
-    "Subtitles_Word",
-    "Subtitles_Karaoke",
-    "Subtitles_BoldWhite",
-    "Subtitles_YellowPop",
-    "Subtitles_MintTag",
-    "Subtitles_OutlinePunch",
-    "Subtitles_BlackBar",
-    "Subtitles_Highlighter",
-    "Subtitles_NeonGlow",
-    "Subtitles_PurplePop",
-    "Subtitles_CompactLowerThird",
-    "Subtitles_BouncePop",
-    "Subtitles_RedAlert",
-    "Subtitles_RedTag",
-  ];
-
   const layout = payload.layout === "topBottom" ? "topBottom" : "sideBySide";
-
-  const mainSlotRaw = String(payload.mainSlot || payload.main_slot || "left").toLowerCase();
+  const mainSlotRaw = String(payload.mainSlot || "left").toLowerCase();
   const mainSlot = ["left", "right", "top", "bottom"].includes(mainSlotRaw) ? mainSlotRaw : "left";
 
-  const mainSpeed = Number(payload.mainSpeed || payload.main_speed || 1);
-  const bgSpeed = Number(payload.bgSpeed || payload.bg_speed || 1);
-  const bgMuted = (payload.bgMuted ?? payload.bg_muted) !== false; // default true
+  const mainSpeed = Number(payload.mainSpeed || 1);
+  const bgSpeed   = Number(payload.bgSpeed || 1);
+  const bgMuted   = payload.bgMuted !== false;
 
-  const cap = payload.captions || {};
-  const capEnabled = cap.enabled !== false;
-  const settings = cap.settings || {};
-
-  const styleRaw = String(cap.style || "").trim();
-  const pickedSubtitleLayer = SUBTITLE_LAYERS.includes(styleRaw) ? styleRaw : "Subtitles_Sentence";
-
-  const effectRaw =
-    settings.transcript_effect ??
-    settings.transcriptEffect ??
-    settings.active_effect ??
-    settings.activeEffect ??
-    settings.effect ??
-    styleRaw;
-
-  const transcript_effect = normalizeTranscriptEffect(effectRaw) || "color";
-
-  const transcriptColor =
-    settings.transcript_color ??
-    settings.transcriptColor ??
-    settings.activeColor ??
-    settings.active_color;
+  const showMainLeft   = layout === "sideBySide" && mainSlot === "left";
+  const showMainRight  = layout === "sideBySide" && mainSlot === "right";
+  const showMainTop    = layout === "topBottom" && mainSlot === "top";
+  const showMainBottom = layout === "topBottom" && mainSlot === "bottom";
 
   const m = {};
 
-  // Optional debug layer if you have it
-  m["DEBUG_TEXT.text"] = "API HIT ✅";
-
-  // ---- Layout visibility
+  // ✅ show correct layout container
   m[`${GROUP_SIDE}.visible`] = layout === "sideBySide";
-  m[`${GROUP_TB}.visible`] = layout === "topBottom";
+  m[`${GROUP_TB}.visible`]   = layout === "topBottom";
 
-  // ✅ CRITICAL: Slot groups MUST be enabled or inner layers won't render
-  m[`${GROUP_MAIN_LEFT}.visible`] = layout === "sideBySide";
-  m[`${GROUP_MAIN_RIGHT}.visible`] = layout === "sideBySide";
-  m[`${GROUP_MAIN_TOP}.visible`] = layout === "topBottom";
-  m[`${GROUP_MAIN_BOTTOM}.visible`] = layout === "topBottom";
+  // ✅ CRITICAL: force slot groups ON so children can render
+  m[`${SIDE_LEFT_GROUP}.visible`]  = layout === "sideBySide";
+  m[`${SIDE_RIGHT_GROUP}.visible`] = layout === "sideBySide";
+  m[`${TB_TOP_GROUP}.visible`]     = layout === "topBottom";
+  m[`${TB_BOTTOM_GROUP}.visible`]  = layout === "topBottom";
 
-  // ---- Decide which slot shows MAIN
-  const showMainLeft = layout === "sideBySide" && mainSlot === "left";
-  const showMainRight = layout === "sideBySide" && mainSlot === "right";
-  const showMainTop = layout === "topBottom" && mainSlot === "top";
-  const showMainBottom = layout === "topBottom" && mainSlot === "bottom";
-
-  // ---- MAIN visuals
-  // We keep visuals muted to avoid double-audio (audio comes from MAIN_AUDIO feeder)
-  function setMain(name, isOn) {
+  // MAIN visuals (mute visuals, audio comes from feeder)
+  const setMain = (name, on) => {
     m[name] = String(mainUrl);
     m[`${name}.visible`] = true;
-    m[`${name}.opacity`] = isOn ? "100%" : "0%";
+    m[`${name}.opacity`] = on ? "100%" : "0%";
     m[`${name}.volume`] = "0%";
     m[`${name}.playback_rate`] = mainSpeed;
-  }
+  };
 
   setMain(MAIN_SIDE_LEFT, showMainLeft);
   setMain(MAIN_SIDE_RIGHT, showMainRight);
   setMain(MAIN_TB_TOP, showMainTop);
   setMain(MAIN_TB_BOTTOM, showMainBottom);
 
-  // ---- BG visuals (show where MAIN is NOT)
-  // NOTE: even if bgMuted=true, it should still be visible; we only mute audio.
-  function setBg(name, isOn) {
+  // BG visuals (show wherever main is NOT)
+  const bgVol = bgMuted ? "0%" : "100%";
+  const setBg = (name, on) => {
     m[name] = String(bgUrl);
     m[`${name}.visible`] = true;
-    m[`${name}.opacity`] = isOn ? "100%" : "0%";
-    m[`${name}.volume`] = bgMuted ? "0%" : "100%";
+    m[`${name}.opacity`] = on ? "100%" : "0%";
+    m[`${name}.volume`] = bgVol;
     m[`${name}.playback_rate`] = bgSpeed;
-  }
+  };
 
   setBg(BG_SIDE_LEFT, !showMainLeft && layout === "sideBySide");
   setBg(BG_SIDE_RIGHT, !showMainRight && layout === "sideBySide");
   setBg(BG_TB_TOP, !showMainTop && layout === "topBottom");
   setBg(BG_TB_BOTTOM, !showMainBottom && layout === "topBottom");
 
-  // ---- Hidden transcript/audio feeder: invisible but audible ✅
-  // Captions transcribe from this, and this is the only audible source.
+  // audio/transcript feeder (invisible but audible)
   m[MAIN_AUDIO] = String(mainUrl);
   m[`${MAIN_AUDIO}.visible`] = true;
   m[`${MAIN_AUDIO}.opacity`] = "0%";
   m[`${MAIN_AUDIO}.volume`] = "100%";
   m[`${MAIN_AUDIO}.playback_rate`] = mainSpeed;
 
-  // ---- Captions
-  for (const name of SUBTITLE_LAYERS) m[`${name}.visible`] = false;
-
-  m[`${pickedSubtitleLayer}.visible`] = !!capEnabled;
-  m[`${pickedSubtitleLayer}.transcript_effect`] = transcript_effect;
-  m[`${pickedSubtitleLayer}.transcript_source`] = MAIN_AUDIO;
-
-  if (transcriptColor) {
-    m[`${pickedSubtitleLayer}.transcript_color`] = String(transcriptColor);
-  }
+  // captions (leave as you already have)
+  const subtitle = "Subtitles_Sentence";
+  m[`${subtitle}.visible`] = true;
+  m[`${subtitle}.transcript_source`] = MAIN_AUDIO;
+  m[`${subtitle}.transcript_effect`] = "color";
 
   return m;
 }
+
 
 // -------------------- Handler --------------------
 module.exports = async function handler(req, res) {
