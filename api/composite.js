@@ -215,44 +215,46 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
   mods[MAIN_SIDE] = {
     source: mainUrl,
     playback_rate: mainSpeed,
-    volume: 1,
-    opacity: 1,
+    volume: "0%",
     visible: true,
+    opacity: "100%",
   };
 
   mods[MAIN_TB] = {
-    source: mainUrl,
+  source: mainUrl,
     playback_rate: mainSpeed,
-    volume: 1,
-    opacity: 1,
+    volume: "0%",
     visible: true,
-  };
+    opacity: "100%",
 
   // ---- BACKGROUND VIDEO (muted)
   mods[BG_SIDE] = {
     source: bgUrl,
     playback_rate: bgSpeed,
-    volume: bgMuted ? 0 : 1,
+    volume: "0%",
     visible: true,
+    opacity: "100%",
   };
 
   mods[BG_TB] = {
-    source: bgUrl,
+   source: bgUrl,
     playback_rate: bgSpeed,
-    volume: bgMuted ? 0 : 1,
+    volume: "0%",
     visible: true,
+    opacity: "100%",
   };
 
   // ---- HIDDEN TRANSCRIPT FEEDER
   // Keep hidden, and mute it so you don't get double audio.
   // (Captions can still transcribe from it if your subtitle element is set to that source)
-  mods[MAIN_AUDIO] = {
-    source: mainUrl,
-    playback_rate: mainSpeed,
-    opacity: 0,
-    volume: 0,
-    visible: true,
-  };
+mods[MAIN_AUDIO] = {
+  source: mainUrl,
+  playback_rate: mainSpeed,
+  visible: true,
+  opacity: "0%",     // invisible but still provides audio/transcription
+  volume: "100%"     // ✅ audio ON
+};
+
 
   // ---- captions: turn all off, enable one
   for (const name of SUBTITLE_LAYERS) mods[name] = { visible: false };
