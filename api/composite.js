@@ -1,10 +1,4 @@
 // api/composite.js (CommonJS, Node 18+ on Vercel)
-// ✅ Fixes in this version:
-// - Uses percent strings for opacity/volume (prevents "black/blank" renders)
-// - Keeps input_video as the audible transcript feeder (captions + audio work)
-// - Mutes visual main layers to prevent double-audio
-// - ✅ NEW: Forces slot groups (Main_Left/Main_Right/Main_Top/Main_Bottom) visible
-//   so background layers inside those groups actually render.
 
 const https = require("https");
 const { createClient } = require("@supabase/supabase-js");
@@ -131,108 +125,177 @@ function normalizeTranscriptEffect(v) {
   const s = String(v || "").trim().toLowerCase();
   if (!s) return null;
 
-  // map your style names to an allowed effect
   if (["highlighter", "yellowpop", "minttag", "purplepop", "redtag"].includes(s)) return "highlight";
 
   const allowed = new Set(["color", "karaoke", "highlight", "fade", "bounce", "slide", "enlarge"]);
   return allowed.has(s) ? s : null;
 }
-///buildmodifactions\\\\
+
+// -------------------- Build modifications --------------------
 function buildModifications({ mainUrl, bgUrl, payload }) {
+  // Layout groups
   const GROUP_SIDE = process.env.COMPOSITE_GROUP_SIDE || "Layout_SideBySide";
-  const GROUP_TB   = process.env.COMPOSITE_GROUP_TOPBOTTOM || "Layout_TopBottom";
+  const GROUP_TB = process.env.COMPOSITE_GROUP_TOPBOTTOM || "Layout_TopBottom";
 
-  // ✅ slot groups inside layouts
-  const SIDE_LEFT_GROUP  = process.env.COMPOSITE_SIDE_LEFT_GROUP  || "Main_Left";
+  // Slot groups (IMPORTANT: we will force these visible)
+  const SIDE_LEFT_GROUP = process.env.COMPOSITE_SIDE_LEFT_GROUP || "Main_Left";
   const SIDE_RIGHT_GROUP = process.env.COMPOSITE_SIDE_RIGHT_GROUP || "Main_Right";
-  const TB_TOP_GROUP     = process.env.COMPOSITE_TB_TOP_GROUP     || "Main_Top";
-  const TB_BOTTOM_GROUP  = process.env.COMPOSITE_TB_BOTTOM_GROUP  || "Main_Bottom";
+  const TB_TOP_GROUP = process.env.COMPOSITE_TB_TOP_GROUP || "Main_Top";
+  const TB_BOTTOM_GROUP = process.env.COMPOSITE_TB_BOTTOM_GROUP || "Main_Bottom";
 
-  // ✅ your exact layer names (hyphen after bg)
-  const MAIN_SIDE_LEFT   = process.env.COMPOSITE_MAIN_SIDE_LEFT   || "input_video_visual_side_left";
-  const MAIN_SIDE_RIGHT  = process.env.COMPOSITE_MAIN_SIDE_RIGHT  || "input_video_visual_side_right";
-  const MAIN_TB_TOP      = process.env.COMPOSITE_MAIN_TB_TOP      || "input_video_visual_tb_top";
-  const MAIN_TB_BOTTOM   = process.env.COMPOSITE_MAIN_TB_BOTTOM   || "input_video_visual_tb_bottom";
+  // Main visual layers (your exact names)
+  const MAIN_SIDE_LEFT = process.env.COMPOSITE_MAIN_SIDE_LEFT || "input_video_visual_side_left";
+  const MAIN_SIDE_RIGHT = process.env.COMPOSITE_MAIN_SIDE_RIGHT || "input_video_visual_side_right";
+  const MAIN_TB_TOP = process.env.COMPOSITE_MAIN_TB_TOP || "input_video_visual_tb_top";
+  const MAIN_TB_BOTTOM = process.env.COMPOSITE_MAIN_TB_BOTTOM || "input_video_visual_tb_bottom";
 
-  const BG_SIDE_LEFT     = process.env.COMPOSITE_BG_SIDE_LEFT     || "bg-video_side_left";
-  const BG_SIDE_RIGHT    = process.env.COMPOSITE_BG_SIDE_RIGHT    || "bg-video_side_right";
-  const BG_TB_TOP        = process.env.COMPOSITE_BG_TB_TOP        || "bg-video_tb_top";
-  const BG_TB_BOTTOM     = process.env.COMPOSITE_BG_TB_BOTTOM     || "bg-video_tb_bottom";
+  // BG visual layers (your exact names - hyphens!)
+  const BG_SIDE_LEFT = process.env.COMPOSITE_BG_SIDE_LEFT || "bg-video_side_left";
+  const BG_SIDE_RIGHT = process.env.COMPOSITE_BG_SIDE_RIGHT || "bg-video_side_right";
+  const BG_TB_TOP = process.env.COMPOSITE_BG_TB_TOP || "bg-video_tb_top";
+  const BG_TB_BOTTOM = process.env.COMPOSITE_BG_TB_BOTTOM || "bg-video_tb_bottom";
 
+  // Hidden audio/transcript feeder
   const MAIN_AUDIO = process.env.COMPOSITE_MAIN_AUDIO_LAYER || "input_video";
 
+  const SUBTITLE_LAYERS = [
+    "Subtitles_Sentence",
+    "Subtitles_Word",
+    "Subtitles_Karaoke",
+    "Subtitles_BoldWhite",
+    "Subtitles_YellowPop",
+    "Subtitles_MintTag",
+    "Subtitles_OutlinePunch",
+    "Subtitles_BlackBar",
+    "Subtitles_Highlighter",
+    "Subtitles_NeonGlow",
+    "Subtitles_PurplePop",
+    "Subtitles_CompactLowerThird",
+    "Subtitles_BouncePop",
+    "Subtitles_RedAlert",
+    "Subtitles_RedTag",
+  ];
+
   const layout = payload.layout === "topBottom" ? "topBottom" : "sideBySide";
-  const mainSlotRaw = String(payload.mainSlot || "left").toLowerCase();
+
+  const mainSlotRaw = String(payload.mainSlot || payload.main_slot || "left").toLowerCase();
   const mainSlot = ["left", "right", "top", "bottom"].includes(mainSlotRaw) ? mainSlotRaw : "left";
 
-  const mainSpeed = Number(payload.mainSpeed || 1);
-  const bgSpeed   = Number(payload.bgSpeed || 1);
-  const bgMuted   = payload.bgMuted !== false;
+  const mainSpeed = Number(payload.mainSpeed || payload.main_speed || 1);
+  const bgSpeed = Number(payload.bgSpeed || payload.bg_speed || 1);
 
-  const showMainLeft   = layout === "sideBySide" && mainSlot === "left";
-  const showMainRight  = layout === "sideBySide" && mainSlot === "right";
-  const showMainTop    = layout === "topBottom" && mainSlot === "top";
-  const showMainBottom = layout === "topBottom" && mainSlot === "bottom";
+  const bgMuted = (payload.bgMuted ?? payload.bg_muted) !== false; // default true
+
+  const cap = payload.captions || {};
+  const capEnabled = cap.enabled !== false;
+  const settings = cap.settings || {};
+
+  const styleRaw = String(cap.style || "").trim();
+  const pickedSubtitleLayer = SUBTITLE_LAYERS.includes(styleRaw) ? styleRaw : "Subtitles_Sentence";
+
+  const effectRaw =
+    settings.transcript_effect ??
+    settings.transcriptEffect ??
+    settings.active_effect ??
+    settings.activeEffect ??
+    settings.effect ??
+    styleRaw;
+
+  const transcript_effect = normalizeTranscriptEffect(effectRaw) || "color";
+
+  const transcriptColor =
+    settings.transcript_color ??
+    settings.transcriptColor ??
+    settings.activeColor ??
+    settings.active_color;
 
   const m = {};
 
-  // ✅ show correct layout container
+  // Helper: set a VIDEO layer using flat dot-notation props
+  function setVideoLayer(layerName, url, { visible = true, opacity = "100%", volume = "0%", playback_rate = 1 } = {}) {
+    m[layerName] = String(url);
+    m[`${layerName}.visible`] = !!visible;
+    m[`${layerName}.opacity`] = String(opacity);
+    m[`${layerName}.volume`] = String(volume);
+    m[`${layerName}.playback_rate`] = Number(playback_rate);
+  }
+
+  // 1) Layout visibility
   m[`${GROUP_SIDE}.visible`] = layout === "sideBySide";
-  m[`${GROUP_TB}.visible`]   = layout === "topBottom";
+  m[`${GROUP_TB}.visible`] = layout === "topBottom";
 
-  // ✅ CRITICAL: force slot groups ON so children can render
-  m[`${SIDE_LEFT_GROUP}.visible`]  = layout === "sideBySide";
+  // 2) FORCE slot groups visible for the active layout (this is the key fix)
+  m[`${SIDE_LEFT_GROUP}.visible`] = layout === "sideBySide";
   m[`${SIDE_RIGHT_GROUP}.visible`] = layout === "sideBySide";
-  m[`${TB_TOP_GROUP}.visible`]     = layout === "topBottom";
-  m[`${TB_BOTTOM_GROUP}.visible`]  = layout === "topBottom";
+  m[`${TB_TOP_GROUP}.visible`] = layout === "topBottom";
+  m[`${TB_BOTTOM_GROUP}.visible`] = layout === "topBottom";
 
-  // MAIN visuals (mute visuals, audio comes from feeder)
-  const setMain = (name, on) => {
-    m[name] = String(mainUrl);
-    m[`${name}.visible`] = true;
-    m[`${name}.opacity`] = on ? "100%" : "0%";
-    m[`${name}.volume`] = "0%";
-    m[`${name}.playback_rate`] = mainSpeed;
-  };
+  // 3) Clear all main/bg visual layers to known state
+  //    We will ONLY “place” main on one slot, and bg on the other slot.
+  //    Also: we mute visuals, because MAIN_AUDIO is the only audible track.
+  const VIS_MUTED = "0%";
+  const BG_VOL = bgMuted ? "0%" : "100%"; // only matters if you later want bg audio
 
-  setMain(MAIN_SIDE_LEFT, showMainLeft);
-  setMain(MAIN_SIDE_RIGHT, showMainRight);
-  setMain(MAIN_TB_TOP, showMainTop);
-  setMain(MAIN_TB_BOTTOM, showMainBottom);
+  // Default everything invisible (so we don’t accidentally cover something)
+  const ALL_MAIN = [MAIN_SIDE_LEFT, MAIN_SIDE_RIGHT, MAIN_TB_TOP, MAIN_TB_BOTTOM];
+  const ALL_BG = [BG_SIDE_LEFT, BG_SIDE_RIGHT, BG_TB_TOP, BG_TB_BOTTOM];
 
-  // BG visuals (show wherever main is NOT)
-  const bgVol = bgMuted ? "0%" : "100%";
-  const setBg = (name, on) => {
-    m[name] = String(bgUrl);
-    m[`${name}.visible`] = true;
-    m[`${name}.opacity`] = on ? "100%" : "0%";
-    m[`${name}.volume`] = bgVol;
-    m[`${name}.playback_rate`] = bgSpeed;
-  };
+  for (const layer of ALL_MAIN) {
+    // keep the URL set for stability, but hide it unless it's the chosen slot
+    setVideoLayer(layer, mainUrl, { visible: true, opacity: "0%", volume: VIS_MUTED, playback_rate: mainSpeed });
+  }
 
-  setBg(BG_SIDE_LEFT, !showMainLeft && layout === "sideBySide");
-  setBg(BG_SIDE_RIGHT, !showMainRight && layout === "sideBySide");
-  setBg(BG_TB_TOP, !showMainTop && layout === "topBottom");
-  setBg(BG_TB_BOTTOM, !showMainBottom && layout === "topBottom");
+  for (const layer of ALL_BG) {
+    setVideoLayer(layer, bgUrl, { visible: true, opacity: "0%", volume: BG_VOL, playback_rate: bgSpeed });
+  }
 
-  // audio/transcript feeder (invisible but audible)
-  m[MAIN_AUDIO] = String(mainUrl);
-  m[`${MAIN_AUDIO}.visible`] = true;
-  m[`${MAIN_AUDIO}.opacity`] = "0%";
-  m[`${MAIN_AUDIO}.volume`] = "100%";
-  m[`${MAIN_AUDIO}.playback_rate`] = mainSpeed;
+  // 4) Now “place” main + bg based on layout + mainSlot
+  if (layout === "sideBySide") {
+    if (mainSlot === "right") {
+      // Main on right, BG on left
+      m[`${MAIN_SIDE_RIGHT}.opacity`] = "100%";
+      m[`${BG_SIDE_LEFT}.opacity`] = "100%";
+    } else {
+      // default main on left, BG on right
+      m[`${MAIN_SIDE_LEFT}.opacity`] = "100%";
+      m[`${BG_SIDE_RIGHT}.opacity`] = "100%";
+    }
+  } else {
+    // topBottom
+    if (mainSlot === "bottom") {
+      m[`${MAIN_TB_BOTTOM}.opacity`] = "100%";
+      m[`${BG_TB_TOP}.opacity`] = "100%";
+    } else {
+      // default main on top
+      m[`${MAIN_TB_TOP}.opacity`] = "100%";
+      m[`${BG_TB_BOTTOM}.opacity`] = "100%";
+    }
+  }
 
-  // captions (leave as you already have)
-  const subtitle = "Subtitles_Sentence";
-  m[`${subtitle}.visible`] = true;
-  m[`${subtitle}.transcript_source`] = MAIN_AUDIO;
-  m[`${subtitle}.transcript_effect`] = "color";
+  // 5) Hidden audio/transcript feeder: invisible but audible
+  setVideoLayer(MAIN_AUDIO, mainUrl, {
+    visible: true,
+    opacity: "0%",
+    volume: "100%",
+    playback_rate: mainSpeed,
+  });
+
+  // 6) Captions: all off, then enable one
+  for (const name of SUBTITLE_LAYERS) {
+    m[`${name}.visible`] = false;
+  }
+
+  m[`${pickedSubtitleLayer}.visible`] = !!capEnabled;
+  m[`${pickedSubtitleLayer}.transcript_effect`] = transcript_effect;
+  m[`${pickedSubtitleLayer}.transcript_source`] = MAIN_AUDIO;
+
+  if (transcriptColor) {
+    m[`${pickedSubtitleLayer}.transcript_color`] = String(transcriptColor);
+  }
 
   return m;
 }
 
-
-// -------------------- Handler --------------------
 module.exports = async function handler(req, res) {
   setCors(req, res);
 
@@ -252,8 +315,14 @@ module.exports = async function handler(req, res) {
       if (!body) return json(res, 400, { ok: false, error: "Missing body" });
       if (body === "__INVALID__") return json(res, 400, { ok: false, error: "Invalid JSON" });
 
-      const templateId = process.env.COMPOSITE_TEMPLATE_ID;
-      if (!templateId) return json(res, 500, { ok: false, error: "Missing COMPOSITE_TEMPLATE_ID env var" });
+      const templateId =
+        process.env.COMPOSITE_TEMPLATE_ID ||
+        process.env.CREATOMATE_TEMPLATE_ID_COMPOSITE ||
+        process.env.CREATOMATE_TEMPLATE_ID;
+
+      if (!templateId) {
+        return json(res, 500, { ok: false, error: "Missing COMPOSITE_TEMPLATE_ID env var" });
+      }
 
       const mainPath = body.mainPath;
       const backgroundPath = body.backgroundPath;
@@ -298,7 +367,7 @@ module.exports = async function handler(req, res) {
         return json(res, 200, { ok: true, status: "failed", error: r?.error || r?.message || "Render failed" });
       }
       if (status === "succeeded" && url) {
-        return json(res, 200, { ok: true, status: "succeeded", url, warnings: r?.warnings || null });
+        return json(res, 200, { ok: true, status: "succeeded", url });
       }
 
       return json(res, 200, { ok: true, status: r?.status || "processing" });
