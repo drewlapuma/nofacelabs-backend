@@ -135,22 +135,18 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
   const GROUP_SIDE = process.env.COMPOSITE_GROUP_SIDE || "Layout_SideBySide";
   const GROUP_TB   = process.env.COMPOSITE_GROUP_TOPBOTTOM || "Layout_TopBottom";
 
-  const SIDE_LEFT_GROUP  = process.env.COMPOSITE_SIDE_LEFT_GROUP  || "Main_Left";
-  const SIDE_RIGHT_GROUP = process.env.COMPOSITE_SIDE_RIGHT_GROUP || "Main_Right";
-  const TB_TOP_GROUP     = process.env.COMPOSITE_TB_TOP_GROUP     || "Main_Top";
-  const TB_BOTTOM_GROUP  = process.env.COMPOSITE_TB_BOTTOM_GROUP  || "Main_Bottom";
+  // Your exact element names (from your screenshot)
+  const MAIN_SIDE_RIGHT = process.env.COMPOSITE_MAIN_SIDE_RIGHT || "input_video_visual_side_right";
+  const MAIN_SIDE_LEFT  = process.env.COMPOSITE_MAIN_SIDE_LEFT  || "input_video_visual_side_left";
+  const MAIN_TB_TOP     = process.env.COMPOSITE_MAIN_TB_TOP     || "input_video_visual_tb_top";
+  const MAIN_TB_BOTTOM  = process.env.COMPOSITE_MAIN_TB_BOTTOM  || "input_video_visual_tb_bottom";
 
-  const MAIN_SIDE_LEFT   = process.env.COMPOSITE_MAIN_SIDE_LEFT   || "input_video_visual_side_left";
-  const MAIN_SIDE_RIGHT  = process.env.COMPOSITE_MAIN_SIDE_RIGHT  || "input_video_visual_side_right";
-  const MAIN_TB_TOP      = process.env.COMPOSITE_MAIN_TB_TOP      || "input_video_visual_tb_top";
-  const MAIN_TB_BOTTOM   = process.env.COMPOSITE_MAIN_TB_BOTTOM   || "input_video_visual_tb_bottom";
+  const BG_SIDE_RIGHT   = process.env.COMPOSITE_BG_SIDE_RIGHT   || "bg-video_side_right";
+  const BG_SIDE_LEFT    = process.env.COMPOSITE_BG_SIDE_LEFT    || "bg-video_side_left";
+  const BG_TB_TOP       = process.env.COMPOSITE_BG_TB_TOP       || "bg-video_tb_top";
+  const BG_TB_BOTTOM    = process.env.COMPOSITE_BG_TB_BOTTOM    || "bg-video_tb_bottom";
 
-  // NOTE: your BG names use hyphens
-  const BG_SIDE_LEFT     = process.env.COMPOSITE_BG_SIDE_LEFT     || "bg-video_side_left";
-  const BG_SIDE_RIGHT    = process.env.COMPOSITE_BG_SIDE_RIGHT    || "bg-video_side_right";
-  const BG_TB_TOP        = process.env.COMPOSITE_BG_TB_TOP        || "bg-video_tb_top";
-  const BG_TB_BOTTOM     = process.env.COMPOSITE_BG_TB_BOTTOM     || "bg-video_tb_bottom";
-
+  // Hidden feeder for captions / transcript
   const MAIN_AUDIO = process.env.COMPOSITE_MAIN_AUDIO_LAYER || "input_video";
 
   const SUBTITLE_LAYERS = [
@@ -178,7 +174,7 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
 
   const mainSpeed = Number(payload.mainSpeed || payload.main_speed || 1);
   const bgSpeed   = Number(payload.bgSpeed || payload.bg_speed || 1);
-  const bgMuted   = (payload.bgMuted ?? payload.bg_muted) !== false;
+  const bgMuted   = (payload.bgMuted ?? payload.bg_muted) !== false; // default true
 
   const cap = payload.captions || {};
   const capEnabled = cap.enabled !== false;
@@ -205,104 +201,97 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
 
   const mods = {};
 
-  // ---- layout visibility
-  mods[GROUP_SIDE] = { visible: layout === "sideBySide" };
-  mods[GROUP_TB]   = { visible: layout === "topBottom" };
+  // Helper: set element to a URL + basic props using dot notation
+  function setVideo(name, url, { visible = true, opacity = 1, volume = 1, playback_rate = 1 } = {}) {
+    mods[name] = String(url);
+    mods[`${name}.visible`] = !!visible;
+    mods[`${name}.opacity`] = Number(opacity);
+    mods[`${name}.volume`] = Number(volume);
+    mods[`${name}.playback_rate`] = Number(playback_rate);
+  }
 
-  // Always keep slot groups visible when their layout is active
-  mods[SIDE_LEFT_GROUP]  = { visible: layout === "sideBySide" };
-  mods[SIDE_RIGHT_GROUP] = { visible: layout === "sideBySide" };
-  mods[TB_TOP_GROUP]     = { visible: layout === "topBottom" };
-  mods[TB_BOTTOM_GROUP]  = { visible: layout === "topBottom" };
+  // Show correct layout group only
+  mods[`${GROUP_SIDE}.visible`] = layout === "sideBySide";
+  mods[`${GROUP_TB}.visible`]   = layout === "topBottom";
 
-  // Which slot should contain the MAIN video
+  // Decide which slot shows MAIN
   const showMainLeft   = layout === "sideBySide" && mainSlot === "left";
   const showMainRight  = layout === "sideBySide" && mainSlot === "right";
   const showMainTop    = layout === "topBottom" && mainSlot === "top";
   const showMainBottom = layout === "topBottom" && mainSlot === "bottom";
 
-  function setVideo(name, url, { opacity = 1, volume = 1, playback_rate = 1 } = {}) {
-    mods[name] = {
-      source: url,
-      visible: true,
-      opacity,
-      volume,
-      playback_rate,
-    };
-  }
-
-  // SIDE LEFT: main OR bg
+  // MAIN visuals (only one slot visible at a time)
   setVideo(MAIN_SIDE_LEFT, mainUrl, {
     opacity: showMainLeft ? 1 : 0,
     volume:  showMainLeft ? 1 : 0,
     playback_rate: mainSpeed,
   });
-  setVideo(BG_SIDE_LEFT, bgUrl, {
-    opacity: showMainLeft ? 0 : 1,
-    volume:  showMainLeft ? 0 : (bgMuted ? 0 : 1),
-    playback_rate: bgSpeed,
-  });
 
-  // SIDE RIGHT
   setVideo(MAIN_SIDE_RIGHT, mainUrl, {
     opacity: showMainRight ? 1 : 0,
     volume:  showMainRight ? 1 : 0,
     playback_rate: mainSpeed,
   });
-  setVideo(BG_SIDE_RIGHT, bgUrl, {
-    opacity: showMainRight ? 0 : 1,
-    volume:  showMainRight ? 0 : (bgMuted ? 0 : 1),
-    playback_rate: bgSpeed,
-  });
 
-  // TB TOP
   setVideo(MAIN_TB_TOP, mainUrl, {
     opacity: showMainTop ? 1 : 0,
     volume:  showMainTop ? 1 : 0,
     playback_rate: mainSpeed,
   });
-  setVideo(BG_TB_TOP, bgUrl, {
-    opacity: showMainTop ? 0 : 1,
-    volume:  showMainTop ? 0 : (bgMuted ? 0 : 1),
-    playback_rate: bgSpeed,
-  });
 
-  // TB BOTTOM
   setVideo(MAIN_TB_BOTTOM, mainUrl, {
     opacity: showMainBottom ? 1 : 0,
     volume:  showMainBottom ? 1 : 0,
     playback_rate: mainSpeed,
   });
-  setVideo(BG_TB_BOTTOM, bgUrl, {
-    opacity: showMainBottom ? 0 : 1,
-    volume:  showMainBottom ? 0 : (bgMuted ? 0 : 1),
+
+  // BG visuals (show wherever MAIN is NOT)
+  const bgVol = bgMuted ? 0 : 1;
+
+  setVideo(BG_SIDE_LEFT, bgUrl, {
+    opacity: showMainLeft ? 0 : 1,
+    volume:  showMainLeft ? 0 : bgVol,
     playback_rate: bgSpeed,
   });
 
-  // Hidden feeder for captions (and to avoid double audio)
-  // NOTE: This being muted is OK. Your MAIN slot provides the audio.
-  mods[MAIN_AUDIO] = {
-    source: mainUrl,
-    visible: true,
-    opacity: 0,
-    volume: 0,
-    playback_rate: mainSpeed,
-  };
+  setVideo(BG_SIDE_RIGHT, bgUrl, {
+    opacity: showMainRight ? 0 : 1,
+    volume:  showMainRight ? 0 : bgVol,
+    playback_rate: bgSpeed,
+  });
 
-  // Captions
-  for (const name of SUBTITLE_LAYERS) mods[name] = { visible: false };
+  setVideo(BG_TB_TOP, bgUrl, {
+    opacity: showMainTop ? 0 : 1,
+    volume:  showMainTop ? 0 : bgVol,
+    playback_rate: bgSpeed,
+  });
 
-  mods[pickedSubtitleLayer] = {
-    visible: !!capEnabled,
-    transcript_effect,
-    transcript_source: MAIN_AUDIO,
-    ...(transcriptColor ? { transcript_color: String(transcriptColor) } : {}),
-  };
+  setVideo(BG_TB_BOTTOM, bgUrl, {
+    opacity: showMainBottom ? 0 : 1,
+    volume:  showMainBottom ? 0 : bgVol,
+    playback_rate: bgSpeed,
+  });
+
+  // Hidden feeder for transcript/captions (muted + invisible)
+  mods[MAIN_AUDIO] = String(mainUrl);
+  mods[`${MAIN_AUDIO}.visible`] = true;
+  mods[`${MAIN_AUDIO}.opacity`] = 0;
+  mods[`${MAIN_AUDIO}.volume`] = 0;
+  mods[`${MAIN_AUDIO}.playback_rate`] = mainSpeed;
+
+  // Captions: all off, one on
+  for (const name of SUBTITLE_LAYERS) mods[`${name}.visible`] = false;
+
+  mods[`${pickedSubtitleLayer}.visible`] = !!capEnabled;
+  mods[`${pickedSubtitleLayer}.transcript_effect`] = transcript_effect;
+  mods[`${pickedSubtitleLayer}.transcript_source`] = MAIN_AUDIO;
+
+  if (transcriptColor) {
+    mods[`${pickedSubtitleLayer}.transcript_color`] = String(transcriptColor);
+  }
 
   return mods;
 }
-
-
 
 
 module.exports = async function handler(req, res) {
