@@ -12,17 +12,26 @@ const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || 
 function setCors(req, res) {
   const origin = req.headers.origin;
 
-  if (ALLOW_ORIGINS.includes("*")) {
+  const allowList = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || "*")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  const allowAll = allowList.includes("*");
+
+  if (allowAll) {
     res.setHeader("Access-Control-Allow-Origin", "*");
-  } else if (origin && ALLOW_ORIGINS.includes(origin)) {
+  } else if (origin && allowList.includes(origin)) {
     res.setHeader("Access-Control-Allow-Origin", origin);
     res.setHeader("Vary", "Origin");
+    // Only use credentials when origin is explicit (NOT "*")
     res.setHeader("Access-Control-Allow-Credentials", "true");
   }
 
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 }
+
 
 function json(res, status, body) {
   res.statusCode = status;
@@ -301,7 +310,11 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
 module.exports = async function handler(req, res) {
   setCors(req, res);
 
-  if (req.method === "OPTIONS") return json(res, 200, { ok: true });
+  if (req.method === "OPTIONS") {
+  setCors(req, res);
+  res.statusCode = 204;
+  return res.end();
+}
 
   try {
     const BUCKET =
