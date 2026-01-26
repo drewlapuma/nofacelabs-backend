@@ -1,17 +1,7 @@
 // api/composite.js (CommonJS, Node 18+ on Vercel)
-//
-// POST /api/composite
-// body: {
-//   mainPath,
-//   backgroundPath OR backgroundVideoUrl,
-//   layout: "sideBySide" | "topBottom",
-//   mainSpeed, bgSpeed, bgMuted,
-//   captions: { enabled, style, settings }
-// }
-//
-// GET /api/composite?id=RENDER_ID
 
 const https = require("https");
+const http = require("http");
 const { createClient } = require("@supabase/supabase-js");
 
 // -------------------- CORS --------------------
@@ -23,7 +13,6 @@ const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || 
 function setCors(req, res) {
   const origin = req.headers.origin;
 
-  // Echo origin when wildcard to satisfy browsers
   if (ALLOW_ORIGINS.includes("*")) {
     res.setHeader("Access-Control-Allow-Origin", origin || "*");
     res.setHeader("Vary", "Origin");
@@ -77,6 +66,53 @@ async function signedReadUrl(bucket, path, expiresIn = 3600) {
     throw new Error(`Signed read URL error: ${error?.message || "Object not found"}`);
   }
   return data.signedUrl;
+}
+
+// -------------------- Follow redirects (THIS IS THE KEY FIX) --------------------
+function headOnce(urlStr) {
+  const u = new URL(urlStr);
+  const lib = u.protocol === "http:" ? http : https;
+
+  return new Promise((resolve, reject) => {
+    const req = lib.request(
+      {
+        method: "HEAD",
+        hostname: u.hostname,
+        path: u.pathname + u.search,
+        headers: {
+          // some CDNs behave better with a UA
+          "User-Agent": "nofacelabs-bot/1.0",
+        },
+      },
+      (res) => {
+        resolve({
+          statusCode: res.statusCode || 0,
+          location: res.headers.location || null,
+          contentType: res.headers["content-type"] || null,
+          acceptRanges: res.headers["accept-ranges"] || null,
+        });
+      }
+    );
+    req.on("error", reject);
+    req.end();
+  });
+}
+
+async function resolveFinalUrl(urlStr, maxHops = 6) {
+  let current = urlStr;
+
+  for (let i = 0; i < maxHops; i++) {
+    const h = await headOnce(current);
+
+    const isRedirect = [301, 302, 303, 307, 308].includes(h.statusCode);
+    if (!isRedirect || !h.location) return { finalUrl: current, head: h };
+
+    // handle relative redirect
+    const next = new URL(h.location, current).toString();
+    current = next;
+  }
+
+  return { finalUrl: current, head: await headOnce(current) };
 }
 
 // -------------------- Creatomate helper --------------------
@@ -152,10 +188,7 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
   const MAIN_TB = process.env.COMPOSITE_MAIN_LAYER_TB || "input_video_visual_tb";
   const BG_TB = process.env.COMPOSITE_BG_LAYER_TB || "bg-video_tb";
 
-  // hidden transcript/audio feeder at root
   const MAIN_AUDIO = process.env.COMPOSITE_MAIN_AUDIO_LAYER || "input_video";
-
-  // optional debug element (you created this)
   const DEBUG_TEXT = process.env.COMPOSITE_DEBUG_TEXT || "DEBUG_TEXT";
 
   const SUBTITLE_LAYERS = [
@@ -179,7 +212,7 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
   const layout = payload.layout === "topBottom" ? "topBottom" : "sideBySide";
   const mainSpeed = Number(payload.mainSpeed || 1);
   const bgSpeed = Number(payload.bgSpeed || 1);
-  const bgMuted = payload.bgMuted !== false; // default true
+  const bgMuted = payload.bgMuted !== false;
 
   const cap = payload.captions || {};
   const capEnabled = cap.enabled !== false;
@@ -213,9 +246,8 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
   // Debug
   mods[DEBUG_TEXT] = { text: "API HIT ✅" };
 
-  // Visible main videos (MATCH TEMPLATE FORMAT: percentages)
+  // Visible main videos
   mods[MAIN_SIDE] = {
-    provider: "url",
     source: mainUrl,
     playback_rate: mainSpeed,
     visible: true,
@@ -224,7 +256,6 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
   };
 
   mods[MAIN_TB] = {
-    provider: "url",
     source: mainUrl,
     playback_rate: mainSpeed,
     visible: true,
@@ -234,7 +265,6 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
 
   // Background videos (muted)
   mods[BG_SIDE] = {
-    provider: "url",
     source: bgUrl,
     playback_rate: bgSpeed,
     visible: true,
@@ -243,7 +273,6 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
   };
 
   mods[BG_TB] = {
-    provider: "url",
     source: bgUrl,
     playback_rate: bgSpeed,
     visible: true,
@@ -251,11 +280,8 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
     volume: bgMuted ? "0%" : "100%",
   };
 
-  // Hidden transcript/audio feeder:
-  // - If your captions are set to transcribe from input_video, keep this.
-  // - Keep it silent so audio comes from the visible main layers.
+  // Hidden transcript/audio feeder
   mods[MAIN_AUDIO] = {
-    provider: "url",
     source: mainUrl,
     playback_rate: mainSpeed,
     visible: true,
@@ -263,14 +289,14 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
     volume: "0%",
   };
 
-  // Captions: turn all off, enable one
+  // Captions: all off then one on
   for (const name of SUBTITLE_LAYERS) mods[name] = { visible: false };
 
   mods[pickedSubtitleLayer] = {
     visible: !!capEnabled,
     transcript_effect,
     ...(transcriptColor ? { transcript_color: String(transcriptColor) } : {}),
-    transcript_source: MAIN_AUDIO, // safe if ignored
+    transcript_source: MAIN_AUDIO,
   };
 
   return mods;
@@ -304,26 +330,37 @@ module.exports = async function handler(req, res) {
         return json(res, 400, { ok: false, error: "backgroundPath or backgroundVideoUrl is required" });
       }
 
-      const mainUrl = await signedReadUrl(BUCKET, mainPath, 60 * 60);
-      const bgUrl = backgroundVideoUrl
+      const signedMain = await signedReadUrl(BUCKET, mainPath, 60 * 60);
+      const signedBg = backgroundVideoUrl
         ? String(backgroundVideoUrl)
         : await signedReadUrl(BUCKET, backgroundPath, 60 * 60);
+
+      // ✅ resolve redirects so Creatomate gets a direct URL
+      const mainResolved = await resolveFinalUrl(signedMain);
+      const bgResolved = await resolveFinalUrl(signedBg);
+
+      const mainUrl = mainResolved.finalUrl;
+      const bgUrl = bgResolved.finalUrl;
 
       const modifications = buildModifications({ mainUrl, bgUrl, payload: body });
 
       const created = await creatomateRequest("POST", "/v1/renders", {
         template_id: templateId,
-        modifications, // MUST be an object
+        modifications,
         output_format: "mp4",
       });
 
       const item = Array.isArray(created) ? created[0] : created;
-      const renderId = item?.id;
-      const status = item?.status || "planned";
 
-      if (!renderId) return json(res, 500, { ok: false, error: "Creatomate response missing id", details: created });
-
-      return json(res, 200, { ok: true, renderId, status });
+      return json(res, 200, {
+        ok: true,
+        renderId: item?.id || null,
+        status: item?.status || "planned",
+        debug: {
+          main_head: mainResolved.head,
+          bg_head: bgResolved.head,
+        },
+      });
     }
 
     if (req.method === "GET") {
@@ -338,8 +375,12 @@ module.exports = async function handler(req, res) {
         url: r?.url || r?.output_url || null,
         warnings: r?.warnings || null,
         error: r?.error || r?.message || null,
-        file_size: r?.file_size || null,
-        duration: r?.duration || null,
+        debug: {
+          file_size: r?.file_size || null,
+          duration: r?.duration || null,
+          fetch: r?.fetch || null,
+          inputs: r?.inputs || null,
+        },
       });
     }
 
