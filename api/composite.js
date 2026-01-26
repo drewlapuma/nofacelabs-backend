@@ -1,15 +1,4 @@
 // api/composite.js (CommonJS, Node 18+ on Vercel)
-//
-// POST /api/composite
-// body: {
-//   mainPath,
-//   backgroundPath OR backgroundVideoUrl,
-//   layout: "sideBySide" | "topBottom",
-//   mainSpeed, bgSpeed, bgMuted,
-//   captions: { enabled, style, settings }
-// }
-//
-// GET /api/composite?id=RENDER_ID
 
 const https = require("https");
 const { createClient } = require("@supabase/supabase-js");
@@ -23,8 +12,6 @@ const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || 
 function setCors(req, res) {
   const origin = req.headers.origin;
 
-  // Always set an origin if we can.
-  // If "*" is allowed, do NOT set credentials.
   if (ALLOW_ORIGINS.includes("*")) {
     res.setHeader("Access-Control-Allow-Origin", "*");
   } else if (origin && ALLOW_ORIGINS.includes(origin)) {
@@ -131,31 +118,54 @@ function creatomateRequest(method, path, bodyObj) {
   });
 }
 
+// -------------------- Template validation --------------------
+function collectNamesDeep(node, out) {
+  if (!node || typeof node !== "object") return;
+  if (typeof node.name === "string") out.add(node.name);
+
+  for (const k of Object.keys(node)) {
+    const v = node[k];
+    if (Array.isArray(v)) v.forEach((x) => collectNamesDeep(x, out));
+    else if (v && typeof v === "object") collectNamesDeep(v, out);
+  }
+}
+
+async function assertTemplateHasNames(templateId, requiredNames) {
+  const tpl = await creatomateRequest("GET", `/v1/templates/${encodeURIComponent(templateId)}`, null);
+  const names = new Set();
+  collectNamesDeep(tpl, names);
+
+  const missing = requiredNames.filter((n) => !names.has(n));
+  if (missing.length) {
+    const err = new Error(
+      `Template mismatch: these element names are NOT in template ${templateId}: ${missing.join(", ")}`
+    );
+    err.details = { missing, templateId };
+    throw err;
+  }
+}
+
 // -------------------- Captions effect normalization --------------------
 function normalizeTranscriptEffect(v) {
   const s = String(v || "").trim().toLowerCase();
   if (!s) return null;
 
   if (["highlighter", "yellowpop", "minttag", "purplepop", "redtag"].includes(s)) return "highlight";
-
   const allowed = new Set(["color", "karaoke", "highlight", "fade", "bounce", "slide", "enlarge"]);
   return allowed.has(s) ? s : null;
 }
 
 // -------------------- Build modifications --------------------
-// IMPORTANT: Your video layers are marked Dynamic in Creatomate.
-// For dynamic video layers, Creatomate expects the VALUE to be the URL string.
-// (Not { source: url } — that’s why you got black renders.)
 function buildModifications({ mainUrl, bgUrl, payload }) {
   const GROUP_SIDE = process.env.COMPOSITE_GROUP_SIDE || "Layout_SideBySide";
   const GROUP_TB = process.env.COMPOSITE_GROUP_TOPBOTTOM || "Layout_TopBottom";
 
   const MAIN_SIDE = process.env.COMPOSITE_MAIN_LAYER_SIDE || "input_video_visual_side";
-  const BG_SIDE   = process.env.COMPOSITE_BG_LAYER_SIDE   || "bg-video_side";
-  const MAIN_TB   = process.env.COMPOSITE_MAIN_LAYER_TB   || "input_video_visual_tb";
-  const BG_TB     = process.env.COMPOSITE_BG_LAYER_TB     || "bg-video_tb";
+  const BG_SIDE = process.env.COMPOSITE_BG_LAYER_SIDE || "bg-video_side";
+  const MAIN_TB = process.env.COMPOSITE_MAIN_LAYER_TB || "input_video_visual_tb";
+  const BG_TB = process.env.COMPOSITE_BG_LAYER_TB || "bg-video_tb";
 
-  // audio/transcription feeder (root)
+  // audio/transcription feeder (optional)
   const MAIN_AUDIO = process.env.COMPOSITE_MAIN_AUDIO_LAYER || "input_video";
 
   const SUBTITLE_LAYERS = [
@@ -206,34 +216,22 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
 
   const mods = {};
 
-  // Show one layout group
+  // Layout group visibility
   mods[GROUP_SIDE] = { visible: layout === "sideBySide" };
-  mods[GROUP_TB]   = { visible: layout === "topBottom" };
+  mods[GROUP_TB] = { visible: layout === "topBottom" };
 
-  // ✅ Dynamic video sources MUST be strings
-  mods[MAIN_SIDE] = mainUrl;
-  mods[MAIN_TB]   = mainUrl;
-  mods[BG_SIDE]   = bgUrl;
-  mods[BG_TB]     = bgUrl;
+  // ✅ MAIN VISIBLE VIDEOS: AUDIO ON (volume 1)
+  mods[MAIN_SIDE] = { source: mainUrl, playback_rate: mainSpeed, volume: 1 };
+  mods[MAIN_TB] = { source: mainUrl, playback_rate: mainSpeed, volume: 1 };
 
-  // Speeds + bg mute (these can be object overrides)
-  mods[MAIN_SIDE] = { source: mainUrl, playback_rate: mainSpeed, volume: 0 }; // keep visual silent (avoid double audio)
-  mods[MAIN_TB]   = { source: mainUrl, playback_rate: mainSpeed, volume: 0 };
+  // Background video (usually muted)
+  mods[BG_SIDE] = { source: bgUrl, playback_rate: bgSpeed, volume: bgMuted ? 0 : 1 };
+  mods[BG_TB] = { source: bgUrl, playback_rate: bgSpeed, volume: bgMuted ? 0 : 1 };
 
-  mods[BG_SIDE]   = { source: bgUrl, playback_rate: bgSpeed, volume: bgMuted ? 0 : 1 };
-  mods[BG_TB]     = { source: bgUrl, playback_rate: bgSpeed, volume: bgMuted ? 0 : 1 };
+  // Optional audio/transcript feeder (keep invisible, but do NOT rely on it for audio anymore)
+  mods[MAIN_AUDIO] = { source: mainUrl, playback_rate: mainSpeed, opacity: 0, volume: 0, visible: true };
 
-  // 🔑 Audio/transcription feeder:
-  // Invisible, but audio ON so final render has sound.
-  mods[MAIN_AUDIO] = {
-    source: mainUrl,
-    playback_rate: mainSpeed,
-    opacity: 0,
-    volume: 1,
-    visible: true,
-  };
-
-  // Captions visibility
+  // Captions: turn all off, enable one
   for (const name of SUBTITLE_LAYERS) mods[name] = { visible: false };
 
   mods[pickedSubtitleLayer] = {
@@ -242,7 +240,7 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
     ...(transcriptColor ? { transcript_color: String(transcriptColor) } : {}),
   };
 
-  return mods;
+  return { mods, requiredNames: [GROUP_SIDE, GROUP_TB, MAIN_SIDE, MAIN_TB, BG_SIDE, BG_TB, MAIN_AUDIO, ...SUBTITLE_LAYERS] };
 }
 
 // -------------------- Handler --------------------
@@ -256,9 +254,7 @@ module.exports = async function handler(req, res) {
 
   try {
     const BUCKET = process.env.SUPABASE_UPLOAD_BUCKET || process.env.USER_VIDEOS_BUCKET || "user-uploads";
-
-    // parse query using WHATWG URL (avoids url.parse warnings in *this* file)
-    const u = new URL(req.url, "https://example.local");
+    const url = new URL(req.url, "https://example.local");
 
     if (req.method === "POST") {
       const body = await readJson(req);
@@ -278,11 +274,12 @@ module.exports = async function handler(req, res) {
       }
 
       const mainUrl = await signedReadUrl(BUCKET, mainPath, 60 * 60);
-      const bgUrl = backgroundVideoUrl
-        ? String(backgroundVideoUrl)
-        : await signedReadUrl(BUCKET, backgroundPath, 60 * 60);
+      const bgUrl = backgroundVideoUrl ? String(backgroundVideoUrl) : await signedReadUrl(BUCKET, backgroundPath, 60 * 60);
 
-      const modifications = buildModifications({ mainUrl, bgUrl, payload: body });
+      const { mods: modifications, requiredNames } = buildModifications({ mainUrl, bgUrl, payload: body });
+
+      // ✅ if you are rendering the wrong template, this will throw and tell you exactly what names are missing
+      await assertTemplateHasNames(templateId, requiredNames);
 
       const created = await creatomateRequest("POST", "/v1/renders", {
         template_id: templateId,
@@ -291,28 +288,22 @@ module.exports = async function handler(req, res) {
       });
 
       const item = Array.isArray(created) ? created[0] : created;
-      const renderId = item?.id;
-      const status = item?.status || "planned";
+      if (!item?.id) return json(res, 500, { ok: false, error: "Creatomate response missing id", details: created });
 
-      if (!renderId) return json(res, 500, { ok: false, error: "Creatomate response missing id", details: created });
-
-      return json(res, 200, { ok: true, renderId, status });
+      return json(res, 200, { ok: true, renderId: item.id, status: item.status || "planned" });
     }
 
     if (req.method === "GET") {
-      const id = String(u.searchParams.get("id") || "").trim();
+      const id = String(url.searchParams.get("id") || "").trim();
       if (!id) return json(res, 400, { ok: false, error: "Missing id" });
 
       const r = await creatomateRequest("GET", `/v1/renders/${encodeURIComponent(id)}`, null);
       const status = String(r?.status || "").toLowerCase();
-      const url = r?.url || r?.output_url || null;
+      const outUrl = r?.url || r?.output_url || null;
 
-      if (status === "failed") {
-        return json(res, 200, { ok: true, status: "failed", error: r?.error || r?.message || "Render failed" });
-      }
-      if (status === "succeeded" && url) {
-        return json(res, 200, { ok: true, status: "succeeded", url });
-      }
+      if (status === "failed") return json(res, 200, { ok: true, status: "failed", error: r?.error || r?.message || "Render failed" });
+      if (status === "succeeded" && outUrl) return json(res, 200, { ok: true, status: "succeeded", url: outUrl });
+
       return json(res, 200, { ok: true, status: r?.status || "processing" });
     }
 
@@ -321,7 +312,6 @@ module.exports = async function handler(req, res) {
     return json(res, 500, {
       ok: false,
       error: err?.message || String(err),
-      statusCode: err?.statusCode || null,
       details: err?.details || null,
     });
   }
