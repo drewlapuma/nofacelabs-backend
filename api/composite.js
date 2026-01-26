@@ -296,8 +296,8 @@ module.exports = async function handler(req, res) {
         return json(res, 400, { ok: false, error: "backgroundPath or backgroundVideoUrl is required" });
       }
 
-      const mainUrl = await signedReadUrl(BUCKET, mainPath, 60 * 60);
-      const bgUrl = backgroundVideoUrl ? String(backgroundVideoUrl) : await signedReadUrl(BUCKET, backgroundPath, 60 * 60);
+      const mainUrl = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4";
+const bgUrl   = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4";
 
       const modifications = buildModifications({ mainUrl, bgUrl, payload: body });
 
