@@ -1,4 +1,10 @@
 // api/composite.js (CommonJS, Node 18+ on Vercel)
+// ✅ Fixes in this version:
+// - Uses percent strings for opacity/volume (prevents "black/blank" renders)
+// - Keeps input_video as the audible transcript feeder (captions + audio work)
+// - Mutes visual main layers to prevent double-audio
+// - ✅ NEW: Forces slot groups (Main_Left/Main_Right/Main_Top/Main_Bottom) visible
+//   so background layers inside those groups actually render.
 
 const https = require("https");
 const { createClient } = require("@supabase/supabase-js");
@@ -125,18 +131,25 @@ function normalizeTranscriptEffect(v) {
   const s = String(v || "").trim().toLowerCase();
   if (!s) return null;
 
+  // map your style names to an allowed effect
   if (["highlighter", "yellowpop", "minttag", "purplepop", "redtag"].includes(s)) return "highlight";
 
   const allowed = new Set(["color", "karaoke", "highlight", "fade", "bounce", "slide", "enlarge"]);
   return allowed.has(s) ? s : null;
 }
 
-// -------------------- Build modifications --------------------
+// -------------------- Build modifications (FLAT / dot-notation) --------------------
 function buildModifications({ mainUrl, bgUrl, payload }) {
   const GROUP_SIDE = process.env.COMPOSITE_GROUP_SIDE || "Layout_SideBySide";
   const GROUP_TB = process.env.COMPOSITE_GROUP_TOPBOTTOM || "Layout_TopBottom";
 
-  // Your exact element names
+  // Slot groups (containers in your template)
+  const GROUP_MAIN_LEFT = process.env.COMPOSITE_GROUP_MAIN_LEFT || "Main_Left";
+  const GROUP_MAIN_RIGHT = process.env.COMPOSITE_GROUP_MAIN_RIGHT || "Main_Right";
+  const GROUP_MAIN_TOP = process.env.COMPOSITE_GROUP_MAIN_TOP || "Main_Top";
+  const GROUP_MAIN_BOTTOM = process.env.COMPOSITE_GROUP_MAIN_BOTTOM || "Main_Bottom";
+
+  // Your exact element names (from your screenshot)
   const MAIN_SIDE_RIGHT = process.env.COMPOSITE_MAIN_SIDE_RIGHT || "input_video_visual_side_right";
   const MAIN_SIDE_LEFT = process.env.COMPOSITE_MAIN_SIDE_LEFT || "input_video_visual_side_left";
   const MAIN_TB_TOP = process.env.COMPOSITE_MAIN_TB_TOP || "input_video_visual_tb_top";
@@ -147,7 +160,7 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
   const BG_TB_TOP = process.env.COMPOSITE_BG_TB_TOP || "bg-video_tb_top";
   const BG_TB_BOTTOM = process.env.COMPOSITE_BG_TB_BOTTOM || "bg-video_tb_bottom";
 
-  // Hidden feeder used by captions
+  // Hidden feeder for captions / transcript + audio output
   const MAIN_AUDIO = process.env.COMPOSITE_MAIN_AUDIO_LAYER || "input_video";
 
   const SUBTITLE_LAYERS = [
@@ -173,8 +186,8 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
   const mainSlotRaw = String(payload.mainSlot || payload.main_slot || "left").toLowerCase();
   const mainSlot = ["left", "right", "top", "bottom"].includes(mainSlotRaw) ? mainSlotRaw : "left";
 
-  const mainSpeed = Number(payload.mainSpeed ?? payload.main_speed ?? 1) || 1;
-  const bgSpeed = Number(payload.bgSpeed ?? payload.bg_speed ?? 1) || 1;
+  const mainSpeed = Number(payload.mainSpeed || payload.main_speed || 1);
+  const bgSpeed = Number(payload.bgSpeed || payload.bg_speed || 1);
   const bgMuted = (payload.bgMuted ?? payload.bg_muted) !== false; // default true
 
   const cap = payload.captions || {};
@@ -200,120 +213,77 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
     settings.activeColor ??
     settings.active_color;
 
-  const mods = {};
+  const m = {};
 
-  // --- IMPORTANT: your template behaves like % strings for opacity/volume ---
-  function toPct(v) {
-    if (typeof v === "string" && v.trim().endsWith("%")) return v.trim();
-    const n = Number(v);
-    if (!Number.isFinite(n)) return "100%";
-    if (n === 0) return "0%";
-    if (n === 1) return "100%"; // treat 0/1 as boolean-style
-    return `${Math.max(0, Math.min(100, n))}%`;
-  }
+  // Optional debug layer if you have it
+  m["DEBUG_TEXT.text"] = "API HIT ✅";
 
-  function setVideo(
-    name,
-    url,
-    { visible = true, opacity = "100%", volume = "100%", playback_rate = 1 } = {}
-  ) {
-    mods[name] = String(url);
-    mods[`${name}.visible`] = !!visible;
-    mods[`${name}.opacity`] = toPct(opacity);
-    mods[`${name}.volume`] = toPct(volume);
-    mods[`${name}.playback_rate`] = Number(playback_rate) || 1;
-  }
+  // ---- Layout visibility
+  m[`${GROUP_SIDE}.visible`] = layout === "sideBySide";
+  m[`${GROUP_TB}.visible`] = layout === "topBottom";
 
-  // Layout visibility
-  mods[`${GROUP_SIDE}.visible`] = layout === "sideBySide";
-  mods[`${GROUP_TB}.visible`] = layout === "topBottom";
+  // ✅ CRITICAL: Slot groups MUST be enabled or inner layers won't render
+  m[`${GROUP_MAIN_LEFT}.visible`] = layout === "sideBySide";
+  m[`${GROUP_MAIN_RIGHT}.visible`] = layout === "sideBySide";
+  m[`${GROUP_MAIN_TOP}.visible`] = layout === "topBottom";
+  m[`${GROUP_MAIN_BOTTOM}.visible`] = layout === "topBottom";
 
-  // Which slot shows MAIN
+  // ---- Decide which slot shows MAIN
   const showMainLeft = layout === "sideBySide" && mainSlot === "left";
   const showMainRight = layout === "sideBySide" && mainSlot === "right";
   const showMainTop = layout === "topBottom" && mainSlot === "top";
   const showMainBottom = layout === "topBottom" && mainSlot === "bottom";
 
-  // MAIN visuals:
-  // - opacity 100% on the selected slot, 0% on others
-  // - volume 0% ALWAYS (we play audio from the feeder only to avoid double audio)
-  setVideo(MAIN_SIDE_LEFT, mainUrl, {
-    opacity: showMainLeft ? "100%" : "0%",
-    volume: "0%",
-    playback_rate: mainSpeed,
-  });
+  // ---- MAIN visuals
+  // We keep visuals muted to avoid double-audio (audio comes from MAIN_AUDIO feeder)
+  function setMain(name, isOn) {
+    m[name] = String(mainUrl);
+    m[`${name}.visible`] = true;
+    m[`${name}.opacity`] = isOn ? "100%" : "0%";
+    m[`${name}.volume`] = "0%";
+    m[`${name}.playback_rate`] = mainSpeed;
+  }
 
-  setVideo(MAIN_SIDE_RIGHT, mainUrl, {
-    opacity: showMainRight ? "100%" : "0%",
-    volume: "0%",
-    playback_rate: mainSpeed,
-  });
+  setMain(MAIN_SIDE_LEFT, showMainLeft);
+  setMain(MAIN_SIDE_RIGHT, showMainRight);
+  setMain(MAIN_TB_TOP, showMainTop);
+  setMain(MAIN_TB_BOTTOM, showMainBottom);
 
-  setVideo(MAIN_TB_TOP, mainUrl, {
-    opacity: showMainTop ? "100%" : "0%",
-    volume: "0%",
-    playback_rate: mainSpeed,
-  });
+  // ---- BG visuals (show where MAIN is NOT)
+  // NOTE: even if bgMuted=true, it should still be visible; we only mute audio.
+  function setBg(name, isOn) {
+    m[name] = String(bgUrl);
+    m[`${name}.visible`] = true;
+    m[`${name}.opacity`] = isOn ? "100%" : "0%";
+    m[`${name}.volume`] = bgMuted ? "0%" : "100%";
+    m[`${name}.playback_rate`] = bgSpeed;
+  }
 
-  setVideo(MAIN_TB_BOTTOM, mainUrl, {
-    opacity: showMainBottom ? "100%" : "0%",
-    volume: "0%",
-    playback_rate: mainSpeed,
-  });
+  setBg(BG_SIDE_LEFT, !showMainLeft && layout === "sideBySide");
+  setBg(BG_SIDE_RIGHT, !showMainRight && layout === "sideBySide");
+  setBg(BG_TB_TOP, !showMainTop && layout === "topBottom");
+  setBg(BG_TB_BOTTOM, !showMainBottom && layout === "topBottom");
 
-  // BG visuals:
-  // Show BG wherever MAIN is NOT (and honor bgMuted)
-  const bgVol = bgMuted ? "0%" : "100%";
+  // ---- Hidden transcript/audio feeder: invisible but audible ✅
+  // Captions transcribe from this, and this is the only audible source.
+  m[MAIN_AUDIO] = String(mainUrl);
+  m[`${MAIN_AUDIO}.visible`] = true;
+  m[`${MAIN_AUDIO}.opacity`] = "0%";
+  m[`${MAIN_AUDIO}.volume`] = "100%";
+  m[`${MAIN_AUDIO}.playback_rate`] = mainSpeed;
 
-  setVideo(BG_SIDE_LEFT, bgUrl, {
-    opacity: showMainLeft ? "0%" : "100%",
-    volume: bgVol,
-    playback_rate: bgSpeed,
-  });
+  // ---- Captions
+  for (const name of SUBTITLE_LAYERS) m[`${name}.visible`] = false;
 
-  setVideo(BG_SIDE_RIGHT, bgUrl, {
-    opacity: showMainRight ? "0%" : "100%",
-    volume: bgVol,
-    playback_rate: bgSpeed,
-  });
-
-  setVideo(BG_TB_TOP, bgUrl, {
-    opacity: showMainTop ? "0%" : "100%",
-    volume: bgVol,
-    playback_rate: bgSpeed,
-  });
-
-  setVideo(BG_TB_BOTTOM, bgUrl, {
-    opacity: showMainBottom ? "0%" : "100%",
-    volume: bgVol,
-    playback_rate: bgSpeed,
-  });
-
-  // Hidden feeder for transcript/captions:
-  // IMPORTANT: invisible but AUDIBLE (this is why captions worked but audio was missing)
-  setVideo(MAIN_AUDIO, mainUrl, {
-    opacity: "0%",
-    volume: "100%",
-    playback_rate: mainSpeed,
-  });
-
-  // Captions: all off, one on
-  for (const name of SUBTITLE_LAYERS) mods[`${name}.visible`] = false;
-
-  mods[`${pickedSubtitleLayer}.visible`] = !!capEnabled;
-  mods[`${pickedSubtitleLayer}.transcript_effect`] = transcript_effect;
-  mods[`${pickedSubtitleLayer}.transcript_source`] = MAIN_AUDIO;
+  m[`${pickedSubtitleLayer}.visible`] = !!capEnabled;
+  m[`${pickedSubtitleLayer}.transcript_effect`] = transcript_effect;
+  m[`${pickedSubtitleLayer}.transcript_source`] = MAIN_AUDIO;
 
   if (transcriptColor) {
-    mods[`${pickedSubtitleLayer}.transcript_color`] = String(transcriptColor);
+    m[`${pickedSubtitleLayer}.transcript_color`] = String(transcriptColor);
   }
 
-  // Optional debug marker (safe if DEBUG_TEXT exists in template)
-  if ((payload.debugText ?? payload.debug_text) && payload.debugText !== true) {
-    mods["DEBUG_TEXT.text"] = String(payload.debugText);
-  }
-
-  return mods;
+  return m;
 }
 
 // -------------------- Handler --------------------
@@ -349,13 +319,15 @@ module.exports = async function handler(req, res) {
       }
 
       const mainUrl = await signedReadUrl(BUCKET, mainPath, 60 * 60);
-      const bgUrl = backgroundVideoUrl ? String(backgroundVideoUrl) : await signedReadUrl(BUCKET, backgroundPath, 60 * 60);
+      const bgUrl = backgroundVideoUrl
+        ? String(backgroundVideoUrl)
+        : await signedReadUrl(BUCKET, backgroundPath, 60 * 60);
 
       const modifications = buildModifications({ mainUrl, bgUrl, payload: body });
 
       const created = await creatomateRequest("POST", "/v1/renders", {
         template_id: templateId,
-        modifications, // object (dot notation is fine)
+        modifications,
         output_format: "mp4",
       });
 
