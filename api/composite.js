@@ -131,45 +131,29 @@ function normalizeTranscriptEffect(v) {
   return allowed.has(s) ? s : null;
 }
 
-// -------------------- Build modifications (OBJECT) --------------------
-// Expects your template to have these groups + layers:
-//
-// Layout_SideBySide
-//   Main_Left:  input_video_visual_side_left,  bg_video_side_left
-//   Main_Right: input_video_visual_side_right, bg_video_side_right
-//
-// Layout_TopBottom
-//   Main_Top:    input_video_visual_tb_top,    bg_video_tb_top
-//   Main_Bottom: input_video_visual_tb_bottom, bg_video_tb_bottom
-//
-// Root audio/transcript feeder (hidden): input_video
-//
-// Subtitle layers unchanged (Subtitles_*)
-
 function buildModifications({ mainUrl, bgUrl, payload }) {
-  // ---- layout groups
   const GROUP_SIDE = process.env.COMPOSITE_GROUP_SIDE || "Layout_SideBySide";
   const GROUP_TB   = process.env.COMPOSITE_GROUP_TOPBOTTOM || "Layout_TopBottom";
 
-  // ---- slot groups (NEW)
+  // IMPORTANT: these are compositions in your template (keep BOTH visible!)
   const SIDE_LEFT_GROUP  = process.env.COMPOSITE_SIDE_LEFT_GROUP  || "Main_Left";
   const SIDE_RIGHT_GROUP = process.env.COMPOSITE_SIDE_RIGHT_GROUP || "Main_Right";
   const TB_TOP_GROUP     = process.env.COMPOSITE_TB_TOP_GROUP     || "Main_Top";
   const TB_BOTTOM_GROUP  = process.env.COMPOSITE_TB_BOTTOM_GROUP  || "Main_Bottom";
 
-  // ---- main visual layers (NEW names)
+  // Main visuals
   const MAIN_SIDE_LEFT   = process.env.COMPOSITE_MAIN_SIDE_LEFT   || "input_video_visual_side_left";
   const MAIN_SIDE_RIGHT  = process.env.COMPOSITE_MAIN_SIDE_RIGHT  || "input_video_visual_side_right";
   const MAIN_TB_TOP      = process.env.COMPOSITE_MAIN_TB_TOP      || "input_video_visual_tb_top";
   const MAIN_TB_BOTTOM   = process.env.COMPOSITE_MAIN_TB_BOTTOM   || "input_video_visual_tb_bottom";
 
-  // ---- background visual layers (NEW names)
-  const BG_SIDE_LEFT     = process.env.COMPOSITE_BG_SIDE_LEFT     || "bg_video_side_left";
-  const BG_SIDE_RIGHT    = process.env.COMPOSITE_BG_SIDE_RIGHT    || "bg_video_side_right";
-  const BG_TB_TOP        = process.env.COMPOSITE_BG_TB_TOP        || "bg_video_tb_top";
-  const BG_TB_BOTTOM     = process.env.COMPOSITE_BG_TB_BOTTOM     || "bg_video_tb_bottom";
+  // Background visuals (NOTE the hyphen: bg-video_...)
+  const BG_SIDE_LEFT     = process.env.COMPOSITE_BG_SIDE_LEFT     || "bg-video_side_left";
+  const BG_SIDE_RIGHT    = process.env.COMPOSITE_BG_SIDE_RIGHT    || "bg-video_side_right";
+  const BG_TB_TOP        = process.env.COMPOSITE_BG_TB_TOP        || "bg-video_tb_top";
+  const BG_TB_BOTTOM     = process.env.COMPOSITE_BG_TB_BOTTOM     || "bg-video_tb_bottom";
 
-  // ---- audio/transcription feeder (root)
+  // Audio/transcript feeder
   const MAIN_AUDIO = process.env.COMPOSITE_MAIN_AUDIO_LAYER || "input_video";
 
   const SUBTITLE_LAYERS = [
@@ -192,8 +176,7 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
 
   const layout = payload.layout === "topBottom" ? "topBottom" : "sideBySide";
 
-  // NEW: mainSlot controls where the MAIN VIDEO appears
-  // Accepts: "left" | "right" | "top" | "bottom"
+  // "left"|"right"|"top"|"bottom"
   const mainSlotRaw = String(payload.mainSlot || payload.main_slot || "left").toLowerCase();
   const mainSlot =
     ["left", "right", "top", "bottom"].includes(mainSlotRaw) ? mainSlotRaw : "left";
@@ -201,7 +184,6 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
   const mainSpeed = Number(payload.mainSpeed || payload.main_speed || 1);
   const bgSpeed   = Number(payload.bgSpeed || payload.bg_speed || 1);
 
-  // background muted default true
   const bgMuted = (payload.bgMuted ?? payload.bg_muted) !== false;
 
   const cap = payload.captions || {};
@@ -229,70 +211,75 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
 
   const mods = {};
 
-  // ---- layout group visibility
+  // Show only the chosen layout group
   mods[GROUP_SIDE] = { visible: layout === "sideBySide" };
   mods[GROUP_TB]   = { visible: layout === "topBottom" };
 
-  // ---- slot group visibility (only show chosen slot within chosen layout)
-  // Side-by-side slots
-  mods[SIDE_LEFT_GROUP]  = { visible: layout === "sideBySide" && mainSlot === "left" };
-  mods[SIDE_RIGHT_GROUP] = { visible: layout === "sideBySide" && mainSlot === "right" };
+  // ✅ KEEP BOTH SLOT COMPOSITIONS VISIBLE (do NOT hide halves)
+  mods[SIDE_LEFT_GROUP]  = { visible: true };
+  mods[SIDE_RIGHT_GROUP] = { visible: true };
+  mods[TB_TOP_GROUP]     = { visible: true };
+  mods[TB_BOTTOM_GROUP]  = { visible: true };
 
-  // Top/bottom slots
-  mods[TB_TOP_GROUP]     = { visible: layout === "topBottom" && mainSlot === "top" };
-  mods[TB_BOTTOM_GROUP]  = { visible: layout === "topBottom" && mainSlot === "bottom" };
+  // Helper to apply one "slot" (the slot gets either main or bg)
+  function applySlot(mainLayerId, bgLayerId, slotHasMain) {
+    // whichever layer is showing MAIN
+    mods[mainLayerId] = {
+      source: slotHasMain ? mainUrl : bgUrl,
+      visible: true,
+      opacity: 1,
+      volume: slotHasMain ? 1 : (bgMuted ? 0 : 1),
+      playback_rate: slotHasMain ? mainSpeed : bgSpeed,
+    };
 
-  // ---- assign MAIN video to ALL main visual layers
-  // (only the visible slot group will show, but we populate all for safety)
-  const mainVisualProps = {
-    source: mainUrl,
-    playback_rate: mainSpeed,
-    visible: true,
-    opacity: 1,
-    volume: 1,
-  };
+    // whichever layer is showing BG (opposite)
+    mods[bgLayerId] = {
+      source: slotHasMain ? bgUrl : mainUrl,
+      visible: true,
+      opacity: 1,
+      volume: slotHasMain ? (bgMuted ? 0 : 1) : 1,
+      playback_rate: slotHasMain ? bgSpeed : mainSpeed,
+    };
+  }
 
-  mods[MAIN_SIDE_LEFT]  = { ...mainVisualProps };
-  mods[MAIN_SIDE_RIGHT] = { ...mainVisualProps };
-  mods[MAIN_TB_TOP]     = { ...mainVisualProps };
-  mods[MAIN_TB_BOTTOM]  = { ...mainVisualProps };
+  // Side-by-side mapping
+  const leftHasMain  = layout === "sideBySide" && mainSlot === "left";
+  const rightHasMain = layout === "sideBySide" && mainSlot === "right";
 
-  // ---- assign BG video to ALL background visual layers
-  const bgVisualProps = {
-    source: bgUrl,
-    playback_rate: bgSpeed,
-    visible: true,
-    opacity: 1,
-    volume: bgMuted ? 0 : 1,
-  };
+  // If user picked top/bottom, default main in LEFT for side-by-side (won’t be visible anyway)
+  applySlot(MAIN_SIDE_LEFT,  BG_SIDE_LEFT,  leftHasMain  || (layout !== "sideBySide"));
+  applySlot(MAIN_SIDE_RIGHT, BG_SIDE_RIGHT, rightHasMain);
 
-  mods[BG_SIDE_LEFT]  = { ...bgVisualProps };
-  mods[BG_SIDE_RIGHT] = { ...bgVisualProps };
-  mods[BG_TB_TOP]     = { ...bgVisualProps };
-  mods[BG_TB_BOTTOM]  = { ...bgVisualProps };
+  // Top/bottom mapping
+  const topHasMain    = layout === "topBottom" && mainSlot === "top";
+  const bottomHasMain = layout === "topBottom" && mainSlot === "bottom";
 
-  // ---- hidden audio/transcript feeder (root)
-  // Keep muted to avoid double audio; captions transcribe from this.
+  // If user picked side-by-side, default main in TOP for top/bottom (won’t be visible anyway)
+  applySlot(MAIN_TB_TOP,    BG_TB_TOP,    topHasMain || (layout !== "topBottom"));
+  applySlot(MAIN_TB_BOTTOM, BG_TB_BOTTOM, bottomHasMain);
+
+  // Hidden audio/transcript feeder: ALWAYS main audio
   mods[MAIN_AUDIO] = {
     source: mainUrl,
     playback_rate: mainSpeed,
     visible: true,
     opacity: 0,
-    volume: 0,
+    volume: 0, // keep muted to avoid double audio
   };
 
-  // ---- captions: turn all off, enable one
+  // Captions: off then one on
   for (const name of SUBTITLE_LAYERS) mods[name] = { visible: false };
 
   mods[pickedSubtitleLayer] = {
     visible: !!capEnabled,
     transcript_effect,
     ...(transcriptColor ? { transcript_color: String(transcriptColor) } : {}),
-    transcript_source: MAIN_AUDIO, // keep captions tied to the feeder
+    transcript_source: MAIN_AUDIO,
   };
 
   return mods;
 }
+
 
 
 module.exports = async function handler(req, res) {
