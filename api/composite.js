@@ -1,41 +1,35 @@
 // api/composite.js (CommonJS, Node 18 on Vercel)
 //
-// ✅ Uses Creatomate template to create a 9:16 composite (main + gameplay)
-// ✅ Accepts Supabase STORAGE PATHS + BUCKET names from /api/user-video-upload-url
-// ✅ Signs READ urls server-side (fixes "Object not found" when bucket mismatches)
-// ✅ Requires Memberstack auth (Option A): Authorization: Bearer <memberstack_jwt>
+// ✅ Option A (no Memberstack JWT required)
+// - DOES NOT require auth headers (fixes MISSING_AUTH while you’re using Memberstack cookie sessions)
+// - Accepts uploaded Supabase paths (mainPath/backgroundPath) OR a direct backgroundVideoUrl (library)
+// - Creates Signed READ urls from Supabase paths, then uses Creatomate to render
+// - GET /api/composite?id=RENDER_ID polls Creatomate status
 //
-// POST /api/composite
-// Body (JSON):
+// POST body (JSON):
 // {
-//   mainPath: "uploads/....mp4",
-//   mainBucket: "user-uploads",          // optional but recommended
-//
-//   backgroundPath: "uploads/....mp4",   // optional if backgroundVideoUrl provided
-//   backgroundBucket: "user-uploads",    // optional but recommended
-//   backgroundVideoUrl: "https://...mp4",// optional (library URL)
-//
+//   mainPath: "uploads/....mp4",                 // required (Supabase Storage path)
+//   backgroundPath: "uploads/....mp4",           // optional (Supabase Storage path)
+//   backgroundVideoUrl: "https://....mp4",       // optional (library URL)
 //   layout: "sideBySide" | "topBottom",
 //   mainSlot: "left"|"right"|"top"|"bottom",
 //   mainSpeed: 1.0,
 //   bgSpeed: 1.25,
 //   bgMuted: true,
-//
 //   captions: {
 //     enabled: true,
-//     style: "karaoke"|"sentence"|...,
+//     style: "sentence"|"karaoke"|...,
 //     settings: { x:50, y:82, fontSize:48, fillColor:"#fff", strokeWidth:8.1, strokeColor:"#000", activeColor:"#00FF49", fontFamily:"...", fontWeight:700 }
 //   }
 // }
 //
-// GET /api/composite?id=<renderId>
-// Returns status + url when ready: { ok:true, status:"succeeded", url:"https://..." }
+// Returns (POST): { ok:true, renderId }
+// Returns (GET):  { ok:true, id, status, url? , error? }
 
 const https = require("https");
 const { createClient } = require("@supabase/supabase-js");
-const memberstackAdmin = require("@memberstack/admin");
 
-// -------------------- CORS --------------------
+// ---------- CORS ----------
 const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || "*")
   .split(",")
   .map((s) => s.trim())
@@ -61,34 +55,75 @@ function json(res, status, body) {
   res.end(JSON.stringify(body));
 }
 
-// -------------------- env --------------------
-const CREATOMATE_API_KEY = process.env.CREATOMATE_API_KEY;
-const TEMPLATE_ID = process.env.CREATOMATE_TEMPLATE_ID_COMPOSITE;
+async function readJson(req) {
+  // Vercel Node serverless friendly
+  if (req.body && typeof req.body === "object") return req.body;
 
-// Supabase signing (service role)
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const chunks = [];
+  for await (const chunk of req) chunks.push(chunk);
+  const raw = Buffer.concat(chunks).toString("utf8").trim();
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return "__INVALID__";
+  }
+}
 
-// Fallback bucket (only used if body does not send bucket)
-const SUPABASE_BUCKET_FALLBACK =
+function httpsJson({ method, hostname, path, headers, body }) {
+  return new Promise((resolve, reject) => {
+    const r = https.request({ method, hostname, path, headers }, (res) => {
+      let raw = "";
+      res.on("data", (d) => (raw += d));
+      res.on("end", () => {
+        let parsed = null;
+        try {
+          parsed = raw ? JSON.parse(raw) : null;
+        } catch (_) {}
+
+        if (res.statusCode >= 200 && res.statusCode < 300) return resolve(parsed);
+        reject(new Error(`HTTP ${res.statusCode} ${method} ${path} :: ${raw || "no body"}`));
+      });
+    });
+    r.on("error", reject);
+    if (body) r.write(JSON.stringify(body));
+    r.end();
+  });
+}
+
+// ---------- Supabase signed READ urls ----------
+function getSupabaseAdmin() {
+  const SUPABASE_URL = process.env.SUPABASE_URL;
+  const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+    throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
+  }
+
+  return createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+    auth: { persistSession: false },
+  });
+}
+
+const UPLOAD_BUCKET =
   process.env.SUPABASE_UPLOAD_BUCKET ||
   process.env.USER_VIDEOS_BUCKET ||
-  process.env.SUPABASE_BUCKET ||
   "user-uploads";
 
-const SIGNED_URL_TTL_SECONDS = Number(process.env.SIGNED_URL_TTL_SECONDS || 60 * 60); // 1h default
+// Creatomate needs publicly reachable URLs, so we sign reads
+async function signedReadUrl(admin, bucket, path, expiresIn = 60 * 60) {
+  const clean = String(path || "").replace(/^\/+/, "");
+  const { data, error } = await admin.storage.from(bucket).createSignedUrl(clean, expiresIn);
 
-// Memberstack admin (Option A)
-const MEMBERSTACK_SECRET_KEY = process.env.MEMBERSTACK_SECRET_KEY;
-const memberstack = MEMBERSTACK_SECRET_KEY
-  ? memberstackAdmin.init(MEMBERSTACK_SECRET_KEY)
-  : null;
+  if (error || !data?.signedUrl) {
+    // This is the exact error you’re seeing when the path doesn’t exist:
+    // "Object not found"
+    throw new Error(`Signed read URL error: ${error?.message || "unknown"} (path: ${clean})`);
+  }
+  return data.signedUrl;
+}
 
-// 9:16 fixed canvas for vmin conversion
-const CANVAS_W = 1080;
-const CANVAS_H = 1920;
-
-// -------------------- styles --------------------
+// ---------- Caption presets ----------
 const STYLE_PRESETS = {
   sentence: { fontFamily: "Inter", fontSize: 48, fillColor: "#ffffff", strokeWidth: 7.2, strokeColor: "#000000", fontWeight: 700 },
   word: { fontFamily: "Staatliches", fontSize: 48, fillColor: "#ffffff", strokeWidth: 8.1, strokeColor: "#000000", fontWeight: 400 },
@@ -166,27 +201,15 @@ const SUBTITLE_NAME_MAP = {
   redtag: "Subtitles_RedTag",
 };
 
-// -------------------- helpers --------------------
-async function readJson(req) {
-  if (req.body && typeof req.body === "object") return req.body;
-  const chunks = [];
-  for await (const c of req) chunks.push(c);
-  const raw = Buffer.concat(chunks).toString("utf8").trim();
-  if (!raw) return {};
-  return JSON.parse(raw);
-}
-
 function clamp(n, min, max) {
   n = Number(n);
   if (!Number.isFinite(n)) return min;
   return Math.max(min, Math.min(max, n));
 }
-
 function toPercentString(v) {
   return `${clamp(v, 0, 100)}%`;
 }
-
-function pxToVmin(px, canvasW = CANVAS_W, canvasH = CANVAS_H) {
+function pxToVmin(px, canvasW = 1080, canvasH = 1920) {
   const vminPx = Math.min(canvasW, canvasH) / 100;
   return Number(px) / vminPx;
 }
@@ -207,99 +230,17 @@ function snapSpeed(x) {
   return best;
 }
 
-function httpsJson({ method, hostname, path, headers, body }) {
-  return new Promise((resolve, reject) => {
-    const req = https.request({ method, hostname, path, headers }, (res) => {
-      let raw = "";
-      res.on("data", (d) => (raw += d));
-      res.on("end", () => {
-        let parsed = null;
-        try { parsed = raw ? JSON.parse(raw) : null; } catch (_) {}
-        if (res.statusCode >= 200 && res.statusCode < 300) resolve(parsed);
-        else reject(new Error(`HTTP ${res.statusCode} ${method} ${path} :: ${raw || "no body"}`));
-      });
-    });
-    req.on("error", reject);
-    if (body) req.write(JSON.stringify(body));
-    req.end();
-  });
-}
-
-// -------------------- auth (Option A) --------------------
-function getBearerToken(req) {
-  const h = req.headers.authorization || req.headers.Authorization;
-  if (!h) return null;
-  const s = String(h);
-  if (!s.toLowerCase().startsWith("bearer ")) return null;
-  return s.slice(7).trim();
-}
-
-async function requireMember(req) {
-  if (!memberstack) throw new Error("Server missing MEMBERSTACK_SECRET_KEY");
-
-  const token = getBearerToken(req);
-  if (!token) {
-    const e = new Error("MISSING_AUTH");
-    e.status = 401;
-    throw e;
-  }
-
-  // Memberstack admin JWT verification
-  try {
-    const result = await memberstack.verifyToken({ token });
-    const memberId = result?.data?.id || result?.id || null;
-    if (!memberId) {
-      const e = new Error("INVALID_AUTH");
-      e.status = 401;
-      throw e;
-    }
-    return { memberId };
-  } catch (err) {
-    const e = new Error("INVALID_AUTH");
-    e.status = 401;
-    throw e;
-  }
-}
-
-// -------------------- supabase signing --------------------
-function getSupabaseAdmin() {
-  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) return null;
-  return createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
-    auth: { persistSession: false },
-  });
-}
-
-async function signReadUrlFromPath(path, bucketOverride) {
-  const supabase = getSupabaseAdmin();
-  if (!supabase) {
-    throw new Error("Missing SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY for signing read URLs.");
-  }
-
-  const bucket = String(bucketOverride || SUPABASE_BUCKET_FALLBACK || "").trim();
-  if (!bucket) throw new Error("Missing bucket for signing.");
-
-  const { data, error } = await supabase.storage.from(bucket).createSignedUrl(path, SIGNED_URL_TTL_SECONDS);
-
-  if (error) throw new Error("Signed read URL error: " + error.message);
-  if (!data?.signedUrl) throw new Error("Signed read URL missing signedUrl");
-  return data.signedUrl;
-}
-
-// -------------------- template mutation --------------------
-function buildSubtitleProps(styleKey, overrides = {}, canvasW = CANVAS_W, canvasH = CANVAS_H) {
+function buildSubtitleProps(styleKey, overrides = {}, canvasW = 1080, canvasH = 1920) {
   const preset = STYLE_PRESETS[styleKey] || {};
-  const merged = { ...BASE_DEFAULTS, ...preset, ...overrides };
+  const merged = { ...BASE_DEFAULTS, ...preset, ...(overrides || {}) };
 
   const effect = EFFECT_MAP[styleKey] || "sentence";
-
   const fontSizeVmin = pxToVmin(merged.fontSize, canvasW, canvasH);
   const strokeVmin = pxToVmin(merged.strokeWidth, canvasW, canvasH);
 
   const props = {
     x_alignment: toPercentString(merged.x),
     y_alignment: toPercentString(merged.y),
-    width: merged.width ? String(merged.width) : undefined,
-    height: merged.height ? String(merged.height) : undefined,
 
     font_family: merged.fontFamily,
     font_weight: String(merged.fontWeight ?? 400),
@@ -322,37 +263,30 @@ function buildSubtitleProps(styleKey, overrides = {}, canvasW = CANVAS_W, canvas
   return props;
 }
 
-function applyCaptions(template, styleKey, overrides, canvasW, canvasH) {
-  const chosenName = SUBTITLE_NAME_MAP[styleKey] || null;
-
-  for (const el of template.elements || []) {
-    if (!el || typeof el !== "object") continue;
-    const name = String(el.name || "");
-    if (!name.startsWith("Subtitles_")) continue;
-
-    const isChosen = chosenName && name.toLowerCase() === chosenName.toLowerCase();
-    el.visible = !!isChosen;
-
-    if (isChosen) {
-      const props = buildSubtitleProps(styleKey, overrides, canvasW, canvasH);
-      Object.assign(el, props);
-    }
-  }
-}
-
 function getSlotRects(layout, mainSlot) {
   if (layout === "topBottom") {
     if (mainSlot === "bottom") {
-      return { main: { x: 50, y: 75, w: 100, h: 50 }, bg: { x: 50, y: 25, w: 100, h: 50 } };
+      return {
+        main: { x: 50, y: 75, w: 100, h: 50 },
+        bg: { x: 50, y: 25, w: 100, h: 50 },
+      };
     }
-    return { main: { x: 50, y: 25, w: 100, h: 50 }, bg: { x: 50, y: 75, w: 100, h: 50 } };
+    return {
+      main: { x: 50, y: 25, w: 100, h: 50 },
+      bg: { x: 50, y: 75, w: 100, h: 50 },
+    };
   }
 
-  // sideBySide
   if (mainSlot === "right") {
-    return { main: { x: 75, y: 50, w: 50, h: 100 }, bg: { x: 25, y: 50, w: 50, h: 100 } };
+    return {
+      main: { x: 75, y: 50, w: 50, h: 100 },
+      bg: { x: 25, y: 50, w: 50, h: 100 },
+    };
   }
-  return { main: { x: 25, y: 50, w: 50, h: 100 }, bg: { x: 75, y: 50, w: 50, h: 100 } };
+  return {
+    main: { x: 25, y: 50, w: 50, h: 100 },
+    bg: { x: 75, y: 50, w: 50, h: 100 },
+  };
 }
 
 function applyVideoSlot(el, rect, { muted, speed }) {
@@ -372,7 +306,31 @@ function applyVideoSlot(el, rect, { muted, speed }) {
   }
 }
 
-// -------------------- Creatomate --------------------
+function applyCaptions(template, styleKey, overrides, canvasW, canvasH) {
+  const chosenName = SUBTITLE_NAME_MAP[styleKey] || null;
+
+  for (const el of template.elements || []) {
+    if (!el || typeof el !== "object") continue;
+    const name = String(el.name || "");
+    if (!name.startsWith("Subtitles_")) continue;
+
+    const isChosen = chosenName && name.toLowerCase() === chosenName.toLowerCase();
+    el.visible = !!isChosen;
+
+    if (isChosen) {
+      const props = buildSubtitleProps(styleKey, overrides, canvasW, canvasH);
+      Object.assign(el, props);
+    }
+  }
+}
+
+// ---------- Creatomate ----------
+const CREATOMATE_API_KEY = process.env.CREATOMATE_API_KEY;
+const TEMPLATE_ID = process.env.CREATOMATE_TEMPLATE_ID_COMPOSITE;
+
+const CANVAS_W = 1080;
+const CANVAS_H = 1920;
+
 async function fetchTemplateJson(templateId) {
   const data = await httpsJson({
     method: "GET",
@@ -392,8 +350,6 @@ async function fetchTemplateJson(templateId) {
 }
 
 async function createRenderFromTemplate(templateObj) {
-  const body = { template: templateObj, source: templateObj };
-
   const data = await httpsJson({
     method: "POST",
     hostname: "api.creatomate.com",
@@ -402,7 +358,7 @@ async function createRenderFromTemplate(templateObj) {
       Authorization: `Bearer ${CREATOMATE_API_KEY}`,
       "Content-Type": "application/json",
     },
-    body,
+    body: { template: templateObj, source: templateObj },
   });
 
   const renderId = data && (data.id || data.render_id || data.renderId);
@@ -420,90 +376,90 @@ async function getRenderStatus(renderId) {
       "Content-Type": "application/json",
     },
   });
-  // common fields: status + url (when done)
-  return data || {};
+
+  const status = String(data?.status || "").toLowerCase();
+  const url = data?.url || data?.output_url || data?.result_url || null;
+  const error = data?.error || data?.message || null;
+
+  return { status, url, error, raw: data };
 }
 
-// -------------------- handler --------------------
+// ---------- handler ----------
 module.exports = async (req, res) => {
   setCors(req, res);
+
   if (req.method === "OPTIONS") return json(res, 200, { ok: true });
 
   try {
-    // ✅ Require auth for both GET and POST (Option A)
-    await requireMember(req);
+    // -------- GET (poll) --------
+    if (req.method === "GET") {
+      const id = String(req.query?.id || "").trim();
+      if (!id) return json(res, 400, { ok: false, error: "Missing id" });
+
+      if (!CREATOMATE_API_KEY) return json(res, 500, { ok: false, error: "Missing CREATOMATE_API_KEY" });
+
+      const s = await getRenderStatus(id);
+      const succeeded = s.status.includes("succeed") || s.status === "completed";
+
+      return json(res, 200, {
+        ok: true,
+        id,
+        status: s.status,
+        url: succeeded ? s.url : null,
+        error: s.status.includes("fail") ? (s.error || "Render failed") : null,
+      });
+    }
+
+    // -------- POST (start render) --------
+    if (req.method !== "POST") return json(res, 405, { ok: false, error: "Method not allowed" });
 
     if (!CREATOMATE_API_KEY) return json(res, 500, { ok: false, error: "Missing CREATOMATE_API_KEY" });
     if (!TEMPLATE_ID) return json(res, 500, { ok: false, error: "Missing CREATOMATE_TEMPLATE_ID_COMPOSITE" });
 
-    // -------- GET status --------
-    if (req.method === "GET") {
-      const urlObj = new URL(req.url, "http://localhost");
-      const id = urlObj.searchParams.get("id");
-      if (!id) return json(res, 400, { ok: false, error: "Missing id" });
-
-      const s = await getRenderStatus(id);
-      const status = String(s.status || "").toLowerCase();
-
-      const out = {
-        ok: true,
-        id,
-        status: s.status || status,
-        url: s.url || s.result_url || s.download_url || null,
-        error: s.error || null,
-      };
-      return json(res, 200, out);
-    }
-
-    // -------- POST create render --------
-    if (req.method !== "POST") {
-      return json(res, 405, { ok: false, error: "Method not allowed" });
-    }
-
     const body = await readJson(req);
+    if (body === "__INVALID__") return json(res, 400, { ok: false, error: "Invalid JSON" });
 
     const mainPath = String(body.mainPath || "").trim();
-    const mainBucket = String(body.mainBucket || "").trim();
-
     const backgroundPath = String(body.backgroundPath || "").trim();
-    const backgroundBucket = String(body.backgroundBucket || "").trim();
+    const backgroundVideoUrlDirect = String(body.backgroundVideoUrl || "").trim();
 
-    const backgroundVideoUrlRaw = String(body.backgroundVideoUrl || "").trim();
+    if (!mainPath) return json(res, 400, { ok: false, error: "mainPath required" });
+    if (!backgroundPath && !backgroundVideoUrlDirect) {
+      return json(res, 400, { ok: false, error: "backgroundPath or backgroundVideoUrl required" });
+    }
 
-    const layout = (body.layout === "topBottom" ? "topBottom" : "sideBySide");
-    const mainSlotRaw = String(body.mainSlot || (layout === "topBottom" ? "top" : "left")).toLowerCase();
-    const mainSlot = (layout === "topBottom")
-      ? (mainSlotRaw === "bottom" ? "bottom" : "top")
-      : (mainSlotRaw === "right" ? "right" : "left");
+    const layout = body.layout === "topBottom" ? "topBottom" : "sideBySide";
+    const mainSlot = String(body.mainSlot || (layout === "topBottom" ? "top" : "left")).toLowerCase();
 
     const mainSpeed = snapSpeed(body.mainSpeed);
     const bgSpeed = snapSpeed(body.bgSpeed);
-    const bgMuted = (body.bgMuted !== false); // default true
+    const bgMuted = body.bgMuted !== false; // default true
 
     const captions = body.captions || {};
     const captionsEnabled = !!captions.enabled;
     const captionStyle = String(captions.style || "sentence").toLowerCase();
-    const captionOverrides = (captions.settings && typeof captions.settings === "object") ? captions.settings : {};
+    const captionOverrides = captions.settings && typeof captions.settings === "object" ? captions.settings : {};
 
-    if (!mainPath) return json(res, 400, { ok: false, error: "mainPath required" });
-    if (!backgroundVideoUrlRaw && !backgroundPath) {
-      return json(res, 400, { ok: false, error: "backgroundPath or backgroundVideoUrl required" });
+    if (captionsEnabled && !STYLE_PRESETS[captionStyle]) {
+      return json(res, 400, { ok: false, error: `Unknown caption style: ${captionStyle}` });
     }
 
-    // ✅ Sign READ URLs from correct bucket (fixes your current error)
-    const mainVideoUrl = await signReadUrlFromPath(mainPath, mainBucket || SUPABASE_BUCKET_FALLBACK);
-    const backgroundVideoUrl = backgroundVideoUrlRaw
-      ? backgroundVideoUrlRaw
-      : await signReadUrlFromPath(backgroundPath, backgroundBucket || SUPABASE_BUCKET_FALLBACK);
+    // 1) Signed READ urls from Supabase paths
+    const supabaseAdmin = getSupabaseAdmin();
 
-    // 1) Load template JSON from Creatomate
+    const mainVideoUrl = await signedReadUrl(supabaseAdmin, UPLOAD_BUCKET, mainPath, 60 * 60);
+
+    let backgroundVideoUrl = backgroundVideoUrlDirect;
+    if (!backgroundVideoUrl) {
+      backgroundVideoUrl = await signedReadUrl(supabaseAdmin, UPLOAD_BUCKET, backgroundPath, 60 * 60);
+    }
+
+    // 2) Load template json
     const template = await fetchTemplateJson(TEMPLATE_ID);
-
-    // 2) Find main + bg elements by name
     const elements = Array.isArray(template.elements) ? template.elements : [];
 
     const mainEl = elements.find((e) => String(e.name || "") === "input_video");
-    if (!mainEl) return json(res, 500, { ok: false, error: "Template missing required element named 'input_video'" });
+    if (!mainEl) return json(res, 500, { ok: false, error: "Template missing element named 'input_video'" });
 
     let bgEl = elements.find((e) => String(e.name || "") === "bg_video");
     if (!bgEl) {
@@ -522,14 +478,14 @@ module.exports = async (req, res) => {
       template.elements = elements;
     }
 
-    // 3) Set sources
+    // 3) Set sources (Creatomate wants src/source)
     mainEl.source = mainVideoUrl;
     mainEl.src = mainVideoUrl;
 
     bgEl.source = backgroundVideoUrl;
     bgEl.src = backgroundVideoUrl;
 
-    // 4) Slot rects + apply
+    // 4) Layout slots + speeds
     const rects = getSlotRects(layout, mainSlot);
 
     bgEl.track = 1;
@@ -540,9 +496,6 @@ module.exports = async (req, res) => {
 
     // 5) Captions
     if (captionsEnabled) {
-      if (!STYLE_PRESETS[captionStyle]) {
-        return json(res, 400, { ok: false, error: `Unknown caption style: ${captionStyle}` });
-      }
       applyCaptions(template, captionStyle, captionOverrides, CANVAS_W, CANVAS_H);
     } else {
       for (const el of template.elements || []) {
@@ -553,13 +506,9 @@ module.exports = async (req, res) => {
 
     // 6) Render
     const renderId = await createRenderFromTemplate(template);
-    return json(res, 200, { ok: true, renderId });
 
+    return json(res, 200, { ok: true, renderId });
   } catch (err) {
-    const status = err?.status ? Number(err.status) : 500;
-    return json(res, status, {
-      ok: false,
-      error: err?.message || "Unknown error",
-    });
+    return json(res, 500, { ok: false, error: err?.message || "Unknown error" });
   }
 };
