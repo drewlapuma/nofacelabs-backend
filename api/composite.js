@@ -10,7 +10,6 @@
 // }
 //
 // GET /api/composite?id=RENDER_ID
-// GET /api/composite?id=RENDER_ID&raw=1   -> returns full Creatomate object for debugging
 
 const https = require("https");
 const { createClient } = require("@supabase/supabase-js");
@@ -24,14 +23,13 @@ const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || 
 function setCors(req, res) {
   const origin = req.headers.origin;
 
-  // If "*" then do NOT set credentials.
+  // Always set an origin if we can.
+  // If "*" is allowed, do NOT set credentials.
   if (ALLOW_ORIGINS.includes("*")) {
     res.setHeader("Access-Control-Allow-Origin", "*");
   } else if (origin && ALLOW_ORIGINS.includes(origin)) {
     res.setHeader("Access-Control-Allow-Origin", origin);
     res.setHeader("Vary", "Origin");
-    // Only set credentials when you are NOT using "*"
-    res.setHeader("Access-Control-Allow-Credentials", "true");
   }
 
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
@@ -145,6 +143,9 @@ function normalizeTranscriptEffect(v) {
 }
 
 // -------------------- Build modifications --------------------
+// IMPORTANT: Your video layers are marked Dynamic in Creatomate.
+// For dynamic video layers, Creatomate expects the VALUE to be the URL string.
+// (Not { source: url } — that’s why you got black renders.)
 function buildModifications({ mainUrl, bgUrl, payload }) {
   const GROUP_SIDE = process.env.COMPOSITE_GROUP_SIDE || "Layout_SideBySide";
   const GROUP_TB = process.env.COMPOSITE_GROUP_TOPBOTTOM || "Layout_TopBottom";
@@ -154,7 +155,7 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
   const MAIN_TB   = process.env.COMPOSITE_MAIN_LAYER_TB   || "input_video_visual_tb";
   const BG_TB     = process.env.COMPOSITE_BG_LAYER_TB     || "bg-video_tb";
 
-  // audio/transcription feeder at root
+  // audio/transcription feeder (root)
   const MAIN_AUDIO = process.env.COMPOSITE_MAIN_AUDIO_LAYER || "input_video";
 
   const SUBTITLE_LAYERS = [
@@ -205,58 +206,34 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
 
   const mods = {};
 
-  // Show only the selected layout group
+  // Show one layout group
   mods[GROUP_SIDE] = { visible: layout === "sideBySide" };
-  mods[GROUP_TB] = { visible: layout === "topBottom" };
+  mods[GROUP_TB]   = { visible: layout === "topBottom" };
 
-  // ✅ IMPORTANT: set provider:url + source on every video layer
-  // Main visible videos: show picture, but mute audio (audio comes from MAIN_AUDIO)
-  mods[MAIN_SIDE] = {
-    provider: "url",
-    source: mainUrl,
-    playback_rate: mainSpeed,
-    visible: true,
-    opacity: "100%",
-    volume: "0%",
-  };
-  mods[MAIN_TB] = {
-    provider: "url",
-    source: mainUrl,
-    playback_rate: mainSpeed,
-    visible: true,
-    opacity: "100%",
-    volume: "0%",
-  };
+  // ✅ Dynamic video sources MUST be strings
+  mods[MAIN_SIDE] = mainUrl;
+  mods[MAIN_TB]   = mainUrl;
+  mods[BG_SIDE]   = bgUrl;
+  mods[BG_TB]     = bgUrl;
 
-  // Background videos: muted
-  mods[BG_SIDE] = {
-    provider: "url",
-    source: bgUrl,
-    playback_rate: bgSpeed,
-    visible: true,
-    opacity: "100%",
-    volume: bgMuted ? "0%" : "100%",
-  };
-  mods[BG_TB] = {
-    provider: "url",
-    source: bgUrl,
-    playback_rate: bgSpeed,
-    visible: true,
-    opacity: "100%",
-    volume: bgMuted ? "0%" : "100%",
-  };
+  // Speeds + bg mute (these can be object overrides)
+  mods[MAIN_SIDE] = { source: mainUrl, playback_rate: mainSpeed, volume: 0 }; // keep visual silent (avoid double audio)
+  mods[MAIN_TB]   = { source: mainUrl, playback_rate: mainSpeed, volume: 0 };
 
-  // Audio/transcription feeder: invisible but audio ON
+  mods[BG_SIDE]   = { source: bgUrl, playback_rate: bgSpeed, volume: bgMuted ? 0 : 1 };
+  mods[BG_TB]     = { source: bgUrl, playback_rate: bgSpeed, volume: bgMuted ? 0 : 1 };
+
+  // 🔑 Audio/transcription feeder:
+  // Invisible, but audio ON so final render has sound.
   mods[MAIN_AUDIO] = {
-    provider: "url",
     source: mainUrl,
     playback_rate: mainSpeed,
+    opacity: 0,
+    volume: 1,
     visible: true,
-    opacity: "0%",
-    volume: "100%",
   };
 
-  // Captions: disable all, enable one
+  // Captions visibility
   for (const name of SUBTITLE_LAYERS) mods[name] = { visible: false };
 
   mods[pickedSubtitleLayer] = {
@@ -278,10 +255,10 @@ module.exports = async function handler(req, res) {
   }
 
   try {
-    const BUCKET =
-      process.env.SUPABASE_UPLOAD_BUCKET ||
-      process.env.USER_VIDEOS_BUCKET ||
-      "user-uploads";
+    const BUCKET = process.env.SUPABASE_UPLOAD_BUCKET || process.env.USER_VIDEOS_BUCKET || "user-uploads";
+
+    // parse query using WHATWG URL (avoids url.parse warnings in *this* file)
+    const u = new URL(req.url, "https://example.local");
 
     if (req.method === "POST") {
       const body = await readJson(req);
@@ -317,49 +294,25 @@ module.exports = async function handler(req, res) {
       const renderId = item?.id;
       const status = item?.status || "planned";
 
-      if (!renderId) {
-        return json(res, 500, {
-          ok: false,
-          error: "Creatomate response missing id",
-          details: created,
-        });
-      }
+      if (!renderId) return json(res, 500, { ok: false, error: "Creatomate response missing id", details: created });
 
       return json(res, 200, { ok: true, renderId, status });
     }
 
     if (req.method === "GET") {
-      const id = String(req.query?.id || "").trim();
+      const id = String(u.searchParams.get("id") || "").trim();
       if (!id) return json(res, 400, { ok: false, error: "Missing id" });
 
       const r = await creatomateRequest("GET", `/v1/renders/${encodeURIComponent(id)}`, null);
-
-      // Debug: return raw object so you can see warnings/errors
-      if (String(req.query?.raw || "") === "1") {
-        return json(res, 200, { ok: true, render: r });
-      }
-
       const status = String(r?.status || "").toLowerCase();
       const url = r?.url || r?.output_url || null;
 
       if (status === "failed") {
-        return json(res, 200, {
-          ok: true,
-          status: "failed",
-          error: r?.error || r?.message || "Render failed",
-          warnings: r?.warnings || null,
-        });
+        return json(res, 200, { ok: true, status: "failed", error: r?.error || r?.message || "Render failed" });
       }
-
       if (status === "succeeded" && url) {
-        return json(res, 200, {
-          ok: true,
-          status: "succeeded",
-          url,
-          warnings: r?.warnings || null,
-        });
+        return json(res, 200, { ok: true, status: "succeeded", url });
       }
-
       return json(res, 200, { ok: true, status: r?.status || "processing" });
     }
 
