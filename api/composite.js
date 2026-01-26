@@ -390,11 +390,14 @@ module.exports = async function handler(req, res) {
       return json(res, 200, { ok: true, status: r?.status || "processing" });
     }
 
- } catch (err) {
+} catch (err) {
   console.error("COMPOSITE_ERROR", err?.message, err?.creatomate || "");
   return json(res, 500, {
     ok: false,
     error: err?.message || String(err),
     details: err?.creatomate || null,
+  });
+}
+
   }
 };
