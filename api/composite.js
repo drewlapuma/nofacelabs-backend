@@ -44,6 +44,7 @@ async function readJson(req) {
   }
 }
 
+// -------------------- Supabase helpers --------------------
 function getSupabaseAdmin() {
   const SUPABASE_URL = process.env.SUPABASE_URL;
   const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -67,6 +68,7 @@ async function signedReadUrl(bucket, path, expiresIn = 3600) {
   return data.signedUrl;
 }
 
+// -------------------- Creatomate helper --------------------
 function creatomateRequest(method, path, bodyObj) {
   const apiKey = process.env.CREATOMATE_API_KEY;
   if (!apiKey) throw new Error("Missing CREATOMATE_API_KEY env var");
@@ -118,6 +120,7 @@ function creatomateRequest(method, path, bodyObj) {
   });
 }
 
+// -------------------- Captions effect normalization --------------------
 function normalizeTranscriptEffect(v) {
   const s = String(v || "").trim().toLowerCase();
   if (!s) return null;
@@ -128,19 +131,32 @@ function normalizeTranscriptEffect(v) {
   return allowed.has(s) ? s : null;
 }
 
-// ✅ FLAT modifications with percent strings
+// -------------------- Build modifications (FLAT OBJECT) --------------------
 function buildModifications({ mainUrl, bgUrl, payload }) {
+  // Layout groups you already have
   const GROUP_SIDE = process.env.COMPOSITE_GROUP_SIDE || "Layout_SideBySide";
   const GROUP_TB = process.env.COMPOSITE_GROUP_TOPBOTTOM || "Layout_TopBottom";
 
-  const MAIN_SIDE = process.env.COMPOSITE_MAIN_LAYER_SIDE || "input_video_visual_side";
+  // Slot groups YOU MUST CREATE in template
+  const G_SIDE_LEFT = process.env.COMPOSITE_SIDE_LEFT_GROUP || "Main_Left";
+  const G_SIDE_RIGHT = process.env.COMPOSITE_SIDE_RIGHT_GROUP || "Main_Right";
+  const G_TB_TOP = process.env.COMPOSITE_TB_TOP_GROUP || "Main_Top";
+  const G_TB_BOTTOM = process.env.COMPOSITE_TB_BOTTOM_GROUP || "Main_Bottom";
+
+  // Video layers (unique per slot) YOU MUST CREATE in template
+  const MAIN_SIDE_LEFT = process.env.COMPOSITE_MAIN_SIDE_LEFT || "input_video_visual_side_left";
+  const MAIN_SIDE_RIGHT = process.env.COMPOSITE_MAIN_SIDE_RIGHT || "input_video_visual_side_right";
+  const MAIN_TB_TOP = process.env.COMPOSITE_MAIN_TB_TOP || "input_video_visual_tb_top";
+  const MAIN_TB_BOTTOM = process.env.COMPOSITE_MAIN_TB_BOTTOM || "input_video_visual_tb_bottom";
+
+  // Background videos (existing)
   const BG_SIDE = process.env.COMPOSITE_BG_LAYER_SIDE || "bg-video_side";
-  const MAIN_TB = process.env.COMPOSITE_MAIN_LAYER_TB || "input_video_visual_tb";
   const BG_TB = process.env.COMPOSITE_BG_LAYER_TB || "bg-video_tb";
 
-  // audio/transcript feeder (root)
+  // Audio/transcription feeder (existing)
   const MAIN_AUDIO = process.env.COMPOSITE_MAIN_AUDIO_LAYER || "input_video";
 
+  // Subtitle layers (existing)
   const SUBTITLE_LAYERS = [
     "Subtitles_Sentence",
     "Subtitles_Word",
@@ -160,6 +176,9 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
   ];
 
   const layout = payload.layout === "topBottom" ? "topBottom" : "sideBySide";
+  const mainSlot = String(payload.mainSlot || (layout === "topBottom" ? "top" : "left")).toLowerCase();
+
+  // IMPORTANT: read speeds as numbers
   const mainSpeed = Number(payload.mainSpeed || 1);
   const bgSpeed = Number(payload.bgSpeed || 1);
   const bgMuted = payload.bgMuted !== false;
@@ -189,50 +208,47 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
 
   const m = {};
 
-  m["DEBUG_TEXT.text"] = "API HIT ✅";
-
-  // Layout visibility
+  // Layout group toggles
   m[`${GROUP_SIDE}.visible`] = layout === "sideBySide";
   m[`${GROUP_TB}.visible`] = layout === "topBottom";
 
-  // Background videos (muted by default)
+  // Slot group toggles
+  m[`${G_SIDE_LEFT}.visible`] = layout === "sideBySide" && mainSlot === "left";
+  m[`${G_SIDE_RIGHT}.visible`] = layout === "sideBySide" && mainSlot === "right";
+  m[`${G_TB_TOP}.visible`] = layout === "topBottom" && mainSlot === "top";
+  m[`${G_TB_BOTTOM}.visible`] = layout === "topBottom" && mainSlot === "bottom";
+
+  // Background videos (always loaded; which one is visible depends on layout group)
   m[BG_SIDE] = bgUrl;
-  m[`${BG_SIDE}.playback_rate`] = bgSpeed;
   m[`${BG_SIDE}.visible`] = true;
   m[`${BG_SIDE}.opacity`] = "100%";
   m[`${BG_SIDE}.volume`] = bgMuted ? "0%" : "100%";
+  m[`${BG_SIDE}.playback_rate`] = bgSpeed;
 
   m[BG_TB] = bgUrl;
-  m[`${BG_TB}.playback_rate`] = bgSpeed;
   m[`${BG_TB}.visible`] = true;
   m[`${BG_TB}.opacity`] = "100%";
   m[`${BG_TB}.volume`] = bgMuted ? "0%" : "100%";
+  m[`${BG_TB}.playback_rate`] = bgSpeed;
 
-  // Visible main videos — make sure they are actually visible
-  m[MAIN_SIDE] = mainUrl;
-  m[`${MAIN_SIDE}.playback_rate`] = mainSpeed;
-  m[`${MAIN_SIDE}.visible`] = true;
-  m[`${MAIN_SIDE}.opacity`] = "100%";
-  // mute these so we ONLY hear the MAIN_AUDIO feeder (prevents double)
-  m[`${MAIN_SIDE}.volume`] = "0%";
+  // Main visual layers (set all sources/speeds; groups decide which shows)
+  for (const layer of [MAIN_SIDE_LEFT, MAIN_SIDE_RIGHT, MAIN_TB_TOP, MAIN_TB_BOTTOM]) {
+    m[layer] = mainUrl;
+    m[`${layer}.visible`] = true;
+    m[`${layer}.opacity`] = "100%";
+    m[`${layer}.volume`] = "0%"; // keep visuals muted so feeder is the only audio
+    m[`${layer}.playback_rate`] = mainSpeed;
+  }
 
-  m[MAIN_TB] = mainUrl;
-  m[`${MAIN_TB}.playback_rate`] = mainSpeed;
-  m[`${MAIN_TB}.visible`] = true;
-  m[`${MAIN_TB}.opacity`] = "100%";
-  m[`${MAIN_TB}.volume`] = "0%";
-
-  // Hidden transcript/audio feeder: invisible but audible ✅
+  // Audio/transcript feeder: audible, hidden
   m[MAIN_AUDIO] = mainUrl;
-  m[`${MAIN_AUDIO}.playback_rate`] = mainSpeed;
   m[`${MAIN_AUDIO}.visible`] = true;
   m[`${MAIN_AUDIO}.opacity`] = "0%";
   m[`${MAIN_AUDIO}.volume`] = "100%";
+  m[`${MAIN_AUDIO}.playback_rate`] = mainSpeed;
 
-  // Captions: all off then one on
-  for (const name of SUBTITLE_LAYERS) {
-    m[`${name}.visible`] = false;
-  }
+  // Captions
+  for (const name of SUBTITLE_LAYERS) m[`${name}.visible`] = false;
 
   m[`${pickedSubtitleLayer}.visible`] = !!capEnabled;
   m[`${pickedSubtitleLayer}.transcript_effect`] = transcript_effect;
@@ -241,6 +257,9 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
   if (transcriptColor) {
     m[`${pickedSubtitleLayer}.transcript_color`] = String(transcriptColor);
   }
+
+  // Optional debug text if you have it
+  m["DEBUG_TEXT.text"] = `layout=${layout} slot=${mainSlot} mainSpeed=${mainSpeed} bgSpeed=${bgSpeed}`;
 
   return m;
 }
@@ -293,9 +312,7 @@ module.exports = async function handler(req, res) {
       const renderId = item?.id;
       const status = item?.status || "planned";
 
-      if (!renderId) {
-        return json(res, 500, { ok: false, error: "Creatomate response missing id", details: created });
-      }
+      if (!renderId) return json(res, 500, { ok: false, error: "Creatomate response missing id", details: created });
 
       return json(res, 200, { ok: true, renderId, status });
     }
@@ -312,7 +329,7 @@ module.exports = async function handler(req, res) {
         return json(res, 200, { ok: true, status: "failed", error: r?.error || r?.message || "Render failed" });
       }
       if (status === "succeeded" && url) {
-        return json(res, 200, { ok: true, status: "succeeded", url, warnings: r?.warnings || null });
+        return json(res, 200, { ok: true, status: "succeeded", url });
       }
 
       return json(res, 200, { ok: true, status: r?.status || "processing" });
