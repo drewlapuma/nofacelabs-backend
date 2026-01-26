@@ -1,4 +1,4 @@
-buildModifications// api/composite.js (CommonJS, Node 18+ on Vercel)
+// api/composite.js (CommonJS, Node 18+ on Vercel)
 //
 // POST /api/composite
 // body: {
@@ -23,7 +23,6 @@ const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || 
 function setCors(req, res) {
   const origin = req.headers.origin;
 
-  // If you use "*" you must NOT set credentials.
   if (ALLOW_ORIGINS.includes("*")) {
     res.setHeader("Access-Control-Allow-Origin", "*");
   } else if (origin && ALLOW_ORIGINS.includes(origin)) {
@@ -71,9 +70,7 @@ function getSupabaseAdmin() {
 
 async function signedReadUrl(bucket, path, expiresIn = 3600) {
   const supabase = getSupabaseAdmin();
-  const { data, error } = await supabase.storage
-    .from(bucket)
-    .createSignedUrl(path, expiresIn);
+  const { data, error } = await supabase.storage.from(bucket).createSignedUrl(path, expiresIn);
 
   if (error || !data?.signedUrl) {
     throw new Error(`Signed read URL error: ${error?.message || "Object not found"}`);
@@ -81,7 +78,7 @@ async function signedReadUrl(bucket, path, expiresIn = 3600) {
   return data.signedUrl;
 }
 
-// -------------------- Creatomate helper (better errors) --------------------
+// -------------------- Creatomate helper --------------------
 function creatomateRequest(method, path, bodyObj) {
   const apiKey = process.env.CREATOMATE_API_KEY;
   if (!apiKey) throw new Error("Missing CREATOMATE_API_KEY env var");
@@ -103,7 +100,7 @@ function creatomateRequest(method, path, bodyObj) {
       let data = "";
       rs.on("data", (d) => (data += d));
       rs.on("end", () => {
-        let parsed = null;
+        let parsed;
         try {
           parsed = JSON.parse(data || "{}");
         } catch {
@@ -111,13 +108,12 @@ function creatomateRequest(method, path, bodyObj) {
         }
 
         if (rs.statusCode < 200 || rs.statusCode >= 300) {
-          // Return the real Creatomate message so you can fix the template mismatch fast
           const msg =
             parsed?.error ||
             parsed?.message ||
+            parsed?.hint ||
             parsed?.raw ||
             `Creatomate HTTP ${rs.statusCode}`;
-
           const err = new Error(msg);
           err.statusCode = rs.statusCode;
           err.details = parsed;
@@ -134,41 +130,32 @@ function creatomateRequest(method, path, bodyObj) {
   });
 }
 
-// Creatomate transcript effect must be one of:
+// -------------------- Captions effect normalization --------------------
 function normalizeTranscriptEffect(v) {
   const s = String(v || "").trim().toLowerCase();
   if (!s) return null;
 
+  // map your UI styles to allowed effects
   if (["highlighter", "yellowpop", "minttag", "purplepop", "redtag"].includes(s)) return "highlight";
 
   const allowed = new Set(["color", "karaoke", "highlight", "fade", "bounce", "slide", "enlarge"]);
   return allowed.has(s) ? s : null;
 }
 
-// -------------------- Build template modifications --------------------
-//
-// IMPORTANT: These must match your template names.
-// Recommended template names:
-//
-// Groups:
-//   Layout_SideBySide
-//   Layout_TopBottom
-//
-// Video layers inside each group (unique):
-//   Main_Side, BG_Side
-//   Main_TopBottom, BG_TopBottom
-//
-// Subtitle layer to show (example):
-//   Subtitles_Sentence  (or whichever you want default)
-//
+// -------------------- Build modifications (OBJECT, not array) --------------------
 function buildModifications({ mainUrl, bgUrl, payload }) {
   const GROUP_SIDE = process.env.COMPOSITE_GROUP_SIDE || "Layout_SideBySide";
   const GROUP_TB = process.env.COMPOSITE_GROUP_TOPBOTTOM || "Layout_TopBottom";
 
-  const MAIN = process.env.COMPOSITE_MAIN_LAYER || "input_video_visual";
-  const BG = process.env.COMPOSITE_BG_LAYER || "bg-video";
+  // renamed (unique) visual layers:
+  const MAIN_SIDE = process.env.COMPOSITE_MAIN_LAYER_SIDE || "input_video_visual_side";
+  const BG_SIDE = process.env.COMPOSITE_BG_LAYER_SIDE || "bg-video_side";
+  const MAIN_TB = process.env.COMPOSITE_MAIN_LAYER_TB || "input_video_visual_tb";
+  const BG_TB = process.env.COMPOSITE_BG_LAYER_TB || "bg-video_tb";
 
-  // All your subtitle layers (from screenshot)
+  // your audio/transcription source layer at root:
+  const MAIN_AUDIO = process.env.COMPOSITE_MAIN_AUDIO_LAYER || "input_video";
+
   const SUBTITLE_LAYERS = [
     "Subtitles_Sentence",
     "Subtitles_Word",
@@ -196,14 +183,10 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
   const capEnabled = cap.enabled !== false;
   const settings = cap.settings || {};
 
-  // Style name coming from your UI
+  // style should be one of the subtitle layer names
   const styleRaw = String(cap.style || "").trim();
-  const pickedSubtitleLayer =
-    SUBTITLE_LAYERS.includes(styleRaw)
-      ? styleRaw
-      : (process.env.COMPOSITE_SUBTITLES_LAYER || "Subtitles_Sentence");
+  const pickedSubtitleLayer = SUBTITLE_LAYERS.includes(styleRaw) ? styleRaw : "Subtitles_Sentence";
 
-  // transcript effect normalization (your helper)
   const effectRaw =
     settings.transcript_effect ??
     settings.transcriptEffect ??
@@ -215,26 +198,26 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
   const transcript_effect = normalizeTranscriptEffect(effectRaw) || "color";
 
   const transcriptColor =
-    settings.transcript_color ??
-    settings.transcriptColor ??
-    settings.activeColor ??
-    settings.active_color;
+    settings.transcript_color ?? settings.transcriptColor ?? settings.activeColor ?? settings.active_color;
 
-  // ✅ Creatomate expects an OBJECT
   const mods = {};
 
-  // Layout visibility
+  // toggle layout groups
   mods[GROUP_SIDE] = { visible: layout === "sideBySide" };
   mods[GROUP_TB] = { visible: layout === "topBottom" };
 
-  // Video sources (applies to both groups because names are duplicated)
-  mods[MAIN] = { source: mainUrl, playback_rate: mainSpeed };
-  mods[BG] = { source: bgUrl, playback_rate: bgSpeed, volume: bgMuted ? 0 : 1 };
+  // set main audio (this is what subtitles should transcribe from in the template UI)
+  mods[MAIN_AUDIO] = { source: mainUrl, playback_rate: mainSpeed };
 
-  // Captions: turn ALL off, then turn ONE on
-  for (const name of SUBTITLE_LAYERS) {
-    mods[name] = { visible: false };
-  }
+  // set visual layers depending on layout
+  mods[MAIN_SIDE] = { source: mainUrl, playback_rate: mainSpeed };
+  mods[MAIN_TB] = { source: mainUrl, playback_rate: mainSpeed };
+
+  mods[BG_SIDE] = { source: bgUrl, playback_rate: bgSpeed, volume: bgMuted ? 0 : 1 };
+  mods[BG_TB] = { source: bgUrl, playback_rate: bgSpeed, volume: bgMuted ? 0 : 1 };
+
+  // captions: turn all off, enable one
+  for (const name of SUBTITLE_LAYERS) mods[name] = { visible: false };
 
   mods[pickedSubtitleLayer] = {
     visible: !!capEnabled,
@@ -245,23 +228,18 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
   return mods;
 }
 
-
-
 // -------------------- Handler --------------------
 module.exports = async function handler(req, res) {
   setCors(req, res);
 
   if (req.method === "OPTIONS") {
-    // Must respond with headers already set by setCors
+    // must succeed with headers
     res.statusCode = 204;
     return res.end();
   }
 
   try {
-    const BUCKET =
-      process.env.SUPABASE_UPLOAD_BUCKET ||
-      process.env.USER_VIDEOS_BUCKET ||
-      "user-uploads";
+    const BUCKET = process.env.SUPABASE_UPLOAD_BUCKET || process.env.USER_VIDEOS_BUCKET || "user-uploads";
 
     if (req.method === "POST") {
       const body = await readJson(req);
@@ -285,22 +263,17 @@ module.exports = async function handler(req, res) {
 
       const modifications = buildModifications({ mainUrl, bgUrl, payload: body });
 
-const created = await creatomateRequest("POST", "/v1/renders", {
-  template_id: templateId,
-  modifications,     // ✅ object now
-  output_format: "mp4",
-});
-
-
-      const created = await creatomateRequest("POST", "/v1/renders", createPayload);
+      const created = await creatomateRequest("POST", "/v1/renders", {
+        template_id: templateId,
+        modifications, // ✅ object
+        output_format: "mp4",
+      });
 
       const item = Array.isArray(created) ? created[0] : created;
       const renderId = item?.id;
       const status = item?.status || "planned";
 
-      if (!renderId) {
-        return json(res, 500, { ok: false, error: "Creatomate response missing id", details: created });
-      }
+      if (!renderId) return json(res, 500, { ok: false, error: "Creatomate response missing id", details: created });
 
       return json(res, 200, { ok: true, renderId, status });
     }
@@ -310,22 +283,17 @@ const created = await creatomateRequest("POST", "/v1/renders", {
       if (!id) return json(res, 400, { ok: false, error: "Missing id" });
 
       const r = await creatomateRequest("GET", `/v1/renders/${encodeURIComponent(id)}`, null);
-
       const status = String(r?.status || "").toLowerCase();
       const url = r?.url || r?.output_url || null;
 
-      if (status === "failed") {
-        return json(res, 200, { ok: true, status: "failed", error: r?.error || r?.message || "Render failed" });
-      }
-      if (status === "succeeded" && url) {
-        return json(res, 200, { ok: true, status: "succeeded", url });
-      }
+      if (status === "failed") return json(res, 200, { ok: true, status: "failed", error: r?.error || r?.message || "Render failed" });
+      if (status === "succeeded" && url) return json(res, 200, { ok: true, status: "succeeded", url });
+
       return json(res, 200, { ok: true, status: r?.status || "processing" });
     }
 
     return json(res, 405, { ok: false, error: "Method not allowed" });
   } catch (err) {
-    // Bubble up Creatomate details so you can see EXACTLY what name/property failed
     return json(res, 500, {
       ok: false,
       error: err?.message || String(err),
