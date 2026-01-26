@@ -1,10 +1,21 @@
 // api/composite.js (CommonJS, Node 18+ on Vercel)
+//
+// POST /api/composite
+// body: {
+//   mainPath,
+//   backgroundPath OR backgroundVideoUrl,
+//   layout: "sideBySide" | "topBottom",
+//   mainSpeed, bgSpeed, bgMuted,
+//   captions: { enabled, style, settings }
+// }
+//
+// GET /api/composite?id=RENDER_ID
 
 const https = require("https");
 const { createClient } = require("@supabase/supabase-js");
 
 // -------------------- CORS --------------------
-const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || "")
+const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || "*")
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
@@ -12,9 +23,10 @@ const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || 
 function setCors(req, res) {
   const origin = req.headers.origin;
 
-  // If you use Memberstack cookie sessions, you must NOT use "*"
-  // You must echo the requesting origin and allow credentials.
-  if (origin && (ALLOW_ORIGINS.length === 0 || ALLOW_ORIGINS.includes(origin))) {
+  // If you use "*" you must NOT set credentials.
+  if (ALLOW_ORIGINS.includes("*")) {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+  } else if (origin && ALLOW_ORIGINS.includes(origin)) {
     res.setHeader("Access-Control-Allow-Origin", origin);
     res.setHeader("Vary", "Origin");
     res.setHeader("Access-Control-Allow-Credentials", "true");
@@ -45,82 +57,13 @@ async function readJson(req) {
   }
 }
 
-// -------------------- Creatomate helpers --------------------
-function creatomateRequest(method, path, bodyObj) {
-  const apiKey = process.env.CREATOMATE_API_KEY;
-  if (!apiKey) throw new Error("Missing CREATOMATE_API_KEY env var");
-
-  const body = bodyObj ? JSON.stringify(bodyObj) : null;
-
-  const opts = {
-    method,
-    hostname: "api.creatomate.com",
-    path,
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-  };
-
-  return new Promise((resolve, reject) => {
-    const req = https.request(opts, (res) => {
-      let data = "";
-      res.on("data", (d) => (data += d));
-      res.on("end", () => {
-        let j = {};
-        try {
-          j = JSON.parse(data || "{}");
-        } catch {
-          j = { raw: data };
-        }
-
-        if (res.statusCode < 200 || res.statusCode >= 300) {
-          const msg =
-            j?.error ||
-            j?.message ||
-            j?.raw ||
-            `Creatomate HTTP ${res.statusCode}`;
-          return reject(new Error(msg));
-        }
-        resolve(j);
-      });
-    });
-
-    req.on("error", reject);
-    if (body) req.write(body);
-    req.end();
-  });
-}
-
-function normalizeTranscriptEffect(v) {
-  const s = String(v || "").trim().toLowerCase();
-  if (!s) return null;
-
-  if (s === "highlighter" || s === "highlighted") return "highlight";
-  if (s === "yellowpop" || s === "minttag" || s === "purplepop" || s === "redtag")
-    return "highlight";
-
-  const allowed = new Set([
-    "color",
-    "karaoke",
-    "highlight",
-    "fade",
-    "bounce",
-    "slide",
-    "enlarge",
-  ]);
-  return allowed.has(s) ? s : null;
-}
-
 // -------------------- Supabase helpers --------------------
 function getSupabaseAdmin() {
   const SUPABASE_URL = process.env.SUPABASE_URL;
   const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
   if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
     throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
   }
-
   return createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
     auth: { persistSession: false },
   });
@@ -138,34 +81,106 @@ async function signedReadUrl(bucket, path, expiresIn = 3600) {
   return data.signedUrl;
 }
 
-// -------------------- Template mapping --------------------
+// -------------------- Creatomate helper (better errors) --------------------
+function creatomateRequest(method, path, bodyObj) {
+  const apiKey = process.env.CREATOMATE_API_KEY;
+  if (!apiKey) throw new Error("Missing CREATOMATE_API_KEY env var");
+
+  const body = bodyObj ? JSON.stringify(bodyObj) : null;
+
+  const opts = {
+    method,
+    hostname: "api.creatomate.com",
+    path,
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+  };
+
+  return new Promise((resolve, reject) => {
+    const rq = https.request(opts, (rs) => {
+      let data = "";
+      rs.on("data", (d) => (data += d));
+      rs.on("end", () => {
+        let parsed = null;
+        try {
+          parsed = JSON.parse(data || "{}");
+        } catch {
+          parsed = { raw: data };
+        }
+
+        if (rs.statusCode < 200 || rs.statusCode >= 300) {
+          // Return the real Creatomate message so you can fix the template mismatch fast
+          const msg =
+            parsed?.error ||
+            parsed?.message ||
+            parsed?.raw ||
+            `Creatomate HTTP ${rs.statusCode}`;
+
+          const err = new Error(msg);
+          err.statusCode = rs.statusCode;
+          err.details = parsed;
+          return reject(err);
+        }
+
+        resolve(parsed);
+      });
+    });
+
+    rq.on("error", reject);
+    if (body) rq.write(body);
+    rq.end();
+  });
+}
+
+// Creatomate transcript effect must be one of:
+function normalizeTranscriptEffect(v) {
+  const s = String(v || "").trim().toLowerCase();
+  if (!s) return null;
+
+  if (["highlighter", "yellowpop", "minttag", "purplepop", "redtag"].includes(s)) return "highlight";
+
+  const allowed = new Set(["color", "karaoke", "highlight", "fade", "bounce", "slide", "enlarge"]);
+  return allowed.has(s) ? s : null;
+}
+
+// -------------------- Build template modifications --------------------
+//
+// IMPORTANT: These must match your template names.
+// Recommended template names:
+//
+// Groups:
+//   Layout_SideBySide
+//   Layout_TopBottom
+//
+// Video layers inside each group (unique):
+//   Main_Side, BG_Side
+//   Main_TopBottom, BG_TopBottom
+//
+// Subtitle layer to show (example):
+//   Subtitles_Sentence  (or whichever you want default)
+//
 function buildModifications({ mainUrl, bgUrl, payload }) {
-  // Set these env vars to match your template names
-  const MAIN = process.env.COMPOSITE_MAIN_LAYER || "input_video_visual";
-  const BG = process.env.COMPOSITE_BG_LAYER || "bg-video";
-
-  // NOTE: You have multiple subtitle layers (Subtitles_Sentence, etc.)
-  // We'll pick based on captions.style if you send it, else default to Sentence.
-  const style = String(payload?.captions?.style || "Sentence");
-  const SUB =
-    process.env[`COMPOSITE_SUB_LAYER_${style.toUpperCase()}`] ||
-    process.env.COMPOSITE_SUBTITLES_LAYER ||
-    "Subtitles_Sentence";
-
   const GROUP_SIDE = process.env.COMPOSITE_GROUP_SIDE || "Layout_SideBySide";
   const GROUP_TB = process.env.COMPOSITE_GROUP_TOPBOTTOM || "Layout_TopBottom";
 
-  const layout = payload.layout === "topBottom" ? "topBottom" : "sideBySide";
-  const mainSlot = String(payload.mainSlot || (layout === "topBottom" ? "top" : "left"));
+  const MAIN_SIDE = process.env.COMPOSITE_MAIN_SIDE || "Main_Side";
+  const BG_SIDE = process.env.COMPOSITE_BG_SIDE || "BG_Side";
+  const MAIN_TB = process.env.COMPOSITE_MAIN_TB || "Main_TopBottom";
+  const BG_TB = process.env.COMPOSITE_BG_TB || "BG_TopBottom";
 
+  const SUB = process.env.COMPOSITE_SUBTITLES_LAYER || "Subtitles_Sentence";
+
+  const layout = payload.layout === "topBottom" ? "topBottom" : "sideBySide";
   const mainSpeed = Number(payload.mainSpeed || 1);
   const bgSpeed = Number(payload.bgSpeed || 1);
-  const bgMuted = payload.bgMuted !== false;
+  const bgMuted = payload.bgMuted !== false; // default true
 
   const cap = payload.captions || {};
   const capEnabled = cap.enabled !== false;
-
   const settings = cap.settings || {};
+
   const effectRaw =
     settings.transcript_effect ??
     settings.transcriptEffect ??
@@ -178,26 +193,16 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
 
   const mods = [];
 
-  // Sources
-  mods.push({ name: MAIN, src: mainUrl });
-  mods.push({ name: BG, src: bgUrl });
-
-  // Speed
-  mods.push({ name: MAIN, playback_rate: mainSpeed });
-  mods.push({ name: BG, playback_rate: bgSpeed });
-
-  // Mute background
-  if (bgMuted) mods.push({ name: BG, volume: 0 });
-
-  // Layout groups
+  // Layout group visibility
   mods.push({ name: GROUP_SIDE, visible: layout === "sideBySide" });
   mods.push({ name: GROUP_TB, visible: layout === "topBottom" });
 
-  // Slot groups (optional)
-  mods.push({ name: "Main_Left", visible: mainSlot === "left" });
-  mods.push({ name: "Main_Right", visible: mainSlot === "right" });
-  mods.push({ name: "Main_Top", visible: mainSlot === "top" });
-  mods.push({ name: "Main_Bottom", visible: mainSlot === "bottom" });
+  // Apply sources to BOTH sets (only one set will be visible)
+  mods.push({ name: MAIN_SIDE, source: mainUrl, playback_rate: mainSpeed });
+  mods.push({ name: BG_SIDE, source: bgUrl, playback_rate: bgSpeed, volume: bgMuted ? 0 : 1 });
+
+  mods.push({ name: MAIN_TB, source: mainUrl, playback_rate: mainSpeed });
+  mods.push({ name: BG_TB, source: bgUrl, playback_rate: bgSpeed, volume: bgMuted ? 0 : 1 });
 
   // Captions
   mods.push({ name: SUB, visible: !!capEnabled });
@@ -218,11 +223,10 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
 
 // -------------------- Handler --------------------
 module.exports = async function handler(req, res) {
-  // ✅ Always set CORS first
   setCors(req, res);
 
-  // ✅ Never fail preflight
   if (req.method === "OPTIONS") {
+    // Must respond with headers already set by setCors
     res.statusCode = 204;
     return res.end();
   }
@@ -239,9 +243,7 @@ module.exports = async function handler(req, res) {
       if (body === "__INVALID__") return json(res, 400, { ok: false, error: "Invalid JSON" });
 
       const templateId = process.env.COMPOSITE_TEMPLATE_ID;
-      if (!templateId) {
-        return json(res, 500, { ok: false, error: "Missing COMPOSITE_TEMPLATE_ID env var" });
-      }
+      if (!templateId) return json(res, 500, { ok: false, error: "Missing COMPOSITE_TEMPLATE_ID env var" });
 
       const mainPath = body.mainPath;
       const backgroundPath = body.backgroundPath;
@@ -253,28 +255,24 @@ module.exports = async function handler(req, res) {
       }
 
       const mainUrl = await signedReadUrl(BUCKET, mainPath, 60 * 60);
-      const bgUrl = backgroundVideoUrl
-        ? String(backgroundVideoUrl)
-        : await signedReadUrl(BUCKET, backgroundPath, 60 * 60);
+      const bgUrl = backgroundVideoUrl ? String(backgroundVideoUrl) : await signedReadUrl(BUCKET, backgroundPath, 60 * 60);
 
       const modifications = buildModifications({ mainUrl, bgUrl, payload: body });
 
-      const created = await creatomateRequest("POST", "/v1/renders", {
+      const createPayload = {
         template_id: templateId,
         modifications,
         output_format: "mp4",
-      });
+      };
+
+      const created = await creatomateRequest("POST", "/v1/renders", createPayload);
 
       const item = Array.isArray(created) ? created[0] : created;
       const renderId = item?.id;
       const status = item?.status || "planned";
 
       if (!renderId) {
-        return json(res, 500, {
-          ok: false,
-          error: "Creatomate render response missing id",
-          details: created,
-        });
+        return json(res, 500, { ok: false, error: "Creatomate response missing id", details: created });
       }
 
       return json(res, 200, { ok: true, renderId, status });
@@ -290,23 +288,22 @@ module.exports = async function handler(req, res) {
       const url = r?.url || r?.output_url || null;
 
       if (status === "failed") {
-        return json(res, 200, {
-          ok: true,
-          status: "failed",
-          error: r?.error || r?.message || "Render failed",
-        });
+        return json(res, 200, { ok: true, status: "failed", error: r?.error || r?.message || "Render failed" });
       }
-
       if (status === "succeeded" && url) {
         return json(res, 200, { ok: true, status: "succeeded", url });
       }
-
       return json(res, 200, { ok: true, status: r?.status || "processing" });
     }
 
     return json(res, 405, { ok: false, error: "Method not allowed" });
   } catch (err) {
-    console.error("COMPOSITE_ERROR:", err);
-    return json(res, 500, { ok: false, error: err?.message || String(err) });
+    // Bubble up Creatomate details so you can see EXACTLY what name/property failed
+    return json(res, 500, {
+      ok: false,
+      error: err?.message || String(err),
+      statusCode: err?.statusCode || null,
+      details: err?.details || null,
+    });
   }
 };
