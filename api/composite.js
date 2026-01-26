@@ -1,8 +1,27 @@
 // api/composite.js (CommonJS, Node 18+ on Vercel)
+//
+// POST /api/composite
+// body: {
+//   mainPath,
+//   backgroundPath OR backgroundVideoUrl,
+//   layout: "sideBySide" | "topBottom",
+//   mainSpeed, bgSpeed, bgMuted,
+//   captions: { enabled, style, settings }
+// }
+//
+// GET /api/composite?id=RENDER_ID
+//
+// ✅ Updates:
+// - Keeps modifications as an OBJECT (required by Creatomate)
+// - Uses numeric volume/opacity (0..1), no "0%" strings
+// - Adds DEBUG_TEXT support (optional) so you can confirm correct template + element targeting
+// - GET now returns warnings/error/debug fields so we can see fetch/decode problems
+// - CORS: safe origin echo (works with credentials if you add them later)
 
 const https = require("https");
 const { createClient } = require("@supabase/supabase-js");
 
+// -------------------- CORS --------------------
 const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || "*")
   .split(",")
   .map((s) => s.trim())
@@ -11,7 +30,7 @@ const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || 
 function setCors(req, res) {
   const origin = req.headers.origin;
 
-  // Always answer origin in a safe way
+  // If wildcard, echo requesting origin to satisfy browsers when credentials are used later.
   if (ALLOW_ORIGINS.includes("*")) {
     res.setHeader("Access-Control-Allow-Origin", origin || "*");
     res.setHeader("Vary", "Origin");
@@ -133,15 +152,19 @@ function normalizeTranscriptEffect(v) {
 // -------------------- Build modifications (OBJECT) --------------------
 function buildModifications({ mainUrl, bgUrl, payload }) {
   const GROUP_SIDE = process.env.COMPOSITE_GROUP_SIDE || "Layout_SideBySide";
-  const GROUP_TB   = process.env.COMPOSITE_GROUP_TOPBOTTOM || "Layout_TopBottom";
+  const GROUP_TB = process.env.COMPOSITE_GROUP_TOPBOTTOM || "Layout_TopBottom";
 
   const MAIN_SIDE = process.env.COMPOSITE_MAIN_LAYER_SIDE || "input_video_visual_side";
-  const BG_SIDE   = process.env.COMPOSITE_BG_LAYER_SIDE   || "bg-video_side";
-  const MAIN_TB   = process.env.COMPOSITE_MAIN_LAYER_TB   || "input_video_visual_tb";
-  const BG_TB     = process.env.COMPOSITE_BG_LAYER_TB     || "bg-video_tb";
+  const BG_SIDE = process.env.COMPOSITE_BG_LAYER_SIDE || "bg-video_side";
+  const MAIN_TB = process.env.COMPOSITE_MAIN_LAYER_TB || "input_video_visual_tb";
+  const BG_TB = process.env.COMPOSITE_BG_LAYER_TB || "bg-video_tb";
 
   // audio/transcription feeder (root)
   const MAIN_AUDIO = process.env.COMPOSITE_MAIN_AUDIO_LAYER || "input_video";
+
+  // Optional debug element name you will create in the Creatomate editor
+  // Create a BIG Text element named exactly DEBUG_TEXT.
+  const DEBUG_TEXT = process.env.COMPOSITE_DEBUG_TEXT || "DEBUG_TEXT";
 
   const SUBTITLE_LAYERS = [
     "Subtitles_Sentence",
@@ -163,8 +186,8 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
 
   const layout = payload.layout === "topBottom" ? "topBottom" : "sideBySide";
   const mainSpeed = Number(payload.mainSpeed || 1);
-  const bgSpeed   = Number(payload.bgSpeed || 1);
-  const bgMuted   = payload.bgMuted !== false; // default true
+  const bgSpeed = Number(payload.bgSpeed || 1);
+  const bgMuted = payload.bgMuted !== false; // default true
 
   const cap = payload.captions || {};
   const capEnabled = cap.enabled !== false;
@@ -191,51 +214,26 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
 
   const mods = {};
 
-  // Layout groups
+  // Layout groups visibility
   mods[GROUP_SIDE] = { visible: layout === "sideBySide" };
-  mods[GROUP_TB]   = { visible: layout === "topBottom" };
+  mods[GROUP_TB] = { visible: layout === "topBottom" };
 
-  // IMPORTANT:
-  // - Make VISIBLE layers have REAL volume (100) and visible true.
-  // - Keep the hidden feeder invisible, but it can be muted; transcript still works.
-  mods[MAIN_SIDE] = {
-    source: mainUrl,
-    playback_rate: mainSpeed,
-    visible: true,
-    opacity: 1,
-    volume: 1,
-  };
+  // Visible videos: DO NOT force opacity/visible unless you need it.
+  // Use numeric volume (0..1).
+  mods[MAIN_SIDE] = { source: mainUrl, playback_rate: mainSpeed, volume: 1 };
+  mods[MAIN_TB] = { source: mainUrl, playback_rate: mainSpeed, volume: 1 };
 
-  mods[MAIN_TB] = {
-    source: mainUrl,
-    playback_rate: mainSpeed,
-    visible: true,
-    opacity: 1,
-    volume: 1,
-  };
+  // Background: muted by default
+  mods[BG_SIDE] = { source: bgUrl, playback_rate: bgSpeed, volume: bgMuted ? 0 : 1 };
+  mods[BG_TB] = { source: bgUrl, playback_rate: bgSpeed, volume: bgMuted ? 0 : 1 };
 
-  mods[BG_SIDE] = {
-    source: bgUrl,
-    playback_rate: bgSpeed,
-    visible: true,
-    volume: bgMuted ? 0 : 1,
-  };
+  // Hidden feeder: keep invisible and muted (captions can still transcribe from it if your subtitle uses it)
+  // NOTE: If your subtitle element in the template is set to transcribe from input_video, keep this.
+  mods[MAIN_AUDIO] = { source: mainUrl, playback_rate: mainSpeed, opacity: 0, volume: 0 };
 
-  mods[BG_TB] = {
-    source: bgUrl,
-    playback_rate: bgSpeed,
-    visible: true,
-    volume: bgMuted ? 0 : 1,
-  };
-
-  // Hidden audio/transcript feeder
-  mods[MAIN_AUDIO] = {
-    source: mainUrl,
-    playback_rate: mainSpeed,
-    visible: true,
-    opacity: 0,
-    volume: 0, // keep it muted to avoid double audio
-  };
+  // Optional: debug text to confirm template + element targeting
+  // Only apply if you created the element in the editor; if not, this will simply be ignored.
+  mods[DEBUG_TEXT] = { text: "API HIT ✅" };
 
   // Captions: all off then one on
   for (const name of SUBTITLE_LAYERS) mods[name] = { visible: false };
@@ -244,7 +242,8 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
     visible: !!capEnabled,
     transcript_effect,
     ...(transcriptColor ? { transcript_color: String(transcriptColor) } : {}),
-    // This helps if your subtitle element is set to a source in UI:
+    // If Creatomate supports transcript_source for your subtitle elements, this helps.
+    // If it doesn't, it will be ignored (safe).
     transcript_source: MAIN_AUDIO,
   };
 
@@ -297,7 +296,13 @@ module.exports = async function handler(req, res) {
       const renderId = item?.id;
       const status = item?.status || "planned";
 
-      if (!renderId) return json(res, 500, { ok: false, error: "Creatomate response missing id", details: created });
+      if (!renderId) {
+        return json(res, 500, {
+          ok: false,
+          error: "Creatomate response missing id",
+          details: created,
+        });
+      }
 
       return json(res, 200, { ok: true, renderId, status });
     }
@@ -307,17 +312,20 @@ module.exports = async function handler(req, res) {
       if (!id) return json(res, 400, { ok: false, error: "Missing id" });
 
       const r = await creatomateRequest("GET", `/v1/renders/${encodeURIComponent(id)}`, null);
-      const status = String(r?.status || "").toLowerCase();
-      const url = r?.url || r?.output_url || null;
 
-      if (status === "failed") {
-        return json(res, 200, { ok: true, status: "failed", error: r?.error || r?.message || "Render failed" });
-      }
-      if (status === "succeeded" && url) {
-        return json(res, 200, { ok: true, status: "succeeded", url, warnings: r?.warnings || null });
-      }
-
-      return json(res, 200, { ok: true, status: r?.status || "processing" });
+      return json(res, 200, {
+        ok: true,
+        status: r?.status || "unknown",
+        url: r?.url || r?.output_url || null,
+        warnings: r?.warnings || null,
+        error: r?.error || r?.message || null,
+        debug: {
+          fetch: r?.fetch || null,
+          inputs: r?.inputs || null,
+          file_size: r?.file_size || null,
+          duration: r?.duration || null,
+        },
+      });
     }
 
     return json(res, 405, { ok: false, error: "Method not allowed" });
