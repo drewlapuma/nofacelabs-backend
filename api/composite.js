@@ -142,18 +142,16 @@ function normalizeTranscriptEffect(v) {
   return allowed.has(s) ? s : null;
 }
 
-// -------------------- Build modifications (OBJECT, not array) --------------------
 function buildModifications({ mainUrl, bgUrl, payload }) {
   const GROUP_SIDE = process.env.COMPOSITE_GROUP_SIDE || "Layout_SideBySide";
   const GROUP_TB = process.env.COMPOSITE_GROUP_TOPBOTTOM || "Layout_TopBottom";
 
-  // renamed (unique) visual layers:
   const MAIN_SIDE = process.env.COMPOSITE_MAIN_LAYER_SIDE || "input_video_visual_side";
-  const BG_SIDE = process.env.COMPOSITE_BG_LAYER_SIDE || "bg-video_side";
-  const MAIN_TB = process.env.COMPOSITE_MAIN_LAYER_TB || "input_video_visual_tb";
-  const BG_TB = process.env.COMPOSITE_BG_LAYER_TB || "bg-video_tb";
+  const BG_SIDE   = process.env.COMPOSITE_BG_LAYER_SIDE   || "bg-video_side";
+  const MAIN_TB   = process.env.COMPOSITE_MAIN_LAYER_TB   || "input_video_visual_tb";
+  const BG_TB     = process.env.COMPOSITE_BG_LAYER_TB     || "bg-video_tb";
 
-  // your audio/transcription source layer at root:
+  // hidden transcript/audio feeder
   const MAIN_AUDIO = process.env.COMPOSITE_MAIN_AUDIO_LAYER || "input_video";
 
   const SUBTITLE_LAYERS = [
@@ -176,16 +174,19 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
 
   const layout = payload.layout === "topBottom" ? "topBottom" : "sideBySide";
   const mainSpeed = Number(payload.mainSpeed || 1);
-  const bgSpeed = Number(payload.bgSpeed || 1);
+  const bgSpeed   = Number(payload.bgSpeed || 1);
+
+  // background muted default true
   const bgMuted = payload.bgMuted !== false;
 
   const cap = payload.captions || {};
   const capEnabled = cap.enabled !== false;
   const settings = cap.settings || {};
 
-  // style should be one of the subtitle layer names
   const styleRaw = String(cap.style || "").trim();
-  const pickedSubtitleLayer = SUBTITLE_LAYERS.includes(styleRaw) ? styleRaw : "Subtitles_Sentence";
+  const pickedSubtitleLayer = SUBTITLE_LAYERS.includes(styleRaw)
+    ? styleRaw
+    : "Subtitles_Sentence";
 
   const effectRaw =
     settings.transcript_effect ??
@@ -198,25 +199,62 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
   const transcript_effect = normalizeTranscriptEffect(effectRaw) || "color";
 
   const transcriptColor =
-    settings.transcript_color ?? settings.transcriptColor ?? settings.activeColor ?? settings.active_color;
+    settings.transcript_color ??
+    settings.transcriptColor ??
+    settings.activeColor ??
+    settings.active_color;
 
   const mods = {};
 
-  // toggle layout groups
+  // ---- layout visibility
   mods[GROUP_SIDE] = { visible: layout === "sideBySide" };
-  mods[GROUP_TB] = { visible: layout === "topBottom" };
+  mods[GROUP_TB]   = { visible: layout === "topBottom" };
 
-  // set main audio (this is what subtitles should transcribe from in the template UI)
-  mods[MAIN_AUDIO] = { source: mainUrl, playback_rate: mainSpeed };
+  // ---- MAIN VISIBLE VIDEO (this is what user sees + should hear)
+  // FORCE volume to 1 to override your template’s 0%
+  mods[MAIN_SIDE] = {
+    source: mainUrl,
+    playback_rate: mainSpeed,
+    volume: 1,
+    opacity: 1,
+    visible: true,
+  };
 
-  // set visual layers depending on layout
-  mods[MAIN_SIDE] = { source: mainUrl, playback_rate: mainSpeed };
-  mods[MAIN_TB] = { source: mainUrl, playback_rate: mainSpeed };
+  mods[MAIN_TB] = {
+    source: mainUrl,
+    playback_rate: mainSpeed,
+    volume: 1,
+    opacity: 1,
+    visible: true,
+  };
 
-  mods[BG_SIDE] = { source: bgUrl, playback_rate: bgSpeed, volume: bgMuted ? 0 : 1 };
-  mods[BG_TB] = { source: bgUrl, playback_rate: bgSpeed, volume: bgMuted ? 0 : 1 };
+  // ---- BACKGROUND VIDEO (muted)
+  mods[BG_SIDE] = {
+    source: bgUrl,
+    playback_rate: bgSpeed,
+    volume: bgMuted ? 0 : 1,
+    visible: true,
+  };
 
-  // captions: turn all off, enable one
+  mods[BG_TB] = {
+    source: bgUrl,
+    playback_rate: bgSpeed,
+    volume: bgMuted ? 0 : 1,
+    visible: true,
+  };
+
+  // ---- HIDDEN TRANSCRIPT FEEDER
+  // Keep hidden, and mute it so you don't get double audio.
+  // (Captions can still transcribe from it if your subtitle element is set to that source)
+  mods[MAIN_AUDIO] = {
+    source: mainUrl,
+    playback_rate: mainSpeed,
+    opacity: 0,
+    volume: 0,
+    visible: true,
+  };
+
+  // ---- captions: turn all off, enable one
   for (const name of SUBTITLE_LAYERS) mods[name] = { visible: false };
 
   mods[pickedSubtitleLayer] = {
