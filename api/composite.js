@@ -6,7 +6,8 @@
 //   backgroundPath OR backgroundVideoUrl,
 //   layout: "sideBySide" | "topBottom",
 //   mainSpeed, bgSpeed, bgMuted,
-//   captions: { enabled, style, settings }
+//   captions: { enabled, style, settings },
+//   useSampleUrls?: boolean   // optional debug
 // }
 //
 // GET /api/composite?id=RENDER_ID
@@ -23,12 +24,15 @@ const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || 
 function setCors(req, res) {
   const origin = req.headers.origin;
 
+  // Always set something (prevents “missing ACAO” confusion)
   if (ALLOW_ORIGINS.includes("*")) {
     res.setHeader("Access-Control-Allow-Origin", "*");
+    // Do NOT set Allow-Credentials when using "*"
   } else if (origin && ALLOW_ORIGINS.includes(origin)) {
     res.setHeader("Access-Control-Allow-Origin", origin);
     res.setHeader("Vary", "Origin");
-    res.setHeader("Access-Control-Allow-Credentials", "true");
+    // Only set this if you truly need cookies; your frontend uses credentials:"omit" so it’s fine either way
+    // res.setHeader("Access-Control-Allow-Credentials", "true");
   }
 
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
@@ -135,13 +139,13 @@ function normalizeTranscriptEffect(v) {
   const s = String(v || "").trim().toLowerCase();
   if (!s) return null;
 
-  // map your UI styles to allowed effects
   if (["highlighter", "yellowpop", "minttag", "purplepop", "redtag"].includes(s)) return "highlight";
 
   const allowed = new Set(["color", "karaoke", "highlight", "fade", "bounce", "slide", "enlarge"]);
   return allowed.has(s) ? s : null;
 }
 
+// -------------------- Build modifications --------------------
 function buildModifications({ mainUrl, bgUrl, payload }) {
   const GROUP_SIDE = process.env.COMPOSITE_GROUP_SIDE || "Layout_SideBySide";
   const GROUP_TB = process.env.COMPOSITE_GROUP_TOPBOTTOM || "Layout_TopBottom";
@@ -151,7 +155,7 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
   const MAIN_TB   = process.env.COMPOSITE_MAIN_LAYER_TB   || "input_video_visual_tb";
   const BG_TB     = process.env.COMPOSITE_BG_LAYER_TB     || "bg-video_tb";
 
-  // hidden transcript/audio feeder
+  // root audio/transcript feeder
   const MAIN_AUDIO = process.env.COMPOSITE_MAIN_AUDIO_LAYER || "input_video";
 
   const SUBTITLE_LAYERS = [
@@ -175,18 +179,14 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
   const layout = payload.layout === "topBottom" ? "topBottom" : "sideBySide";
   const mainSpeed = Number(payload.mainSpeed || 1);
   const bgSpeed   = Number(payload.bgSpeed || 1);
-
-  // background muted default true
-  const bgMuted = payload.bgMuted !== false;
+  const bgMuted   = payload.bgMuted !== false;
 
   const cap = payload.captions || {};
   const capEnabled = cap.enabled !== false;
   const settings = cap.settings || {};
 
   const styleRaw = String(cap.style || "").trim();
-  const pickedSubtitleLayer = SUBTITLE_LAYERS.includes(styleRaw)
-    ? styleRaw
-    : "Subtitles_Sentence";
+  const pickedSubtitleLayer = SUBTITLE_LAYERS.includes(styleRaw) ? styleRaw : "Subtitles_Sentence";
 
   const effectRaw =
     settings.transcript_effect ??
@@ -206,57 +206,28 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
 
   const mods = {};
 
-  // ---- layout visibility
+  // layout groups
   mods[GROUP_SIDE] = { visible: layout === "sideBySide" };
   mods[GROUP_TB]   = { visible: layout === "topBottom" };
 
-  // ---- MAIN VISIBLE VIDEO (this is what user sees + should hear)
-  // FORCE volume to 1 to override your template’s 0%
-  mods[MAIN_SIDE] = {
+  // ✅ AUDIO/TRANSCRIPT FEEDER (invisible but audible)
+  mods[MAIN_AUDIO] = {
     source: mainUrl,
     playback_rate: mainSpeed,
-    volume: "0%",
     visible: true,
-    opacity: "100%",
+    opacity: "0%",
+    volume: "100%",
   };
 
-  mods[MAIN_TB] = {
-  source: mainUrl,
-    playback_rate: mainSpeed,
-    volume: "0%",
-    visible: true,
-    opacity: "100%",
+  // ✅ MAIN VISUALS (visible but muted to prevent double audio)
+  mods[MAIN_SIDE] = { source: mainUrl, playback_rate: mainSpeed, visible: true, opacity: "100%", volume: "0%" };
+  mods[MAIN_TB]   = { source: mainUrl, playback_rate: mainSpeed, visible: true, opacity: "100%", volume: "0%" };
 
-  // ---- BACKGROUND VIDEO (muted)
-  mods[BG_SIDE] = {
-    source: bgUrl,
-    playback_rate: bgSpeed,
-    volume: "0%",
-    visible: true,
-    opacity: "100%",
-  };
+  // ✅ BACKGROUND (muted)
+  mods[BG_SIDE] = { source: bgUrl, playback_rate: bgSpeed, visible: true, opacity: "100%", volume: bgMuted ? "0%" : "100%" };
+  mods[BG_TB]   = { source: bgUrl, playback_rate: bgSpeed, visible: true, opacity: "100%", volume: bgMuted ? "0%" : "100%" };
 
-  mods[BG_TB] = {
-   source: bgUrl,
-    playback_rate: bgSpeed,
-    volume: "0%",
-    visible: true,
-    opacity: "100%",
-  };
-
-  // ---- HIDDEN TRANSCRIPT FEEDER
-  // Keep hidden, and mute it so you don't get double audio.
-  // (Captions can still transcribe from it if your subtitle element is set to that source)
-mods[MAIN_AUDIO] = {
-  source: mainUrl,
-  playback_rate: mainSpeed,
-  visible: true,
-  opacity: "0%",     // invisible but still provides audio/transcription
-  volume: "100%"     // ✅ audio ON
-};
-
-
-  // ---- captions: turn all off, enable one
+  // captions toggle
   for (const name of SUBTITLE_LAYERS) mods[name] = { visible: false };
 
   mods[pickedSubtitleLayer] = {
@@ -273,7 +244,6 @@ module.exports = async function handler(req, res) {
   setCors(req, res);
 
   if (req.method === "OPTIONS") {
-    // must succeed with headers
     res.statusCode = 204;
     return res.end();
   }
@@ -289,23 +259,31 @@ module.exports = async function handler(req, res) {
       const templateId = process.env.COMPOSITE_TEMPLATE_ID;
       if (!templateId) return json(res, 500, { ok: false, error: "Missing COMPOSITE_TEMPLATE_ID env var" });
 
-      const mainPath = body.mainPath;
-      const backgroundPath = body.backgroundPath;
-      const backgroundVideoUrl = body.backgroundVideoUrl;
+      let mainUrl, bgUrl;
 
-      if (!mainPath) return json(res, 400, { ok: false, error: "mainPath is required" });
-      if (!backgroundPath && !backgroundVideoUrl) {
-        return json(res, 400, { ok: false, error: "backgroundPath or backgroundVideoUrl is required" });
+      // Optional debug mode to test without Supabase
+      if (body.useSampleUrls) {
+        mainUrl = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4";
+        bgUrl   = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4";
+      } else {
+        const mainPath = body.mainPath;
+        const backgroundPath = body.backgroundPath;
+        const backgroundVideoUrl = body.backgroundVideoUrl;
+
+        if (!mainPath) return json(res, 400, { ok: false, error: "mainPath is required" });
+        if (!backgroundPath && !backgroundVideoUrl) {
+          return json(res, 400, { ok: false, error: "backgroundPath or backgroundVideoUrl is required" });
+        }
+
+        mainUrl = await signedReadUrl(BUCKET, mainPath, 60 * 60);
+        bgUrl = backgroundVideoUrl ? String(backgroundVideoUrl) : await signedReadUrl(BUCKET, backgroundPath, 60 * 60);
       }
-
-      const mainUrl = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4";
-const bgUrl   = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4";
 
       const modifications = buildModifications({ mainUrl, bgUrl, payload: body });
 
       const created = await creatomateRequest("POST", "/v1/renders", {
         template_id: templateId,
-        modifications, // ✅ object
+        modifications,          // ✅ must be object
         output_format: "mp4",
       });
 
@@ -326,9 +304,12 @@ const bgUrl   = "https://commondatastorage.googleapis.com/gtv-videos-bucket/samp
       const status = String(r?.status || "").toLowerCase();
       const url = r?.url || r?.output_url || null;
 
-      if (status === "failed") return json(res, 200, { ok: true, status: "failed", error: r?.error || r?.message || "Render failed" });
-      if (status === "succeeded" && url) return json(res, 200, { ok: true, status: "succeeded", url });
-
+      if (status === "failed") {
+        return json(res, 200, { ok: true, status: "failed", error: r?.error || r?.message || "Render failed" });
+      }
+      if (status === "succeeded" && url) {
+        return json(res, 200, { ok: true, status: "succeeded", url });
+      }
       return json(res, 200, { ok: true, status: r?.status || "processing" });
     }
 
