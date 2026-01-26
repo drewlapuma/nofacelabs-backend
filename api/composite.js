@@ -10,6 +10,7 @@
 // }
 //
 // GET /api/composite?id=RENDER_ID
+// GET /api/composite?id=RENDER_ID&raw=1   -> returns full Creatomate object for debugging
 
 const https = require("https");
 const { createClient } = require("@supabase/supabase-js");
@@ -23,12 +24,14 @@ const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || 
 function setCors(req, res) {
   const origin = req.headers.origin;
 
-  // ✅ simplest: no credentials
+  // If "*" then do NOT set credentials.
   if (ALLOW_ORIGINS.includes("*")) {
     res.setHeader("Access-Control-Allow-Origin", "*");
   } else if (origin && ALLOW_ORIGINS.includes(origin)) {
     res.setHeader("Access-Control-Allow-Origin", origin);
     res.setHeader("Vary", "Origin");
+    // Only set credentials when you are NOT using "*"
+    res.setHeader("Access-Control-Allow-Credentials", "true");
   }
 
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
@@ -146,13 +149,12 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
   const GROUP_SIDE = process.env.COMPOSITE_GROUP_SIDE || "Layout_SideBySide";
   const GROUP_TB = process.env.COMPOSITE_GROUP_TOPBOTTOM || "Layout_TopBottom";
 
-  // visual layers (inside groups)
   const MAIN_SIDE = process.env.COMPOSITE_MAIN_LAYER_SIDE || "input_video_visual_side";
-  const BG_SIDE = process.env.COMPOSITE_BG_LAYER_SIDE || "bg-video_side";
-  const MAIN_TB = process.env.COMPOSITE_MAIN_LAYER_TB || "input_video_visual_tb";
-  const BG_TB = process.env.COMPOSITE_BG_LAYER_TB || "bg-video_tb";
+  const BG_SIDE   = process.env.COMPOSITE_BG_LAYER_SIDE   || "bg-video_side";
+  const MAIN_TB   = process.env.COMPOSITE_MAIN_LAYER_TB   || "input_video_visual_tb";
+  const BG_TB     = process.env.COMPOSITE_BG_LAYER_TB     || "bg-video_tb";
 
-  // hidden audio/transcription feeder at root
+  // audio/transcription feeder at root
   const MAIN_AUDIO = process.env.COMPOSITE_MAIN_AUDIO_LAYER || "input_video";
 
   const SUBTITLE_LAYERS = [
@@ -176,7 +178,6 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
   const layout = payload.layout === "topBottom" ? "topBottom" : "sideBySide";
   const mainSpeed = Number(payload.mainSpeed || 1);
   const bgSpeed = Number(payload.bgSpeed || 1);
-
   const bgMuted = payload.bgMuted !== false;
 
   const cap = payload.captions || {};
@@ -197,32 +198,39 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
   const transcript_effect = normalizeTranscriptEffect(effectRaw) || "color";
 
   const transcriptColor =
-    settings.transcript_color ?? settings.transcriptColor ?? settings.activeColor ?? settings.active_color;
+    settings.transcript_color ??
+    settings.transcriptColor ??
+    settings.activeColor ??
+    settings.active_color;
 
   const mods = {};
 
-  // layout visibility
+  // Show only the selected layout group
   mods[GROUP_SIDE] = { visible: layout === "sideBySide" };
   mods[GROUP_TB] = { visible: layout === "topBottom" };
 
-  // ✅ Visible main video (audio ON)
+  // ✅ IMPORTANT: set provider:url + source on every video layer
+  // Main visible videos: show picture, but mute audio (audio comes from MAIN_AUDIO)
   mods[MAIN_SIDE] = {
+    provider: "url",
     source: mainUrl,
     playback_rate: mainSpeed,
     visible: true,
     opacity: "100%",
-    volume: "100%",
+    volume: "0%",
   };
   mods[MAIN_TB] = {
+    provider: "url",
     source: mainUrl,
     playback_rate: mainSpeed,
     visible: true,
     opacity: "100%",
-    volume: "100%",
+    volume: "0%",
   };
 
-  // ✅ Background video (muted)
+  // Background videos: muted
   mods[BG_SIDE] = {
+    provider: "url",
     source: bgUrl,
     playback_rate: bgSpeed,
     visible: true,
@@ -230,6 +238,7 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
     volume: bgMuted ? "0%" : "100%",
   };
   mods[BG_TB] = {
+    provider: "url",
     source: bgUrl,
     playback_rate: bgSpeed,
     visible: true,
@@ -237,10 +246,9 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
     volume: bgMuted ? "0%" : "100%",
   };
 
-  // ✅ Hidden audio/transcript feeder (invisible but audio ON so subtitles can transcribe)
-  // If you do NOT want double-audio, keep visible layers volume 0 and feeder 100.
-  // But you said you want audio, so we keep main visible layers at 100.
+  // Audio/transcription feeder: invisible but audio ON
   mods[MAIN_AUDIO] = {
+    provider: "url",
     source: mainUrl,
     playback_rate: mainSpeed,
     visible: true,
@@ -248,7 +256,7 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
     volume: "100%",
   };
 
-  // captions: turn all off, enable one
+  // Captions: disable all, enable one
   for (const name of SUBTITLE_LAYERS) mods[name] = { visible: false };
 
   mods[pickedSubtitleLayer] = {
@@ -270,7 +278,10 @@ module.exports = async function handler(req, res) {
   }
 
   try {
-    const BUCKET = process.env.SUPABASE_UPLOAD_BUCKET || process.env.USER_VIDEOS_BUCKET || "user-uploads";
+    const BUCKET =
+      process.env.SUPABASE_UPLOAD_BUCKET ||
+      process.env.USER_VIDEOS_BUCKET ||
+      "user-uploads";
 
     if (req.method === "POST") {
       const body = await readJson(req);
@@ -307,7 +318,11 @@ module.exports = async function handler(req, res) {
       const status = item?.status || "planned";
 
       if (!renderId) {
-        return json(res, 500, { ok: false, error: "Creatomate response missing id", details: created });
+        return json(res, 500, {
+          ok: false,
+          error: "Creatomate response missing id",
+          details: created,
+        });
       }
 
       return json(res, 200, { ok: true, renderId, status });
@@ -318,15 +333,33 @@ module.exports = async function handler(req, res) {
       if (!id) return json(res, 400, { ok: false, error: "Missing id" });
 
       const r = await creatomateRequest("GET", `/v1/renders/${encodeURIComponent(id)}`, null);
+
+      // Debug: return raw object so you can see warnings/errors
+      if (String(req.query?.raw || "") === "1") {
+        return json(res, 200, { ok: true, render: r });
+      }
+
       const status = String(r?.status || "").toLowerCase();
       const url = r?.url || r?.output_url || null;
 
       if (status === "failed") {
-        return json(res, 200, { ok: true, status: "failed", error: r?.error || r?.message || "Render failed" });
+        return json(res, 200, {
+          ok: true,
+          status: "failed",
+          error: r?.error || r?.message || "Render failed",
+          warnings: r?.warnings || null,
+        });
       }
+
       if (status === "succeeded" && url) {
-        return json(res, 200, { ok: true, status: "succeeded", url });
+        return json(res, 200, {
+          ok: true,
+          status: "succeeded",
+          url,
+          warnings: r?.warnings || null,
+        });
       }
+
       return json(res, 200, { ok: true, status: r?.status || "processing" });
     }
 
