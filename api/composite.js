@@ -148,14 +148,14 @@ function normalizeTranscriptEffect(v) {
 // -------------------- Build modifications --------------------
 function buildModifications({ mainUrl, bgUrl, payload }) {
   const GROUP_SIDE = process.env.COMPOSITE_GROUP_SIDE || "Layout_SideBySide";
-  const GROUP_TB = process.env.COMPOSITE_GROUP_TOPBOTTOM || "Layout_TopBottom";
+  const GROUP_TB   = process.env.COMPOSITE_GROUP_TOPBOTTOM || "Layout_TopBottom";
 
   const MAIN_SIDE = process.env.COMPOSITE_MAIN_LAYER_SIDE || "input_video_visual_side";
   const BG_SIDE   = process.env.COMPOSITE_BG_LAYER_SIDE   || "bg-video_side";
   const MAIN_TB   = process.env.COMPOSITE_MAIN_LAYER_TB   || "input_video_visual_tb";
   const BG_TB     = process.env.COMPOSITE_BG_LAYER_TB     || "bg-video_tb";
 
-  // root audio/transcript feeder
+  // If your subtitle layers are configured to transcribe from this layer, we can still set it:
   const MAIN_AUDIO = process.env.COMPOSITE_MAIN_AUDIO_LAYER || "input_video";
 
   const SUBTITLE_LAYERS = [
@@ -176,10 +176,10 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
     "Subtitles_RedTag",
   ];
 
-  const layout = payload.layout === "topBottom" ? "topBottom" : "sideBySide";
+  const layout    = payload.layout === "topBottom" ? "topBottom" : "sideBySide";
   const mainSpeed = Number(payload.mainSpeed || 1);
   const bgSpeed   = Number(payload.bgSpeed || 1);
-  const bgMuted   = payload.bgMuted !== false;
+  const bgMuted   = payload.bgMuted !== false; // default true
 
   const cap = payload.captions || {};
   const capEnabled = cap.enabled !== false;
@@ -206,28 +206,55 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
 
   const mods = {};
 
-  // layout groups
+  // Layout visibility
   mods[GROUP_SIDE] = { visible: layout === "sideBySide" };
   mods[GROUP_TB]   = { visible: layout === "topBottom" };
 
-  // ✅ AUDIO/TRANSCRIPT FEEDER (invisible but audible)
+  // ✅ MAIN VISIBLE VIDEO MUST HAVE AUDIO
+  mods[MAIN_SIDE] = {
+    source: mainUrl,
+    playback_rate: mainSpeed,
+    visible: true,
+    opacity: "100%",
+    volume: "100%",     // ✅ FIX
+  };
+
+  mods[MAIN_TB] = {
+    source: mainUrl,
+    playback_rate: mainSpeed,
+    visible: true,
+    opacity: "100%",
+    volume: "100%",     // ✅ FIX
+  };
+
+  // Background video (muted by default)
+  mods[BG_SIDE] = {
+    source: bgUrl,
+    playback_rate: bgSpeed,
+    visible: true,
+    opacity: "100%",
+    volume: bgMuted ? "0%" : "100%",
+  };
+
+  mods[BG_TB] = {
+    source: bgUrl,
+    playback_rate: bgSpeed,
+    visible: true,
+    opacity: "100%",
+    volume: bgMuted ? "0%" : "100%",
+  };
+
+  // Optional: keep the old "input_video" wired for captions if your subtitle elements reference it.
+  // IMPORTANT: do NOT rely on it for audio.
   mods[MAIN_AUDIO] = {
     source: mainUrl,
     playback_rate: mainSpeed,
     visible: true,
     opacity: "0%",
-    volume: "100%",
+    volume: "0%",       // keep silent to avoid doubling if it DOES mix
   };
 
-  // ✅ MAIN VISUALS (visible but muted to prevent double audio)
-  mods[MAIN_SIDE] = { source: mainUrl, playback_rate: mainSpeed, visible: true, opacity: "100%", volume: "0%" };
-  mods[MAIN_TB]   = { source: mainUrl, playback_rate: mainSpeed, visible: true, opacity: "100%", volume: "0%" };
-
-  // ✅ BACKGROUND (muted)
-  mods[BG_SIDE] = { source: bgUrl, playback_rate: bgSpeed, visible: true, opacity: "100%", volume: bgMuted ? "0%" : "100%" };
-  mods[BG_TB]   = { source: bgUrl, playback_rate: bgSpeed, visible: true, opacity: "100%", volume: bgMuted ? "0%" : "100%" };
-
-  // captions toggle
+  // Captions: turn all off, enable one
   for (const name of SUBTITLE_LAYERS) mods[name] = { visible: false };
 
   mods[pickedSubtitleLayer] = {
@@ -238,6 +265,7 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
 
   return mods;
 }
+
 
 // -------------------- Handler --------------------
 module.exports = async function handler(req, res) {
