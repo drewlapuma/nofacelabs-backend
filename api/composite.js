@@ -1,15 +1,4 @@
 // api/composite.js (CommonJS, Node 18+ on Vercel)
-//
-// POST /api/composite
-// body: {
-//   mainPath,
-//   backgroundPath OR backgroundVideoUrl,
-//   layout: "sideBySide" | "topBottom",
-//   mainSpeed, bgSpeed, bgMuted,
-//   captions: { enabled, style, settings }
-// }
-//
-// GET /api/composite?id=RENDER_ID
 
 const https = require("https");
 const { createClient } = require("@supabase/supabase-js");
@@ -22,8 +11,6 @@ const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || 
 function setCors(req, res) {
   const origin = req.headers.origin;
 
-  // If ALLOW_ORIGINS="*" we reflect the origin so browsers don’t freak out,
-  // but we do NOT set credentials.
   if (ALLOW_ORIGINS.includes("*")) {
     res.setHeader("Access-Control-Allow-Origin", origin || "*");
     res.setHeader("Vary", "Origin");
@@ -57,7 +44,6 @@ async function readJson(req) {
   }
 }
 
-// -------------------- Supabase helpers --------------------
 function getSupabaseAdmin() {
   const SUPABASE_URL = process.env.SUPABASE_URL;
   const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -81,7 +67,6 @@ async function signedReadUrl(bucket, path, expiresIn = 3600) {
   return data.signedUrl;
 }
 
-// -------------------- Creatomate helper --------------------
 function creatomateRequest(method, path, bodyObj) {
   const apiKey = process.env.CREATOMATE_API_KEY;
   if (!apiKey) throw new Error("Missing CREATOMATE_API_KEY env var");
@@ -133,7 +118,6 @@ function creatomateRequest(method, path, bodyObj) {
   });
 }
 
-// -------------------- Captions effect normalization --------------------
 function normalizeTranscriptEffect(v) {
   const s = String(v || "").trim().toLowerCase();
   if (!s) return null;
@@ -144,19 +128,17 @@ function normalizeTranscriptEffect(v) {
   return allowed.has(s) ? s : null;
 }
 
-// -------------------- Build modifications (FLAT dot-notation) --------------------
+// ✅ FLAT modifications with percent strings
 function buildModifications({ mainUrl, bgUrl, payload }) {
-  // groups
   const GROUP_SIDE = process.env.COMPOSITE_GROUP_SIDE || "Layout_SideBySide";
   const GROUP_TB = process.env.COMPOSITE_GROUP_TOPBOTTOM || "Layout_TopBottom";
 
-  // your video layers (unique)
   const MAIN_SIDE = process.env.COMPOSITE_MAIN_LAYER_SIDE || "input_video_visual_side";
   const BG_SIDE = process.env.COMPOSITE_BG_LAYER_SIDE || "bg-video_side";
   const MAIN_TB = process.env.COMPOSITE_MAIN_LAYER_TB || "input_video_visual_tb";
   const BG_TB = process.env.COMPOSITE_BG_LAYER_TB || "bg-video_tb";
 
-  // hidden transcript/audio feeder (root)
+  // audio/transcript feeder (root)
   const MAIN_AUDIO = process.env.COMPOSITE_MAIN_AUDIO_LAYER || "input_video";
 
   const SUBTITLE_LAYERS = [
@@ -180,7 +162,7 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
   const layout = payload.layout === "topBottom" ? "topBottom" : "sideBySide";
   const mainSpeed = Number(payload.mainSpeed || 1);
   const bgSpeed = Number(payload.bgSpeed || 1);
-  const bgMuted = payload.bgMuted !== false; // default true
+  const bgMuted = payload.bgMuted !== false;
 
   const cap = payload.captions || {};
   const capEnabled = cap.enabled !== false;
@@ -205,51 +187,49 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
     settings.activeColor ??
     settings.active_color;
 
-  // ✅ FLAT object with dot keys
   const m = {};
 
-  // (optional) quick sanity check you can keep/remove:
   m["DEBUG_TEXT.text"] = "API HIT ✅";
 
-  // Layout group visibility
+  // Layout visibility
   m[`${GROUP_SIDE}.visible`] = layout === "sideBySide";
   m[`${GROUP_TB}.visible`] = layout === "topBottom";
-
-  // Set visible main videos (audio ON here)
-  m[MAIN_SIDE] = mainUrl; // main property => source
-  m[`${MAIN_SIDE}.playback_rate`] = mainSpeed;
-  m[`${MAIN_SIDE}.visible`] = true;
-  m[`${MAIN_SIDE}.opacity`] = 1;
-  m[`${MAIN_SIDE}.volume`] = 1;
-
-  m[MAIN_TB] = mainUrl;
-  m[`${MAIN_TB}.playback_rate`] = mainSpeed;
-  m[`${MAIN_TB}.visible`] = true;
-  m[`${MAIN_TB}.opacity`] = 1;
-  m[`${MAIN_TB}.volume`] = 1;
 
   // Background videos (muted by default)
   m[BG_SIDE] = bgUrl;
   m[`${BG_SIDE}.playback_rate`] = bgSpeed;
   m[`${BG_SIDE}.visible`] = true;
-  m[`${BG_SIDE}.opacity`] = 1;
-  m[`${BG_SIDE}.volume`] = bgMuted ? 0 : 1;
+  m[`${BG_SIDE}.opacity`] = "100%";
+  m[`${BG_SIDE}.volume`] = bgMuted ? "0%" : "100%";
 
   m[BG_TB] = bgUrl;
   m[`${BG_TB}.playback_rate`] = bgSpeed;
   m[`${BG_TB}.visible`] = true;
-  m[`${BG_TB}.opacity`] = 1;
-  m[`${BG_TB}.volume`] = bgMuted ? 0 : 1;
+  m[`${BG_TB}.opacity`] = "100%";
+  m[`${BG_TB}.volume`] = bgMuted ? "0%" : "100%";
 
-  // Hidden transcript feeder:
-  // We keep it invisible + muted (caption transcription still works)
+  // Visible main videos — make sure they are actually visible
+  m[MAIN_SIDE] = mainUrl;
+  m[`${MAIN_SIDE}.playback_rate`] = mainSpeed;
+  m[`${MAIN_SIDE}.visible`] = true;
+  m[`${MAIN_SIDE}.opacity`] = "100%";
+  // mute these so we ONLY hear the MAIN_AUDIO feeder (prevents double)
+  m[`${MAIN_SIDE}.volume`] = "0%";
+
+  m[MAIN_TB] = mainUrl;
+  m[`${MAIN_TB}.playback_rate`] = mainSpeed;
+  m[`${MAIN_TB}.visible`] = true;
+  m[`${MAIN_TB}.opacity`] = "100%";
+  m[`${MAIN_TB}.volume`] = "0%";
+
+  // Hidden transcript/audio feeder: invisible but audible ✅
   m[MAIN_AUDIO] = mainUrl;
   m[`${MAIN_AUDIO}.playback_rate`] = mainSpeed;
   m[`${MAIN_AUDIO}.visible`] = true;
-  m[`${MAIN_AUDIO}.opacity`] = 0;
-  m[`${MAIN_AUDIO}.volume`] = 0;
+  m[`${MAIN_AUDIO}.opacity`] = "0%";
+  m[`${MAIN_AUDIO}.volume`] = "100%";
 
-  // Captions: turn all off then enable one
+  // Captions: all off then one on
   for (const name of SUBTITLE_LAYERS) {
     m[`${name}.visible`] = false;
   }
@@ -265,7 +245,6 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
   return m;
 }
 
-// -------------------- Handler --------------------
 module.exports = async function handler(req, res) {
   setCors(req, res);
 
@@ -306,7 +285,7 @@ module.exports = async function handler(req, res) {
 
       const created = await creatomateRequest("POST", "/v1/renders", {
         template_id: templateId,
-        modifications, // ✅ FLAT object
+        modifications,
         output_format: "mp4",
       });
 
