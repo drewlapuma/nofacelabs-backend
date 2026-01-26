@@ -47,11 +47,7 @@ async function readJson(req) {
 
 // -------------------- Creatomate helpers --------------------
 function creatomateRequest(method, path, bodyObj) {
-  const apiKey =
-    process.env.CREATOMATE_API_KEY ||
-    process.env.CREATOMATE_KEY ||
-    "";
-
+  const apiKey = process.env.CREATOMATE_API_KEY;
   if (!apiKey) throw new Error("Missing CREATOMATE_API_KEY env var");
 
   const body = bodyObj ? JSON.stringify(bodyObj) : null;
@@ -71,24 +67,25 @@ function creatomateRequest(method, path, bodyObj) {
       let data = "";
       res.on("data", (d) => (data += d));
       res.on("end", () => {
-        let j = {};
+        let parsed = null;
         try {
-          j = JSON.parse(data || "{}");
+          parsed = JSON.parse(data || "null");
         } catch {
-          j = { raw: data };
+          parsed = null;
         }
+
         if (res.statusCode < 200 || res.statusCode >= 300) {
-          const msg =
-            j?.error ||
-            j?.message ||
-            j?.raw ||
-            `Creatomate HTTP ${res.statusCode}`;
-          const err = new Error(msg);
+          const err = new Error(
+            `Creatomate HTTP ${res.statusCode}: ${parsed?.error || parsed?.message || data || "Unknown error"}`
+          );
           err.statusCode = res.statusCode;
-          err.payload = j;
+          err.creatomate = parsed || data;
+          err.requestBody = bodyObj || null;
+          err.requestPath = path;
           return reject(err);
         }
-        resolve(j);
+
+        resolve(parsed ?? {});
       });
     });
 
@@ -97,6 +94,7 @@ function creatomateRequest(method, path, bodyObj) {
     req.end();
   });
 }
+
 
 // Creatomate transcript effect must be one of:
 // color, karaoke, highlight, fade, bounce, slide, enlarge
@@ -392,9 +390,11 @@ module.exports = async function handler(req, res) {
       return json(res, 200, { ok: true, status: r?.status || "processing" });
     }
 
-    return json(res, 405, { ok: false, error: "Method not allowed" });
-  } catch (err) {
-    console.error("[composite] error:", err?.payload || err);
-    return json(res, 500, { ok: false, error: err?.message || String(err) });
+ } catch (err) {
+  console.error("COMPOSITE_ERROR", err?.message, err?.creatomate || "");
+  return json(res, 500, {
+    ok: false,
+    error: err?.message || String(err),
+    details: err?.creatomate || null,
   }
 };
