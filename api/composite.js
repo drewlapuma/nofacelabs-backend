@@ -4,7 +4,7 @@ const https = require("https");
 const { createClient } = require("@supabase/supabase-js");
 
 // -------------------- CORS --------------------
-const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || "*")
+const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || "")
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
@@ -12,26 +12,17 @@ const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || 
 function setCors(req, res) {
   const origin = req.headers.origin;
 
-  const allowList = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || "*")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
-
-  const allowAll = allowList.includes("*");
-
-  if (allowAll) {
-    res.setHeader("Access-Control-Allow-Origin", "*");
-  } else if (origin && allowList.includes(origin)) {
+  // If you use Memberstack cookie sessions, you must NOT use "*"
+  // You must echo the requesting origin and allow credentials.
+  if (origin && (ALLOW_ORIGINS.length === 0 || ALLOW_ORIGINS.includes(origin))) {
     res.setHeader("Access-Control-Allow-Origin", origin);
     res.setHeader("Vary", "Origin");
-    // Only use credentials when origin is explicit (NOT "*")
     res.setHeader("Access-Control-Allow-Credentials", "true");
   }
 
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 }
-
 
 function json(res, status, body) {
   res.statusCode = status;
@@ -76,25 +67,22 @@ function creatomateRequest(method, path, bodyObj) {
       let data = "";
       res.on("data", (d) => (data += d));
       res.on("end", () => {
-        let parsed = null;
+        let j = {};
         try {
-          parsed = JSON.parse(data || "null");
+          j = JSON.parse(data || "{}");
         } catch {
-          parsed = null;
+          j = { raw: data };
         }
 
         if (res.statusCode < 200 || res.statusCode >= 300) {
-          const err = new Error(
-            `Creatomate HTTP ${res.statusCode}: ${parsed?.error || parsed?.message || data || "Unknown error"}`
-          );
-          err.statusCode = res.statusCode;
-          err.creatomate = parsed || data;
-          err.requestBody = bodyObj || null;
-          err.requestPath = path;
-          return reject(err);
+          const msg =
+            j?.error ||
+            j?.message ||
+            j?.raw ||
+            `Creatomate HTTP ${res.statusCode}`;
+          return reject(new Error(msg));
         }
-
-        resolve(parsed ?? {});
+        resolve(j);
       });
     });
 
@@ -104,13 +92,10 @@ function creatomateRequest(method, path, bodyObj) {
   });
 }
 
-
-// Creatomate transcript effect must be one of:
-// color, karaoke, highlight, fade, bounce, slide, enlarge
 function normalizeTranscriptEffect(v) {
   const s = String(v || "").trim().toLowerCase();
+  if (!s) return null;
 
-  // UI aliases
   if (s === "highlighter" || s === "highlighted") return "highlight";
   if (s === "yellowpop" || s === "minttag" || s === "purplepop" || s === "redtag")
     return "highlight";
@@ -124,34 +109,7 @@ function normalizeTranscriptEffect(v) {
     "slide",
     "enlarge",
   ]);
-
-  if (allowed.has(s)) return s;
-
-  // If they pass a caption style name, map it to a safe default
-  if (!s) return "color";
-  if (s.includes("karaoke")) return "karaoke";
-  if (s.includes("bounce")) return "bounce";
-  if (s.includes("slide")) return "slide";
-  if (s.includes("fade")) return "fade";
-  if (s.includes("highlight")) return "highlight";
-  if (s.includes("enlarge")) return "enlarge";
-
-  return "color";
-}
-
-function normalizeHex(c) {
-  if (!c) return null;
-  const s = String(c).trim();
-  if (/^#[0-9a-fA-F]{3}$/.test(s)) {
-    return (
-      "#" +
-      s[1] + s[1] +
-      s[2] + s[2] +
-      s[3] + s[3]
-    ).toLowerCase();
-  }
-  if (/^#[0-9a-fA-F]{6}$/.test(s)) return s.toLowerCase();
-  return null;
+  return allowed.has(s) ? s : null;
 }
 
 // -------------------- Supabase helpers --------------------
@@ -180,77 +138,70 @@ async function signedReadUrl(bucket, path, expiresIn = 3600) {
   return data.signedUrl;
 }
 
-// -------------------- Caption layer mapping (YOUR TEMPLATE NAMES) --------------------
-const ALL_SUBTITLE_LAYERS = [
-  "Subtitles_RedTag",
-  "Subtitles_RedAlert",
-  "Subtitles_BouncePop",
-  "Subtitles_CompactLowerThird",
-  "Subtitles_PurplePop",
-  "Subtitles_NeonGlow",
-  "Subtitles_Highlighter",
-  "Subtitles_BlackBar",
-  "Subtitles_OutlinePunch",
-  "Subtitles_MintTag",
-  "Subtitles_YellowPop",
-  "Subtitles_BoldWhite",
-  "Subtitles_Karaoke",
-  "Subtitles_Sentence",
-  "Subtitles_Word",
-];
-
-function mapCaptionLayer(style) {
-  const s = String(style || "").toLowerCase();
-
-  if (s.includes("sentence")) return "Subtitles_Sentence";
-  if (s.includes("word")) return "Subtitles_Word";
-  if (s.includes("karaoke")) return "Subtitles_Karaoke";
-  if (s.includes("boldwhite") || s.includes("bold white")) return "Subtitles_BoldWhite";
-  if (s.includes("yellow")) return "Subtitles_YellowPop";
-  if (s.includes("mint")) return "Subtitles_MintTag";
-  if (s.includes("blackbar") || s.includes("black bar")) return "Subtitles_BlackBar";
-  if (s.includes("highlighter")) return "Subtitles_Highlighter";
-  if (s.includes("neon")) return "Subtitles_NeonGlow";
-  if (s.includes("purple")) return "Subtitles_PurplePop";
-  if (s.includes("lower")) return "Subtitles_CompactLowerThird";
-  if (s.includes("bounce")) return "Subtitles_BouncePop";
-  if (s.includes("outline")) return "Subtitles_OutlinePunch";
-  if (s.includes("redalert") || s.includes("red alert")) return "Subtitles_RedAlert";
-  if (s.includes("red")) return "Subtitles_RedTag";
-
-  return "Subtitles_Sentence";
-}
-
-// -------------------- Build Creatomate modifications (FIXED SHAPE) --------------------
+// -------------------- Template mapping --------------------
 function buildModifications({ mainUrl, bgUrl, payload }) {
-  // Default to your actual layer names
-  const MAIN = process.env.COMPOSITE_MAIN_LAYER || "input_video";
+  // Set these env vars to match your template names
+  const MAIN = process.env.COMPOSITE_MAIN_LAYER || "input_video_visual";
   const BG = process.env.COMPOSITE_BG_LAYER || "bg-video";
+
+  // NOTE: You have multiple subtitle layers (Subtitles_Sentence, etc.)
+  // We'll pick based on captions.style if you send it, else default to Sentence.
+  const style = String(payload?.captions?.style || "Sentence");
+  const SUB =
+    process.env[`COMPOSITE_SUB_LAYER_${style.toUpperCase()}`] ||
+    process.env.COMPOSITE_SUBTITLES_LAYER ||
+    "Subtitles_Sentence";
+
+  const GROUP_SIDE = process.env.COMPOSITE_GROUP_SIDE || "Layout_SideBySide";
+  const GROUP_TB = process.env.COMPOSITE_GROUP_TOPBOTTOM || "Layout_TopBottom";
 
   const layout = payload.layout === "topBottom" ? "topBottom" : "sideBySide";
   const mainSlot = String(payload.mainSlot || (layout === "topBottom" ? "top" : "left"));
 
   const mainSpeed = Number(payload.mainSpeed || 1);
   const bgSpeed = Number(payload.bgSpeed || 1);
-
-  // Default true (muted) unless explicitly false
-  const bgMuted = payload.bgMuted === false ? false : true;
+  const bgMuted = payload.bgMuted !== false;
 
   const cap = payload.captions || {};
   const capEnabled = cap.enabled !== false;
-  const captionStyle = cap.style || "sentence";
-  const settings = cap.settings || {};
 
+  const settings = cap.settings || {};
   const effectRaw =
     settings.transcript_effect ??
     settings.transcriptEffect ??
     settings.active_effect ??
     settings.activeEffect ??
     settings.effect ??
-    settings.highlightStyle ??
-    captionStyle;
+    cap.style;
 
-  const transcript_effect = normalizeTranscriptEffect(effectRaw);
+  const transcript_effect = normalizeTranscriptEffect(effectRaw) || "color";
+
+  const mods = [];
+
+  // Sources
+  mods.push({ name: MAIN, src: mainUrl });
+  mods.push({ name: BG, src: bgUrl });
+
+  // Speed
+  mods.push({ name: MAIN, playback_rate: mainSpeed });
+  mods.push({ name: BG, playback_rate: bgSpeed });
+
+  // Mute background
+  if (bgMuted) mods.push({ name: BG, volume: 0 });
+
+  // Layout groups
+  mods.push({ name: GROUP_SIDE, visible: layout === "sideBySide" });
+  mods.push({ name: GROUP_TB, visible: layout === "topBottom" });
+
+  // Slot groups (optional)
+  mods.push({ name: "Main_Left", visible: mainSlot === "left" });
+  mods.push({ name: "Main_Right", visible: mainSlot === "right" });
+  mods.push({ name: "Main_Top", visible: mainSlot === "top" });
+  mods.push({ name: "Main_Bottom", visible: mainSlot === "bottom" });
+
+  // Captions
+  mods.push({ name: SUB, visible: !!capEnabled });
+  mods.push({ name: SUB, transcript_effect });
 
   const transcriptColor =
     settings.transcript_color ??
@@ -258,49 +209,8 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
     settings.activeColor ??
     settings.active_color;
 
-  const transcript_color = normalizeHex(transcriptColor);
-
-  const activeSubtitleLayer = mapCaptionLayer(captionStyle);
-
-  const mods = [];
-
-  // Video sources (correct key is "source")
-  mods.push({ name: MAIN, properties: { source: mainUrl } });
-  mods.push({ name: BG, properties: { source: bgUrl } });
-
-  // Speeds
-  mods.push({ name: MAIN, properties: { playback_rate: mainSpeed } });
-  mods.push({ name: BG, properties: { playback_rate: bgSpeed } });
-
-  // Mute bg
-  if (bgMuted) mods.push({ name: BG, properties: { volume: 0 } });
-
-  // Layout toggles (only if you created these groups in the template)
-  const GROUP_SIDE = process.env.COMPOSITE_GROUP_SIDE || "Layout_SideBySide";
-  const GROUP_TB = process.env.COMPOSITE_GROUP_TOPBOTTOM || "Layout_TopBottom";
-  mods.push({ name: GROUP_SIDE, properties: { visible: layout === "sideBySide" } });
-  mods.push({ name: GROUP_TB, properties: { visible: layout === "topBottom" } });
-
-  // Slot toggles (only if you created these groups in the template)
-  mods.push({ name: "Main_Left", properties: { visible: mainSlot === "left" } });
-  mods.push({ name: "Main_Right", properties: { visible: mainSlot === "right" } });
-  mods.push({ name: "Main_Top", properties: { visible: mainSlot === "top" } });
-  mods.push({ name: "Main_Bottom", properties: { visible: mainSlot === "bottom" } });
-
-  // Captions: hide all, show only active
-  for (const layer of ALL_SUBTITLE_LAYERS) {
-    mods.push({ name: layer, properties: { visible: false } });
-  }
-
-  if (capEnabled) {
-    mods.push({ name: activeSubtitleLayer, properties: { visible: true } });
-
-    // IMPORTANT: transcript_effect must be valid or render fails
-    mods.push({ name: activeSubtitleLayer, properties: { transcript_effect } });
-
-    if (transcript_color) {
-      mods.push({ name: activeSubtitleLayer, properties: { transcript_color } });
-    }
+  if (transcriptColor) {
+    mods.push({ name: SUB, transcript_color: String(transcriptColor) });
   }
 
   return mods;
@@ -308,13 +218,14 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
 
 // -------------------- Handler --------------------
 module.exports = async function handler(req, res) {
+  // ✅ Always set CORS first
   setCors(req, res);
 
+  // ✅ Never fail preflight
   if (req.method === "OPTIONS") {
-  setCors(req, res);
-  res.statusCode = 204;
-  return res.end();
-}
+    res.statusCode = 204;
+    return res.end();
+  }
 
   try {
     const BUCKET =
@@ -327,11 +238,7 @@ module.exports = async function handler(req, res) {
       if (!body) return json(res, 400, { ok: false, error: "Missing body" });
       if (body === "__INVALID__") return json(res, 400, { ok: false, error: "Invalid JSON" });
 
-      const templateId =
-        process.env.COMPOSITE_TEMPLATE_ID ||
-        process.env.CREATOMATE_TEMPLATE_ID ||
-        "";
-
+      const templateId = process.env.COMPOSITE_TEMPLATE_ID;
       if (!templateId) {
         return json(res, 500, { ok: false, error: "Missing COMPOSITE_TEMPLATE_ID env var" });
       }
@@ -345,7 +252,6 @@ module.exports = async function handler(req, res) {
         return json(res, 400, { ok: false, error: "backgroundPath or backgroundVideoUrl is required" });
       }
 
-      // Signed source URLs
       const mainUrl = await signedReadUrl(BUCKET, mainPath, 60 * 60);
       const bgUrl = backgroundVideoUrl
         ? String(backgroundVideoUrl)
@@ -353,18 +259,13 @@ module.exports = async function handler(req, res) {
 
       const modifications = buildModifications({ mainUrl, bgUrl, payload: body });
 
-      // Create render
-      const createPayload = {
+      const created = await creatomateRequest("POST", "/v1/renders", {
         template_id: templateId,
         modifications,
         output_format: "mp4",
-      };
+      });
 
-      const created = await creatomateRequest("POST", "/v1/renders", createPayload);
-
-      // POST often returns an array
       const item = Array.isArray(created) ? created[0] : created;
-
       const renderId = item?.id;
       const status = item?.status || "planned";
 
@@ -403,14 +304,9 @@ module.exports = async function handler(req, res) {
       return json(res, 200, { ok: true, status: r?.status || "processing" });
     }
 
-} catch (err) {
-  console.error("COMPOSITE_ERROR", err?.message, err?.creatomate || "");
-  return json(res, 500, {
-    ok: false,
-    error: err?.message || String(err),
-    details: err?.creatomate || null,
-  });
-}
-
+    return json(res, 405, { ok: false, error: "Method not allowed" });
+  } catch (err) {
+    console.error("COMPOSITE_ERROR:", err);
+    return json(res, 500, { ok: false, error: err?.message || String(err) });
   }
 };
