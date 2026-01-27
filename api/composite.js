@@ -335,12 +335,16 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
 
   setSubtitleProp(pickedSubtitleLayer, "text_transform", settings.textTransform);
 
-  if (settings.x !== undefined && settings.x !== null) {
-    m[`${pickedSubtitleLayer}.x`] = String(settings.x);
-  }
-  if (settings.y !== undefined && settings.y !== null) {
-    m[`${pickedSubtitleLayer}.y`] = String(settings.y);
-  }
+  function toPercent(v, fallback = "50%") {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return fallback;
+  const clamped = Math.max(0, Math.min(100, n));
+  return `${clamped}%`;
+}
+
+m[`${pickedSubtitleLayer}.x_alignment`] = toPercent(settings.x, "50%");
+m[`${pickedSubtitleLayer}.y_alignment`] = toPercent(settings.y, "50%");
+
 
   // ✅ Only send transcript_color for styles that use activeColor
   if (transcriptColor) {
