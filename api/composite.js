@@ -176,6 +176,16 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
     "Subtitles_RedTag",
   ];
 
+  // ✅ ONLY these styles should receive transcript_color (active highlight color)
+  const ACTIVE_COLOR_LAYERS = new Set([
+    "Subtitles_Karaoke",
+    "Subtitles_YellowPop",
+    "Subtitles_MintTag",
+    "Subtitles_Highlighter",
+    "Subtitles_PurplePop",
+    "Subtitles_RedTag",
+  ]);
+
   const layout = payload.layout === "topBottom" ? "topBottom" : "sideBySide";
 
   const mainSlotRaw = String(payload.mainSlot || payload.main_slot || "left").toLowerCase();
@@ -203,11 +213,15 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
 
   const transcript_effect = normalizeTranscriptEffect(effectRaw) || "color";
 
-  const transcriptColor =
-    settings.transcript_color ??
-    settings.transcriptColor ??
-    settings.activeColor ??
-    settings.active_color;
+  // ✅ Only include transcriptColor for layers that actually use it
+  const transcriptColor = ACTIVE_COLOR_LAYERS.has(pickedSubtitleLayer)
+    ? (
+        settings.transcript_color ??
+        settings.transcriptColor ??
+        settings.activeColor ??
+        settings.active_color
+      )
+    : null;
 
   const m = {};
 
@@ -234,8 +248,16 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
     m[`${layerName}.opacity`] = String(opacity);
     m[`${layerName}.volume`] = String(volume);
 
-    // ✅ KEY FIX: speed is a percent string on your template
+    // ✅ speed is a percent string on your template
     m[`${layerName}.speed`] = speedToPercentString(speed);
+  }
+
+  // Helper: safely set a subtitle prop if value exists
+  function setSubtitleProp(layer, key, value) {
+    if (value === undefined || value === null) return;
+    const s = String(value).trim();
+    if (!s) return;
+    m[`${layer}.${key}`] = s;
   }
 
   // 1) Layout visibility
@@ -297,8 +319,40 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
   m[`${pickedSubtitleLayer}.transcript_effect`] = transcript_effect;
   m[`${pickedSubtitleLayer}.transcript_source`] = MAIN_AUDIO;
 
+  // ✅ Apply styling settings so fillColor is not ignored
+  setSubtitleProp(pickedSubtitleLayer, "fill_color", settings.fillColor);
+  setSubtitleProp(pickedSubtitleLayer, "stroke_color", settings.strokeColor);
+
+  // numeric-but-sent-as-number is okay; convert to string
+  if (settings.strokeWidth !== undefined && settings.strokeWidth !== null) {
+    m[`${pickedSubtitleLayer}.stroke_width`] = String(settings.strokeWidth);
+  }
+
+  setSubtitleProp(pickedSubtitleLayer, "font_family", settings.fontFamily);
+  if (settings.fontSize !== undefined && settings.fontSize !== null) {
+    m[`${pickedSubtitleLayer}.font_size`] = String(settings.fontSize);
+  }
+
+  setSubtitleProp(pickedSubtitleLayer, "text_transform", settings.textTransform);
+
+  if (settings.x !== undefined && settings.x !== null) {
+    m[`${pickedSubtitleLayer}.x`] = String(settings.x);
+  }
+  if (settings.y !== undefined && settings.y !== null) {
+    m[`${pickedSubtitleLayer}.y`] = String(settings.y);
+  }
+
+  // ✅ Only send transcript_color for styles that use activeColor
   if (transcriptColor) {
     m[`${pickedSubtitleLayer}.transcript_color`] = String(transcriptColor);
+  }
+
+  // ✅ Special cases (you already treat these as different “secondary color” modes)
+  if (pickedSubtitleLayer === "Subtitles_BlackBar") {
+    setSubtitleProp(pickedSubtitleLayer, "background_color", settings.backgroundColor);
+  }
+  if (pickedSubtitleLayer === "Subtitles_NeonGlow") {
+    setSubtitleProp(pickedSubtitleLayer, "shadow_color", settings.shadowColor);
   }
 
   return m;
