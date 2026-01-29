@@ -1,8 +1,28 @@
 // api/composite.js (CommonJS, Node 18+ on Vercel)
+//
+// ✅ UPDATED to make Split Screen renders appear in /my-videos:
+//
+// What it does now:
+// - Requires Memberstack auth (Authorization: Bearer <token>)
+// - POST /api/composite
+//    1) Inserts a row into Supabase `renders` tied to member_id (kind="composite")
+//    2) Starts Creatomate render
+//    3) Saves composite_render_id on that row
+//    4) Returns { ok:true, id:<dbRowId>, renderId:<creatomateId>, status }
+// - GET /api/composite?id=<creatomateId>
+//    1) Verifies the render belongs to this member (via renders table)
+//    2) Checks Creatomate status
+//    3) When succeeded, updates composite_video_url + composite_status in the row
+//
+// Notes:
+// - Your /my-videos frontend already prefers composite_video_url > captioned_video_url > video_url
+// - Make sure your split screen frontend sends Authorization header to /api/composite (POST and GET)
 
 const https = require("https");
+const memberstackAdmin = require("@memberstack/admin");
 const { createClient } = require("@supabase/supabase-js");
 
+// -------------------- CORS --------------------
 const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || "*")
   .split(",")
   .map((s) => s.trim())
@@ -12,6 +32,7 @@ function setCors(req, res) {
   const origin = req.headers.origin;
 
   if (ALLOW_ORIGINS.includes("*")) {
+    // Echo origin if present so browsers accept credentialed/auth requests
     res.setHeader("Access-Control-Allow-Origin", origin || "*");
     res.setHeader("Vary", "Origin");
   } else if (origin && ALLOW_ORIGINS.includes(origin)) {
@@ -21,8 +42,10 @@ function setCors(req, res) {
 
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader("Access-Control-Max-Age", "86400");
 }
 
+// -------------------- Response helpers --------------------
 function json(res, status, body) {
   res.statusCode = status;
   res.setHeader("Content-Type", "application/json");
@@ -30,6 +53,7 @@ function json(res, status, body) {
 }
 
 async function readJson(req) {
+  // Vercel sometimes parses req.body for you
   if (req.body && typeof req.body === "object") return req.body;
 
   const chunks = [];
@@ -44,7 +68,7 @@ async function readJson(req) {
   }
 }
 
-// -------------------- Supabase helpers --------------------
+// -------------------- Supabase admin --------------------
 function getSupabaseAdmin() {
   const SUPABASE_URL = process.env.SUPABASE_URL;
   const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -58,14 +82,66 @@ function getSupabaseAdmin() {
   });
 }
 
-async function signedReadUrl(bucket, path, expiresIn = 3600) {
-  const supabase = getSupabaseAdmin();
-  const { data, error } = await supabase.storage.from(bucket).createSignedUrl(path, expiresIn);
+async function signedReadUrl(sb, bucket, path, expiresIn = 3600) {
+  const { data, error } = await sb.storage.from(bucket).createSignedUrl(path, expiresIn);
 
   if (error || !data?.signedUrl) {
     throw new Error(`Signed read URL error: ${error?.message || "Object not found"}`);
   }
   return data.signedUrl;
+}
+
+// -------------------- Memberstack auth --------------------
+const MEMBERSTACK_SECRET_KEY = process.env.MEMBERSTACK_SECRET_KEY;
+const ms = MEMBERSTACK_SECRET_KEY ? memberstackAdmin.init(MEMBERSTACK_SECRET_KEY) : null;
+
+function getBearerToken(req) {
+  const h = req.headers.authorization || req.headers.Authorization || "";
+  const m = String(h).match(/^Bearer\s+(.+)$/i);
+  return m ? m[1].trim() : null;
+}
+
+function isExpiredJwtError(err) {
+  const code = err?.code;
+  const msg = String(err?.message || "").toLowerCase();
+
+  if (code === "ERR_JWT_EXPIRED") return true;
+  if (msg.includes("jwtexpired") || msg.includes("jwt expired")) return true;
+  if (msg.includes("token_expired")) return true;
+
+  return false;
+}
+
+async function requireMemberId(req) {
+  const token = getBearerToken(req);
+  if (!token) {
+    const e = new Error("MISSING_AUTH");
+    e.code = "MISSING_AUTH";
+    throw e;
+  }
+  if (!ms) {
+    const e = new Error("MISSING_MEMBERSTACK_SECRET_KEY");
+    e.code = "MISSING_MEMBERSTACK_SECRET_KEY";
+    throw e;
+  }
+
+  try {
+    const out = await ms.verifyToken({ token });
+    const id = out?.id;
+    if (!id) {
+      const e = new Error("INVALID_MEMBER_TOKEN");
+      e.code = "INVALID_MEMBER_TOKEN";
+      throw e;
+    }
+    return String(id);
+  } catch (err) {
+    if (isExpiredJwtError(err)) {
+      const e = new Error("TOKEN_EXPIRED");
+      e.code = "TOKEN_EXPIRED";
+      throw e;
+    }
+    throw err;
+  }
 }
 
 // -------------------- Creatomate helper --------------------
@@ -176,7 +252,6 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
     "Subtitles_RedTag",
   ];
 
-  // ✅ ONLY these styles should receive transcript_color (active highlight color)
   const ACTIVE_COLOR_LAYERS = new Set([
     "Subtitles_Karaoke",
     "Subtitles_YellowPop",
@@ -213,7 +288,6 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
 
   const transcript_effect = normalizeTranscriptEffect(effectRaw) || "color";
 
-  // ✅ Only include transcriptColor for layers that actually use it
   const transcriptColor = ACTIVE_COLOR_LAYERS.has(pickedSubtitleLayer)
     ? (
         settings.transcript_color ??
@@ -233,26 +307,17 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
 
   function speedToPercentString(speed) {
     const s = clampSpeed(speed);
-    // Your template uses strings like "99.9%"
     return `${(s * 100).toFixed(1)}%`;
   }
 
-  // Helper: set a VIDEO layer using flat dot-notation props
-  function setVideoLayer(
-    layerName,
-    url,
-    { visible = true, opacity = "100%", volume = "0%", speed = 1 } = {}
-  ) {
+  function setVideoLayer(layerName, url, { visible = true, opacity = "100%", volume = "0%", speed = 1 } = {}) {
     m[layerName] = String(url);
     m[`${layerName}.visible`] = !!visible;
     m[`${layerName}.opacity`] = String(opacity);
     m[`${layerName}.volume`] = String(volume);
-
-    // ✅ speed is a percent string on your template
     m[`${layerName}.speed`] = speedToPercentString(speed);
   }
 
-  // Helper: safely set a subtitle prop if value exists
   function setSubtitleProp(layer, key, value) {
     if (value === undefined || value === null) return;
     const s = String(value).trim();
@@ -280,7 +345,6 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
   for (const layer of ALL_MAIN) {
     setVideoLayer(layer, mainUrl, { visible: true, opacity: "0%", volume: VIS_MUTED, speed: mainSpeed });
   }
-
   for (const layer of ALL_BG) {
     setVideoLayer(layer, bgUrl, { visible: true, opacity: "0%", volume: BG_VOL, speed: bgSpeed });
   }
@@ -304,7 +368,7 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
     }
   }
 
-  // 5) Hidden audio/transcript feeder: invisible but audible + speed matched
+  // 5) Hidden audio/transcript feeder (audible, invisible, speed matched)
   setVideoLayer(MAIN_AUDIO, mainUrl, {
     visible: true,
     opacity: "0%",
@@ -319,63 +383,78 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
   m[`${pickedSubtitleLayer}.transcript_effect`] = transcript_effect;
   m[`${pickedSubtitleLayer}.transcript_source`] = MAIN_AUDIO;
 
-  // ✅ Apply styling settings so fillColor is not ignored
-  setSubtitleProp(pickedSubtitleLayer, "fill_color", settings.fillColor);
-  setSubtitleProp(pickedSubtitleLayer, "stroke_color", settings.strokeColor);
+  // styling settings (accept camelCase or snake_case)
+  const fill = settings.fill_color ?? settings.fillColor;
+  const stroke = settings.stroke_color ?? settings.strokeColor;
+  const strokeWidth = settings.stroke_width ?? settings.strokeWidth;
+  const fontFamily = settings.font_family ?? settings.fontFamily;
+  const fontSize = settings.font_size ?? settings.fontSize;
+  const textTransform = settings.text_transform ?? settings.textTransform;
 
-  // numeric-but-sent-as-number is okay; convert to string
-  if (settings.strokeWidth !== undefined && settings.strokeWidth !== null) {
-    m[`${pickedSubtitleLayer}.stroke_width`] = String(settings.strokeWidth);
+  setSubtitleProp(pickedSubtitleLayer, "fill_color", fill);
+  setSubtitleProp(pickedSubtitleLayer, "stroke_color", stroke);
+
+  if (strokeWidth !== undefined && strokeWidth !== null) {
+    m[`${pickedSubtitleLayer}.stroke_width`] = String(strokeWidth);
   }
 
-  setSubtitleProp(pickedSubtitleLayer, "font_family", settings.fontFamily);
-  if (settings.fontSize !== undefined && settings.fontSize !== null) {
-    m[`${pickedSubtitleLayer}.font_size`] = String(settings.fontSize);
+  setSubtitleProp(pickedSubtitleLayer, "font_family", fontFamily);
+
+  if (fontSize !== undefined && fontSize !== null) {
+    m[`${pickedSubtitleLayer}.font_size`] = String(fontSize);
   }
 
-  setSubtitleProp(pickedSubtitleLayer, "text_transform", settings.textTransform);
+  setSubtitleProp(pickedSubtitleLayer, "text_transform", textTransform);
 
   function toPercent(v, fallback = "50%") {
-  const n = Number(v);
-  if (!Number.isFinite(n)) return fallback;
-  const clamped = Math.max(0, Math.min(100, n));
-  return `${clamped}%`;
-}
+    const n = Number(v);
+    if (!Number.isFinite(n)) return fallback;
+    const clamped = Math.max(0, Math.min(100, n));
+    return `${clamped}%`;
+  }
 
-m[`${pickedSubtitleLayer}.x_alignment`] = toPercent(settings.x, "50%");
-m[`${pickedSubtitleLayer}.y_alignment`] = toPercent(settings.y, "50%");
+  const x = settings.x_alignment ?? settings.xAlignment ?? settings.x;
+  const y = settings.y_alignment ?? settings.yAlignment ?? settings.y;
 
+  m[`${pickedSubtitleLayer}.x_alignment`] = toPercent(x, "50%");
+  m[`${pickedSubtitleLayer}.y_alignment`] = toPercent(y, "50%");
 
-  // ✅ Only send transcript_color for styles that use activeColor
   if (transcriptColor) {
     m[`${pickedSubtitleLayer}.transcript_color`] = String(transcriptColor);
   }
 
-  // ✅ Special cases (you already treat these as different “secondary color” modes)
   if (pickedSubtitleLayer === "Subtitles_BlackBar") {
-    setSubtitleProp(pickedSubtitleLayer, "background_color", settings.backgroundColor);
+    const bgColor = settings.background_color ?? settings.backgroundColor;
+    setSubtitleProp(pickedSubtitleLayer, "background_color", bgColor);
   }
+
   if (pickedSubtitleLayer === "Subtitles_NeonGlow") {
-    setSubtitleProp(pickedSubtitleLayer, "shadow_color", settings.shadowColor);
+    const shColor = settings.shadow_color ?? settings.shadowColor;
+    setSubtitleProp(pickedSubtitleLayer, "shadow_color", shColor);
   }
 
   return m;
 }
 
+// -------------------- MAIN --------------------
 module.exports = async function handler(req, res) {
   setCors(req, res);
-
   if (req.method === "OPTIONS") {
     res.statusCode = 204;
     return res.end();
   }
 
   try {
+    // 🔒 require login for BOTH POST and GET (ties renders to member)
+    const member_id = await requireMemberId(req);
+    const sb = getSupabaseAdmin();
+
     const BUCKET =
       process.env.SUPABASE_UPLOAD_BUCKET ||
       process.env.USER_VIDEOS_BUCKET ||
       "user-uploads";
 
+    // -------------------- POST: Start composite --------------------
     if (req.method === "POST") {
       const body = await readJson(req);
       if (!body) return json(res, 400, { ok: false, error: "Missing body" });
@@ -399,41 +478,132 @@ module.exports = async function handler(req, res) {
         return json(res, 400, { ok: false, error: "backgroundPath or backgroundVideoUrl is required" });
       }
 
-      const mainUrl = await signedReadUrl(BUCKET, mainPath, 60 * 60);
+      // ✅ Insert DB row FIRST so it appears in /my-videos immediately as "rendering"
+      const choices = {
+        kind: "composite",
+        layout: body.layout,
+        mainSlot: body.mainSlot,
+        mainSpeed: body.mainSpeed,
+        bgSpeed: body.bgSpeed,
+        bgMuted: body.bgMuted,
+        captions: body.captions || {},
+        mainPath: body.mainPath || null,
+        backgroundPath: body.backgroundPath || null,
+        backgroundVideoUrl: body.backgroundVideoUrl || null,
+      };
+
+      const { data: row, error: insErr } = await sb
+        .from("renders")
+        .insert([{
+          member_id,
+          kind: "composite",
+          composite_status: "rendering",
+          composite_error: null,
+          composite_video_url: null,
+          composite_render_id: null,
+          choices,
+        }])
+        .select("id")
+        .single();
+
+      if (insErr || !row?.id) {
+        return json(res, 500, { ok: false, error: "DB_INSERT_FAILED", details: insErr });
+      }
+
+      const dbId = row.id;
+
+      // Signed URLs to feed Creatomate
+      const mainUrl = await signedReadUrl(sb, BUCKET, mainPath, 60 * 60);
       const bgUrl = backgroundVideoUrl
         ? String(backgroundVideoUrl)
-        : await signedReadUrl(BUCKET, backgroundPath, 60 * 60);
+        : await signedReadUrl(sb, BUCKET, backgroundPath, 60 * 60);
 
       const modifications = buildModifications({ mainUrl, bgUrl, payload: body });
 
-      const created = await creatomateRequest("POST", "/v1/renders", {
-        template_id: templateId,
-        modifications,
-        output_format: "mp4",
-      });
+      let created;
+      try {
+        created = await creatomateRequest("POST", "/v1/renders", {
+          template_id: templateId,
+          modifications,
+          output_format: "mp4",
+        });
+      } catch (e) {
+        // mark row failed if Creatomate call fails
+        await sb.from("renders").update({
+          composite_status: "failed",
+          composite_error: e?.message || String(e),
+        }).eq("id", dbId).eq("member_id", member_id);
+
+        throw e;
+      }
 
       const item = Array.isArray(created) ? created[0] : created;
       const renderId = item?.id;
       const status = item?.status || "planned";
 
-      if (!renderId) return json(res, 500, { ok: false, error: "Creatomate response missing id", details: created });
+      if (!renderId) {
+        await sb.from("renders").update({
+          composite_status: "failed",
+          composite_error: "CREATOMATE_RESPONSE_MISSING_ID",
+        }).eq("id", dbId).eq("member_id", member_id);
 
-      return json(res, 200, { ok: true, renderId, status });
+        return json(res, 502, { ok: false, error: "Creatomate response missing id", details: created });
+      }
+
+      // ✅ Save Creatomate render id
+      await sb.from("renders").update({
+        composite_render_id: String(renderId),
+        composite_status: "rendering",
+        composite_error: null,
+      }).eq("id", dbId).eq("member_id", member_id);
+
+      return json(res, 200, { ok: true, id: dbId, renderId: String(renderId), status });
     }
 
+    // -------------------- GET: Poll composite --------------------
     if (req.method === "GET") {
-      const id = String(req.query?.id || "").trim();
-      if (!id) return json(res, 400, { ok: false, error: "Missing id" });
+      const renderId = String(req.query?.id || "").trim();
+      if (!renderId) return json(res, 400, { ok: false, error: "Missing id" });
 
-      const r = await creatomateRequest("GET", `/v1/renders/${encodeURIComponent(id)}`, null);
+      // ✅ Ownership: find the row for this member + this creatomate render id
+      const { data: row, error: rowErr } = await sb
+        .from("renders")
+        .select("id, composite_video_url, composite_status")
+        .eq("member_id", member_id)
+        .eq("composite_render_id", renderId)
+        .single();
+
+      if (rowErr || !row) {
+        return json(res, 404, { ok: false, error: "NOT_FOUND" });
+      }
+
+      // ✅ If already finished, return immediately
+      if (row.composite_video_url) {
+        return json(res, 200, { ok: true, status: row.composite_status || "succeeded", url: row.composite_video_url });
+      }
+
+      const r = await creatomateRequest("GET", `/v1/renders/${encodeURIComponent(renderId)}`, null);
       const status = String(r?.status || "").toLowerCase();
       const url = r?.url || r?.output_url || null;
 
       if (status === "failed") {
-        return json(res, 200, { ok: true, status: "failed", error: r?.error || r?.message || "Render failed" });
+        const errMsg = r?.error || r?.message || "Render failed";
+        await sb.from("renders").update({
+          composite_status: "failed",
+          composite_error: String(errMsg),
+        }).eq("id", row.id).eq("member_id", member_id);
+
+        return json(res, 200, { ok: true, status: "failed", error: errMsg });
       }
-      if (status === "succeeded" && url) {
-        return json(res, 200, { ok: true, status: "succeeded", url });
+
+      if ((status === "succeeded" || status === "completed") && url) {
+        await sb.from("renders").update({
+          composite_status: "succeeded",
+          composite_video_url: String(url),
+          composite_error: null,
+        }).eq("id", row.id).eq("member_id", member_id);
+
+        return json(res, 200, { ok: true, status: "succeeded", url: String(url) });
       }
 
       return json(res, 200, { ok: true, status: r?.status || "processing" });
@@ -441,9 +611,34 @@ module.exports = async function handler(req, res) {
 
     return json(res, 405, { ok: false, error: "Method not allowed" });
   } catch (err) {
+    const msg = String(err?.message || err);
+    const code = err?.code;
+
+    if (code === "TOKEN_EXPIRED" || msg.includes("TOKEN_EXPIRED")) {
+      return json(res, 401, {
+        ok: false,
+        error: "TOKEN_EXPIRED",
+        message: "Session expired. Refresh the page and try again.",
+      });
+    }
+
+    if (code === "MISSING_AUTH" || msg.includes("MISSING_AUTH")) {
+      return json(res, 401, { ok: false, error: "MISSING_AUTH" });
+    }
+
+    if (code === "INVALID_MEMBER_TOKEN" || msg.includes("INVALID_MEMBER")) {
+      return json(res, 401, { ok: false, error: "INVALID_MEMBER_TOKEN" });
+    }
+
+    if (code === "MISSING_MEMBERSTACK_SECRET_KEY") {
+      return json(res, 500, { ok: false, error: "MISSING_MEMBERSTACK_SECRET_KEY" });
+    }
+
+    console.error("[COMPOSITE] SERVER_ERROR", err);
     return json(res, 500, {
       ok: false,
-      error: err?.message || String(err),
+      error: "SERVER_ERROR",
+      message: msg,
       statusCode: err?.statusCode || null,
       details: err?.details || null,
     });
