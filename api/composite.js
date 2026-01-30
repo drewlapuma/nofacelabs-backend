@@ -1,22 +1,7 @@
 // api/composite.js (CommonJS, Node 18+ on Vercel)
-//
-// ✅ UPDATED to make Split Screen renders appear in /my-videos:
-//
-// What it does now:
-// - Requires Memberstack auth (Authorization: Bearer <token>)
-// - POST /api/composite
-//    1) Inserts a row into Supabase `renders` tied to member_id (kind="composite")
-//    2) Starts Creatomate render
-//    3) Saves composite_render_id on that row
-//    4) Returns { ok:true, id:<dbRowId>, renderId:<creatomateId>, status }
-// - GET /api/composite?id=<creatomateId>
-//    1) Verifies the render belongs to this member (via renders table)
-//    2) Checks Creatomate status
-//    3) When succeeded, updates composite_video_url + composite_status in the row
-//
-// Notes:
-// - Your /my-videos frontend already prefers composite_video_url > captioned_video_url > video_url
-// - Make sure your split screen frontend sends Authorization header to /api/composite (POST and GET)
+// ✅ FIX: captions now default OFF unless payload.captions.enabled === true
+// ✅ FIX: if captions are OFF, we return early after hiding all subtitle layers (no props applied)
+// ✅ Small: store choices.captions as null when not provided (so you can see it’s truly off)
 
 const https = require("https");
 const memberstackAdmin = require("@memberstack/admin");
@@ -32,7 +17,6 @@ function setCors(req, res) {
   const origin = req.headers.origin;
 
   if (ALLOW_ORIGINS.includes("*")) {
-    // Echo origin if present so browsers accept credentialed/auth requests
     res.setHeader("Access-Control-Allow-Origin", origin || "*");
     res.setHeader("Vary", "Origin");
   } else if (origin && ALLOW_ORIGINS.includes(origin)) {
@@ -53,7 +37,6 @@ function json(res, status, body) {
 }
 
 async function readJson(req) {
-  // Vercel sometimes parses req.body for you
   if (req.body && typeof req.body === "object") return req.body;
 
   const chunks = [];
@@ -271,34 +254,9 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
 
   const bgMuted = (payload.bgMuted ?? payload.bg_muted) !== false; // default true
 
+  // ✅ FIX: captions default OFF unless explicitly enabled
   const cap = payload.captions || null;
-
-// ✅ default OFF unless explicitly enabled
-const capEnabled = !!(cap && cap.enabled === true);
-
-  const settings = cap.settings || {};
-
-  const styleRaw = String(cap.style || "").trim();
-  const pickedSubtitleLayer = SUBTITLE_LAYERS.includes(styleRaw) ? styleRaw : "Subtitles_Sentence";
-
-  const effectRaw =
-    settings.transcript_effect ??
-    settings.transcriptEffect ??
-    settings.active_effect ??
-    settings.activeEffect ??
-    settings.effect ??
-    styleRaw;
-
-  const transcript_effect = normalizeTranscriptEffect(effectRaw) || "color";
-
-  const transcriptColor = ACTIVE_COLOR_LAYERS.has(pickedSubtitleLayer)
-    ? (
-        settings.transcript_color ??
-        settings.transcriptColor ??
-        settings.activeColor ??
-        settings.active_color
-      )
-    : null;
+  const capEnabled = !!(cap && cap.enabled === true);
 
   const m = {};
 
@@ -379,95 +337,91 @@ const capEnabled = !!(cap && cap.enabled === true);
     speed: mainSpeed,
   });
 
-  
-  
-// 6) Captions
-for (const name of SUBTITLE_LAYERS) m[`${name}.visible`] = false;
+  // 6) Captions: always hide ALL subtitle layers first
+  for (const name of SUBTITLE_LAYERS) m[`${name}.visible`] = false;
 
-// ✅ If captions are not enabled, stop here (nothing gets turned on)
-if (!capEnabled) {
-  return m;
-}
+  // ✅ FIX: if not enabled, stop here (no props applied, nothing can “accidentally” show)
+  if (!capEnabled) {
+    return m;
+  }
 
-// ---- captions are enabled below ----
-const settings = (cap && cap.settings) ? cap.settings : {};
-const styleRaw = String((cap && cap.style) || "").trim();
-const pickedSubtitleLayer = SUBTITLE_LAYERS.includes(styleRaw) ? styleRaw : "Subtitles_Sentence";
+  // ---- captions enabled below ----
+  const settings = (cap && cap.settings) ? cap.settings : {};
+  const styleRaw = String((cap && cap.style) || "").trim();
+  const pickedSubtitleLayer = SUBTITLE_LAYERS.includes(styleRaw) ? styleRaw : "Subtitles_Sentence";
 
-const effectRaw =
-  settings.transcript_effect ??
-  settings.transcriptEffect ??
-  settings.active_effect ??
-  settings.activeEffect ??
-  settings.effect ??
-  styleRaw;
+  const effectRaw =
+    settings.transcript_effect ??
+    settings.transcriptEffect ??
+    settings.active_effect ??
+    settings.activeEffect ??
+    settings.effect ??
+    styleRaw;
 
-const transcript_effect = normalizeTranscriptEffect(effectRaw) || "color";
+  const transcript_effect = normalizeTranscriptEffect(effectRaw) || "color";
 
-m[`${pickedSubtitleLayer}.visible`] = true;
-m[`${pickedSubtitleLayer}.transcript_effect`] = transcript_effect;
-m[`${pickedSubtitleLayer}.transcript_source`] = MAIN_AUDIO;
+  m[`${pickedSubtitleLayer}.visible`] = true;
+  m[`${pickedSubtitleLayer}.transcript_effect`] = transcript_effect;
+  m[`${pickedSubtitleLayer}.transcript_source`] = MAIN_AUDIO;
 
-// styling settings (accept camelCase or snake_case)
-const fill = settings.fill_color ?? settings.fillColor;
-const stroke = settings.stroke_color ?? settings.strokeColor;
-const strokeWidth = settings.stroke_width ?? settings.strokeWidth;
-const fontFamily = settings.font_family ?? settings.fontFamily;
-const fontSize = settings.font_size ?? settings.fontSize;
-const textTransform = settings.text_transform ?? settings.textTransform;
+  // styling settings (accept camelCase or snake_case)
+  const fill = settings.fill_color ?? settings.fillColor;
+  const stroke = settings.stroke_color ?? settings.strokeColor;
+  const strokeWidth = settings.stroke_width ?? settings.strokeWidth;
+  const fontFamily = settings.font_family ?? settings.fontFamily;
+  const fontSize = settings.font_size ?? settings.fontSize;
+  const textTransform = settings.text_transform ?? settings.textTransform;
 
-setSubtitleProp(pickedSubtitleLayer, "fill_color", fill);
-setSubtitleProp(pickedSubtitleLayer, "stroke_color", stroke);
+  setSubtitleProp(pickedSubtitleLayer, "fill_color", fill);
+  setSubtitleProp(pickedSubtitleLayer, "stroke_color", stroke);
 
-if (strokeWidth !== undefined && strokeWidth !== null) {
-  m[`${pickedSubtitleLayer}.stroke_width`] = String(strokeWidth);
-}
+  if (strokeWidth !== undefined && strokeWidth !== null) {
+    m[`${pickedSubtitleLayer}.stroke_width`] = String(strokeWidth);
+  }
 
-setSubtitleProp(pickedSubtitleLayer, "font_family", fontFamily);
+  setSubtitleProp(pickedSubtitleLayer, "font_family", fontFamily);
 
-if (fontSize !== undefined && fontSize !== null) {
-  m[`${pickedSubtitleLayer}.font_size`] = String(fontSize);
-}
+  if (fontSize !== undefined && fontSize !== null) {
+    m[`${pickedSubtitleLayer}.font_size`] = String(fontSize);
+  }
 
-setSubtitleProp(pickedSubtitleLayer, "text_transform", textTransform);
+  setSubtitleProp(pickedSubtitleLayer, "text_transform", textTransform);
 
-function toPercent(v, fallback = "50%") {
-  const n = Number(v);
-  if (!Number.isFinite(n)) return fallback;
-  const clamped = Math.max(0, Math.min(100, n));
-  return `${clamped}%`;
-}
+  function toPercent(v, fallback = "50%") {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return fallback;
+    const clamped = Math.max(0, Math.min(100, n));
+    return `${clamped}%`;
+  }
 
-const x = settings.x_alignment ?? settings.xAlignment ?? settings.x;
-const y = settings.y_alignment ?? settings.yAlignment ?? settings.y;
+  const x = settings.x_alignment ?? settings.xAlignment ?? settings.x;
+  const y = settings.y_alignment ?? settings.yAlignment ?? settings.y;
 
-m[`${pickedSubtitleLayer}.x_alignment`] = toPercent(x, "50%");
-m[`${pickedSubtitleLayer}.y_alignment`] = toPercent(y, "50%");
+  m[`${pickedSubtitleLayer}.x_alignment`] = toPercent(x, "50%");
+  m[`${pickedSubtitleLayer}.y_alignment`] = toPercent(y, "50%");
 
-// transcript_color only for layers that support it
-const transcriptColor = ACTIVE_COLOR_LAYERS.has(pickedSubtitleLayer)
-  ? (
-      settings.transcript_color ??
-      settings.transcriptColor ??
-      settings.activeColor ??
-      settings.active_color
-    )
-  : null;
+  const transcriptColor = ACTIVE_COLOR_LAYERS.has(pickedSubtitleLayer)
+    ? (
+        settings.transcript_color ??
+        settings.transcriptColor ??
+        settings.activeColor ??
+        settings.active_color
+      )
+    : null;
 
-if (transcriptColor) {
-  m[`${pickedSubtitleLayer}.transcript_color`] = String(transcriptColor);
-}
+  if (transcriptColor) {
+    m[`${pickedSubtitleLayer}.transcript_color`] = String(transcriptColor);
+  }
 
-if (pickedSubtitleLayer === "Subtitles_BlackBar") {
-  const bgColor = settings.background_color ?? settings.backgroundColor;
-  setSubtitleProp(pickedSubtitleLayer, "background_color", bgColor);
-}
+  if (pickedSubtitleLayer === "Subtitles_BlackBar") {
+    const bgColor = settings.background_color ?? settings.backgroundColor;
+    setSubtitleProp(pickedSubtitleLayer, "background_color", bgColor);
+  }
 
-if (pickedSubtitleLayer === "Subtitles_NeonGlow") {
-  const shColor = settings.shadow_color ?? settings.shadowColor;
-  setSubtitleProp(pickedSubtitleLayer, "shadow_color", shColor);
-}
-
+  if (pickedSubtitleLayer === "Subtitles_NeonGlow") {
+    const shColor = settings.shadow_color ?? settings.shadowColor;
+    setSubtitleProp(pickedSubtitleLayer, "shadow_color", shColor);
+  }
 
   return m;
 }
@@ -481,7 +435,6 @@ module.exports = async function handler(req, res) {
   }
 
   try {
-    // 🔒 require login for BOTH POST and GET (ties renders to member)
     const member_id = await requireMemberId(req);
     const sb = getSupabaseAdmin();
 
@@ -514,7 +467,8 @@ module.exports = async function handler(req, res) {
         return json(res, 400, { ok: false, error: "backgroundPath or backgroundVideoUrl is required" });
       }
 
-      // ✅ Insert DB row FIRST so it appears in /my-videos immediately as "rendering"
+      // ✅ Choices saved for /my-videos
+      // Store captions as null unless client actually sent it
       const choices = {
         kind: "composite",
         videoName: String(body.videoName || "Untitled split-screen video"),
@@ -523,10 +477,15 @@ module.exports = async function handler(req, res) {
         mainSpeed: body.mainSpeed,
         bgSpeed: body.bgSpeed,
         bgMuted: body.bgMuted,
-        captions: body.captions || {},
+
+        // ✅ IMPORTANT: do NOT force {} (that makes debugging confusing)
+        captions: body.captions ?? null,
+
         mainPath: body.mainPath || null,
         backgroundPath: body.backgroundPath || null,
         backgroundVideoUrl: body.backgroundVideoUrl || null,
+        backgroundName: body.backgroundName || null,
+        bgSlot: body.bgSlot || null,
       };
 
       const { data: row, error: insErr } = await sb
@@ -549,7 +508,6 @@ module.exports = async function handler(req, res) {
 
       const dbId = row.id;
 
-      // Signed URLs to feed Creatomate
       const mainUrl = await signedReadUrl(sb, BUCKET, mainPath, 60 * 60);
       const bgUrl = backgroundVideoUrl
         ? String(backgroundVideoUrl)
@@ -565,7 +523,6 @@ module.exports = async function handler(req, res) {
           output_format: "mp4",
         });
       } catch (e) {
-        // mark row failed if Creatomate call fails
         await sb.from("renders").update({
           composite_status: "failed",
           composite_error: e?.message || String(e),
@@ -587,7 +544,6 @@ module.exports = async function handler(req, res) {
         return json(res, 502, { ok: false, error: "Creatomate response missing id", details: created });
       }
 
-      // ✅ Save Creatomate render id
       await sb.from("renders").update({
         composite_render_id: String(renderId),
         composite_status: "rendering",
@@ -602,7 +558,6 @@ module.exports = async function handler(req, res) {
       const renderId = String(req.query?.id || "").trim();
       if (!renderId) return json(res, 400, { ok: false, error: "Missing id" });
 
-      // ✅ Ownership: find the row for this member + this creatomate render id
       const { data: row, error: rowErr } = await sb
         .from("renders")
         .select("id, composite_video_url, composite_status")
@@ -614,7 +569,6 @@ module.exports = async function handler(req, res) {
         return json(res, 404, { ok: false, error: "NOT_FOUND" });
       }
 
-      // ✅ If already finished, return immediately
       if (row.composite_video_url) {
         return json(res, 200, { ok: true, status: row.composite_status || "succeeded", url: row.composite_video_url });
       }
