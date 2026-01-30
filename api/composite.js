@@ -271,8 +271,11 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
 
   const bgMuted = (payload.bgMuted ?? payload.bg_muted) !== false; // default true
 
-  const cap = payload.captions || {};
-  const capEnabled = cap.enabled !== false;
+  const cap = payload.captions || null;
+
+// ✅ default OFF unless explicitly enabled
+const capEnabled = !!(cap && cap.enabled === true);
+
   const settings = cap.settings || {};
 
   const styleRaw = String(cap.style || "").trim();
@@ -376,62 +379,95 @@ function buildModifications({ mainUrl, bgUrl, payload }) {
     speed: mainSpeed,
   });
 
-  // 6) Captions
-  for (const name of SUBTITLE_LAYERS) m[`${name}.visible`] = false;
+  
+  
+// 6) Captions
+for (const name of SUBTITLE_LAYERS) m[`${name}.visible`] = false;
 
-  m[`${pickedSubtitleLayer}.visible`] = !!capEnabled;
-  m[`${pickedSubtitleLayer}.transcript_effect`] = transcript_effect;
-  m[`${pickedSubtitleLayer}.transcript_source`] = MAIN_AUDIO;
+// ✅ If captions are not enabled, stop here (nothing gets turned on)
+if (!capEnabled) {
+  return m;
+}
 
-  // styling settings (accept camelCase or snake_case)
-  const fill = settings.fill_color ?? settings.fillColor;
-  const stroke = settings.stroke_color ?? settings.strokeColor;
-  const strokeWidth = settings.stroke_width ?? settings.strokeWidth;
-  const fontFamily = settings.font_family ?? settings.fontFamily;
-  const fontSize = settings.font_size ?? settings.fontSize;
-  const textTransform = settings.text_transform ?? settings.textTransform;
+// ---- captions are enabled below ----
+const settings = (cap && cap.settings) ? cap.settings : {};
+const styleRaw = String((cap && cap.style) || "").trim();
+const pickedSubtitleLayer = SUBTITLE_LAYERS.includes(styleRaw) ? styleRaw : "Subtitles_Sentence";
 
-  setSubtitleProp(pickedSubtitleLayer, "fill_color", fill);
-  setSubtitleProp(pickedSubtitleLayer, "stroke_color", stroke);
+const effectRaw =
+  settings.transcript_effect ??
+  settings.transcriptEffect ??
+  settings.active_effect ??
+  settings.activeEffect ??
+  settings.effect ??
+  styleRaw;
 
-  if (strokeWidth !== undefined && strokeWidth !== null) {
-    m[`${pickedSubtitleLayer}.stroke_width`] = String(strokeWidth);
-  }
+const transcript_effect = normalizeTranscriptEffect(effectRaw) || "color";
 
-  setSubtitleProp(pickedSubtitleLayer, "font_family", fontFamily);
+m[`${pickedSubtitleLayer}.visible`] = true;
+m[`${pickedSubtitleLayer}.transcript_effect`] = transcript_effect;
+m[`${pickedSubtitleLayer}.transcript_source`] = MAIN_AUDIO;
 
-  if (fontSize !== undefined && fontSize !== null) {
-    m[`${pickedSubtitleLayer}.font_size`] = String(fontSize);
-  }
+// styling settings (accept camelCase or snake_case)
+const fill = settings.fill_color ?? settings.fillColor;
+const stroke = settings.stroke_color ?? settings.strokeColor;
+const strokeWidth = settings.stroke_width ?? settings.strokeWidth;
+const fontFamily = settings.font_family ?? settings.fontFamily;
+const fontSize = settings.font_size ?? settings.fontSize;
+const textTransform = settings.text_transform ?? settings.textTransform;
 
-  setSubtitleProp(pickedSubtitleLayer, "text_transform", textTransform);
+setSubtitleProp(pickedSubtitleLayer, "fill_color", fill);
+setSubtitleProp(pickedSubtitleLayer, "stroke_color", stroke);
 
-  function toPercent(v, fallback = "50%") {
-    const n = Number(v);
-    if (!Number.isFinite(n)) return fallback;
-    const clamped = Math.max(0, Math.min(100, n));
-    return `${clamped}%`;
-  }
+if (strokeWidth !== undefined && strokeWidth !== null) {
+  m[`${pickedSubtitleLayer}.stroke_width`] = String(strokeWidth);
+}
 
-  const x = settings.x_alignment ?? settings.xAlignment ?? settings.x;
-  const y = settings.y_alignment ?? settings.yAlignment ?? settings.y;
+setSubtitleProp(pickedSubtitleLayer, "font_family", fontFamily);
 
-  m[`${pickedSubtitleLayer}.x_alignment`] = toPercent(x, "50%");
-  m[`${pickedSubtitleLayer}.y_alignment`] = toPercent(y, "50%");
+if (fontSize !== undefined && fontSize !== null) {
+  m[`${pickedSubtitleLayer}.font_size`] = String(fontSize);
+}
 
-  if (transcriptColor) {
-    m[`${pickedSubtitleLayer}.transcript_color`] = String(transcriptColor);
-  }
+setSubtitleProp(pickedSubtitleLayer, "text_transform", textTransform);
 
-  if (pickedSubtitleLayer === "Subtitles_BlackBar") {
-    const bgColor = settings.background_color ?? settings.backgroundColor;
-    setSubtitleProp(pickedSubtitleLayer, "background_color", bgColor);
-  }
+function toPercent(v, fallback = "50%") {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return fallback;
+  const clamped = Math.max(0, Math.min(100, n));
+  return `${clamped}%`;
+}
 
-  if (pickedSubtitleLayer === "Subtitles_NeonGlow") {
-    const shColor = settings.shadow_color ?? settings.shadowColor;
-    setSubtitleProp(pickedSubtitleLayer, "shadow_color", shColor);
-  }
+const x = settings.x_alignment ?? settings.xAlignment ?? settings.x;
+const y = settings.y_alignment ?? settings.yAlignment ?? settings.y;
+
+m[`${pickedSubtitleLayer}.x_alignment`] = toPercent(x, "50%");
+m[`${pickedSubtitleLayer}.y_alignment`] = toPercent(y, "50%");
+
+// transcript_color only for layers that support it
+const transcriptColor = ACTIVE_COLOR_LAYERS.has(pickedSubtitleLayer)
+  ? (
+      settings.transcript_color ??
+      settings.transcriptColor ??
+      settings.activeColor ??
+      settings.active_color
+    )
+  : null;
+
+if (transcriptColor) {
+  m[`${pickedSubtitleLayer}.transcript_color`] = String(transcriptColor);
+}
+
+if (pickedSubtitleLayer === "Subtitles_BlackBar") {
+  const bgColor = settings.background_color ?? settings.backgroundColor;
+  setSubtitleProp(pickedSubtitleLayer, "background_color", bgColor);
+}
+
+if (pickedSubtitleLayer === "Subtitles_NeonGlow") {
+  const shColor = settings.shadow_color ?? settings.shadowColor;
+  setSubtitleProp(pickedSubtitleLayer, "shadow_color", shColor);
+}
+
 
   return m;
 }
