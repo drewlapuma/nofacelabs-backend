@@ -481,6 +481,7 @@ module.exports = async function handler(req, res) {
       // ✅ Insert DB row FIRST so it appears in /my-videos immediately as "rendering"
       const choices = {
         kind: "composite",
+        videoName: String(body.videoName || "Untitled split-screen video"),
         layout: body.layout,
         mainSlot: body.mainSlot,
         mainSpeed: body.mainSpeed,
