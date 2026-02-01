@@ -322,22 +322,41 @@ async function uploadVoiceMp3({ path, mp3Buffer }) {
   return signed.signedUrl;
 }
 
-// -------------------- Default PFPs (10 presets) --------------------
+// -------------------- Default PFPs (preset map) --------------------
 const REDDIT_PFP_BASE_URL = String(process.env.REDDIT_PFP_BASE_URL || "").trim();
-// Expected: `${REDDIT_PFP_BASE_URL}/1.png` ... `/10.png`
+
+// Map preset 1..10 -> your actual filenames
+// NOTE: You currently have 9 visible in the screenshot. Add #10 when you upload it.
+const PFP_PRESET_MAP = {
+  1: "redditgreypfp1.1.png",
+  2: "redditbluepfp2.1.png",
+  3: "redditbrownpfp3.1.png",
+  4: "redditpurplepfp4.png",
+  5: "redditpinkpfp5.png",
+  6: "redditredpfp6.png",
+  7: "redditorangepfp7.png",
+  8: "reddityellowpfp8.png",
+  9: "redditgreenpfp9.png",
+};
 
 function pickPfpUrl({ pfpUrl, pfpPreset }) {
   const direct = String(pfpUrl || "").trim();
   if (direct) return direct;
 
   const preset = Number(pfpPreset);
-  if (Number.isFinite(preset) && preset >= 1 && preset <= 10 && REDDIT_PFP_BASE_URL) {
-    return `${REDDIT_PFP_BASE_URL}/${preset}.png`;
+  if (
+    Number.isFinite(preset) &&
+    preset >= 1 &&
+    preset <= 10 &&
+    REDDIT_PFP_BASE_URL &&
+    PFP_PRESET_MAP[preset]
+  ) {
+    return `${REDDIT_PFP_BASE_URL}/${PFP_PRESET_MAP[preset]}`;
   }
 
-  // If neither provided, return empty (template default will show)
   return "";
 }
+
 
 // -------------------- Captions (reuse your existing styles) --------------------
 const CAPTION_STYLE_TO_LAYER = {
