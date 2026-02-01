@@ -1,37 +1,49 @@
 // api/reddit-video.js (CommonJS, Node 18 on Vercel)
 //
-// ✅ Generates a "Reddit-style" video:
-//  - Intro post card (light/dark) shown ONLY for the time it takes to read post_text
-//  - Voice A reads the post_text (post_voice audio element)
-//  - Voice B reads the generated script (script_voice audio element)
-//  - Gameplay background (library or uploaded URL) behind everything
-//  - Captions use your existing caption styles/settings (applied to your captions layers)
+// ✅ Updates included (per your screenshots/issues):
+// 1) Handles duplicated username/pfp by writing to BOTH:
+//    - username_light + username_dark
+//    - pfp_light + pfp_dark
+// 2) Captions start ONLY when the script starts (introSec), so they won’t cover the post card.
+// 3) Adds 10 default Reddit PFPs users can pick OR they can upload their own.
 //
-// REQUIRED Creatomate layer names in your 9:16 template:
-//  - bg_video (video)
-//  - post_card_light (group)
-//  - post_card_dark  (group)
-//  - pfp (image)
-//  - username (text)
-//  - post_text (text)
-//  - like_count (text)
-//  - comment_count (text)
-//  - post_voice (audio)
-//  - script_voice (audio)
-//  - captions layers: same naming as your existing CAPTION_STYLE_TO_LAYER values
+// REQUIRED Creatomate layer names in your template (9:16):
+// - bg_video (video)
+// - post_card_light (group)
+// - post_card_dark  (group)
+// - username_light (text)
+// - username_dark  (text)
+// - post_text (text)            (can be shared; if duplicated, see note below)
+// - like_count (text)
+// - comment_count (text)
+// - pfp_light (image)
+// - pfp_dark  (image)
+// - post_voice (audio)
+// - script_voice (audio)
+// - captions layers like your existing Subtitles_* names (we’ll set start on all)
 //
-// ENV VARS needed:
-//  - CREATOMATE_API_KEY
-//  - CREATO_REDDIT_TEMPLATE_916   (your 9:16 reddit template id)
-//  - SUPABASE_URL
-//  - SUPABASE_SERVICE_ROLE_KEY
-//  - MEMBERSTACK_SECRET_KEY
-//  - ELEVENLABS_API_KEY
-//  - (optional) ELEVENLABS_MODEL_ID
-//  - (optional) VOICE_BUCKET (default "voiceovers")
-//  - OPENAI_API_KEY
-//  - (optional) OPENAI_MODEL (default "gpt-4.1-mini")
-//  - (optional) API_BASE  (otherwise uses https://{host})
+// ENV VARS:
+// - CREATOMATE_API_KEY
+// - CREATO_REDDIT_TEMPLATE_916
+// - SUPABASE_URL
+// - SUPABASE_SERVICE_ROLE_KEY
+// - MEMBERSTACK_SECRET_KEY
+// - ELEVENLABS_API_KEY
+// - OPENAI_API_KEY
+//
+// ✅ For 10 default pfps:
+// - Put your 10 PNGs in a PUBLIC bucket (recommended) e.g. Supabase bucket: "assets"
+//   path: reddit-pfps/1.png ... reddit-pfps/10.png
+// - Set env var: REDDIT_PFP_BASE_URL = https://YOUR_PUBLIC_ASSET_BASE/reddit-pfps
+//   Example if using Supabase public URL:
+//   https://<project-ref>.supabase.co/storage/v1/object/public/assets/reddit-pfps
+//
+// Request body supports:
+// - pfp_preset: 1..10  (user picks preset)
+// - OR pfp_url: "https://..." (user uploaded/custom image)
+//
+// NOTE: If you also duplicated post_text / like_count / comment_count per theme,
+// rename them similarly and mirror the mods like we do for username/pfp.
 
 const https = require("https");
 const crypto = require("crypto");
@@ -143,7 +155,6 @@ function countWords(text) {
 
 // Intro length ≈ how long it takes to read post text
 function estimateIntroSeconds(postText) {
-  // ~2.7 words/sec + 0.5s padding, clamped
   const words = countWords(postText);
   const s = words / 2.7 + 0.5;
   return clampNum(s, 3.5, 10);
@@ -161,7 +172,6 @@ function mapTone(toneRaw) {
 }
 
 function mapDurationSeconds(durationRaw) {
-  // accepts: "45s", "1 min", "1 min 30s", 45, 60, 90, etc.
   const s = String(durationRaw || "").toLowerCase();
   if (s.includes("90") || s.includes("1:30") || s.includes("1 min 30") || s.includes("1min30")) return 90;
   if (s.includes("60") || s.includes("1 min") || s.includes("1min")) return 60;
@@ -169,7 +179,6 @@ function mapDurationSeconds(durationRaw) {
 
   const n = Number(durationRaw);
   if (Number.isFinite(n)) return clampNum(n, 30, 90);
-
   return 60;
 }
 
@@ -235,7 +244,7 @@ Output ONLY the script text.
   return out;
 }
 
-// -------------------- ElevenLabs (copied from your create-video.js) --------------------
+// -------------------- ElevenLabs --------------------
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
 const ELEVENLABS_MODEL_ID = process.env.ELEVENLABS_MODEL_ID || "eleven_multilingual_v2";
 const VOICE_BUCKET = process.env.VOICE_BUCKET || "voiceovers";
@@ -282,7 +291,6 @@ async function isUrlFetchable(url) {
   }
 }
 
-// Upload MP3 -> return URL Creatomate can fetch
 async function uploadVoiceMp3({ path, mp3Buffer }) {
   if (!supabase) throw new Error("MISSING_SUPABASE_ENV_VARS");
 
@@ -304,7 +312,7 @@ async function uploadVoiceMp3({ path, mp3Buffer }) {
 
   const { data: signed, error: signErr } = await supabase.storage
     .from(VOICE_BUCKET)
-    .createSignedUrl(path, 60 * 60); // 1 hour
+    .createSignedUrl(path, 60 * 60);
 
   if (signErr || !signed?.signedUrl) {
     console.error("[VOICE_SIGNED_URL_FAILED]", signErr);
@@ -314,9 +322,24 @@ async function uploadVoiceMp3({ path, mp3Buffer }) {
   return signed.signedUrl;
 }
 
-// =====================================================
-// Captions: styles + settings (same as your create-video.js)
-// =====================================================
+// -------------------- Default PFPs (10 presets) --------------------
+const REDDIT_PFP_BASE_URL = String(process.env.REDDIT_PFP_BASE_URL || "").trim();
+// Expected: `${REDDIT_PFP_BASE_URL}/1.png` ... `/10.png`
+
+function pickPfpUrl({ pfpUrl, pfpPreset }) {
+  const direct = String(pfpUrl || "").trim();
+  if (direct) return direct;
+
+  const preset = Number(pfpPreset);
+  if (Number.isFinite(preset) && preset >= 1 && preset <= 10 && REDDIT_PFP_BASE_URL) {
+    return `${REDDIT_PFP_BASE_URL}/${preset}.png`;
+  }
+
+  // If neither provided, return empty (template default will show)
+  return "";
+}
+
+// -------------------- Captions (reuse your existing styles) --------------------
 const CAPTION_STYLE_TO_LAYER = {
   sentence: "Subtitles_Sentence",
   karaoke: "Subtitles_Karaoke",
@@ -406,6 +429,15 @@ function captionSettingsMods(captionStyle, captionSettings) {
   return mods;
 }
 
+// ✅ Make ALL caption layers start at introSec so nothing appears during the post card
+function captionsStartAt(introSec) {
+  const mods = {};
+  const allLayers = new Set(Object.values(CAPTION_STYLE_TO_LAYER));
+  allLayers.add("Subtitles-1");
+  for (const layer of allLayers) mods[`${layer}.start`] = introSec;
+  return mods;
+}
+
 // -------------------- MAIN --------------------
 module.exports = async function handler(req, res) {
   setCors(req, res);
@@ -421,14 +453,17 @@ module.exports = async function handler(req, res) {
 
     const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : req.body || {};
 
-    // ---- Inputs ----
     const theme = String(body.theme || "dark").toLowerCase() === "light" ? "light" : "dark";
 
     const username = String(body.username || "placeholder").trim() || "placeholder";
     const postText = String(body.post_text || body.postText || "").trim();
     const likeCount = String(body.like_count ?? body.likeCount ?? "99+").trim() || "99+";
     const commentCount = String(body.comment_count ?? body.commentCount ?? "99+").trim() || "99+";
-    const pfpUrl = String(body.pfp_url || body.pfpUrl || "").trim();
+
+    // ✅ preset or custom upload
+    const pfpPreset = body.pfp_preset ?? body.pfpPreset ?? null; // 1..10
+    const pfpUrlInput = String(body.pfp_url || body.pfpUrl || "").trim();
+    const pfpUrl = pickPfpUrl({ pfpUrl: pfpUrlInput, pfpPreset });
 
     const topic = String(body.topic || "").trim();
     const tone = mapTone(body.tone || "Funny");
@@ -443,7 +478,6 @@ module.exports = async function handler(req, res) {
     const bg = body.background && typeof body.background === "object" ? body.background : {};
     const bgUrl = String(bg.url || "").trim();
 
-    // ---- Validation ----
     if (!process.env.CREATOMATE_API_KEY) return res.status(500).json({ error: "MISSING_CREATOMATE_API_KEY" });
     if (!supabase) return res.status(500).json({ error: "MISSING_SUPABASE_ENV_VARS" });
 
@@ -463,17 +497,18 @@ module.exports = async function handler(req, res) {
       username,
       likeCount,
       commentCount,
-      hasPfp: !!pfpUrl,
+      pfpPreset: pfpPreset ?? null,
+      hasPfpUrl: !!pfpUrl,
       topic,
       tone,
       scriptSeconds,
       captionStyle,
       hasBg: !!bgUrl,
+      hasPfpBase: !!REDDIT_PFP_BASE_URL,
     });
 
     // ---- DB insert ----
     const db_id = crypto.randomUUID();
-
     const choices = {
       kind: "reddit_video",
       theme,
@@ -481,6 +516,7 @@ module.exports = async function handler(req, res) {
       postText,
       likeCount,
       commentCount,
+      pfpPreset: pfpPreset ?? null,
       pfpUrl: pfpUrl || null,
       topic,
       tone,
@@ -560,22 +596,30 @@ module.exports = async function handler(req, res) {
     // Background
     mods["bg_video.source"] = bgUrl;
 
-    // Post data
-    if (pfpUrl) mods["pfp.source"] = pfpUrl;
-    mods["username.text"] = username;
-    mods["post_text.text"] = postText;
-    mods["like_count.text"] = likeCount;
-    mods["comment_count.text"] = commentCount;
-
-    // Theme toggle (you created 2 cards)
+    // Theme toggle (2 cards)
     mods["post_card_light.visible"] = theme === "light";
     mods["post_card_dark.visible"] = theme === "dark";
 
-    // Post card intro only
+    // Intro only
     mods["post_card_light.start"] = 0;
     mods["post_card_light.duration"] = introSec;
     mods["post_card_dark.start"] = 0;
     mods["post_card_dark.duration"] = introSec;
+
+    // ✅ Post content: write to BOTH theme versions
+    mods["username_light.text"] = username;
+    mods["username_dark.text"] = username;
+
+    // If you DID NOT duplicate these, leave them as-is (shared text layers)
+    mods["post_text.text"] = postText;
+    mods["like_count.text"] = likeCount;
+    mods["comment_count.text"] = commentCount;
+
+    // PFP: preset or upload
+    if (pfpUrl) {
+      mods["pfp_light.source"] = pfpUrl;
+      mods["pfp_dark.source"] = pfpUrl;
+    }
 
     // Audio timing
     mods["post_voice.source"] = postVoiceUrl;
@@ -584,16 +628,10 @@ module.exports = async function handler(req, res) {
     mods["script_voice.source"] = scriptVoiceUrl;
     mods["script_voice.start"] = introSec;
 
-    // Captions (apply your chosen style/settings)
+    // Captions: style + settings + start only after intro
     Object.assign(mods, captionVisibilityMods(captionStyle));
     Object.assign(mods, captionSettingsMods(captionStyle, captionSettings));
-
-    // IMPORTANT:
-    // Your captions template must be set to transcribe from script_voice (or whatever audio layer you chose).
-    // If your existing templates expect "Voiceover.source", you can ALSO duplicate script_voice in template
-    // or rename script_voice to Voiceover. If you did name it Voiceover instead, uncomment:
-    // mods["Voiceover.source"] = scriptVoiceUrl;
-    // mods["Voiceover.start"] = introSec;
+    Object.assign(mods, captionsStartAt(introSec));
 
     const payload = {
       template_id,
@@ -631,8 +669,7 @@ module.exports = async function handler(req, res) {
       scriptSeconds,
       theme,
       captionStyle,
-      postVoiceUrl,
-      scriptVoiceUrl,
+      chosenPfp: pfpUrl || null,
       scriptTextPreview: scriptText.slice(0, 220),
     });
   } catch (err) {
