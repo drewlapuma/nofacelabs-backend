@@ -1,20 +1,4 @@
 // api/reddit-video.js (CommonJS, Node 18+)
-// POST starts a Creatomate render
-// GET polls status
-//
-// Expects POST body:
-// {
-//   username, mode, pfpUrl,
-//   postTitle, postText,
-//   likes, comments, shareText,
-//   script,
-//   backgroundVideoUrl
-// }
-//
-// Env:
-// - CREATOMATE_API_KEY
-// - CREATOMATE_TEMPLATE_ID_REDDIT
-// - ALLOW_ORIGIN or ALLOW_ORIGINS (optional)
 
 const https = require("https");
 
@@ -88,7 +72,6 @@ function creatomateRequest(path, method, payload) {
             j = { raw: out };
           }
           if (res.statusCode >= 200 && res.statusCode < 300) return resolve(j);
-
           const msg = j?.error || j?.message || j?.raw || `Creatomate HTTP ${res.statusCode}`;
           reject(new Error(msg));
         });
@@ -111,15 +94,17 @@ function normalizeMode(v) {
   return s === "dark" ? "dark" : "light";
 }
 
-/**
- * ✅ IMPORTANT: these names must match your template exactly:
- * - username_light / username_dark
- * - pfp_light / pfp_dark
- * - post_bg_light / post_bg_dark
- * - post_text / like_count / comment_count / share
- * - Video
- * - post_card_light / post_card_dark (groups)
- */
+// Helper: write to multiple possible layer names (old + new)
+function setText(mods, names, text) {
+  names.forEach((n) => (mods[n] = { text }));
+}
+function setSource(mods, names, source) {
+  names.forEach((n) => (mods[n] = { source }));
+}
+function setOpacity(mods, name, opacity) {
+  mods[name] = { opacity };
+}
+
 function buildModifications(payload) {
   const mode = normalizeMode(payload.mode);
 
@@ -134,35 +119,33 @@ function buildModifications(payload) {
   const showLight = mode === "light";
   const showDark = mode === "dark";
 
-  // ✅ Creatomate "modifications" MUST be an OBJECT keyed by layer name.
-  const mods = {
-    // Text
-    post_text: { text: postText },
-    like_count: { text: likes },
-    comment_count: { text: comments },
-    share: { text: shareText },
+  const mods = {};
 
-    // Username exists as TWO separate layers in your template
-    username_light: { text: username },
-    username_dark: { text: username },
+  // ✅ Duplicates fix: write BOTH the old generic names and the new unique names
+  setText(mods, ["post_text", "post_text_light", "post_text_dark"], postText);
+  setText(mods, ["like_count", "like_count_light", "like_count_dark"], likes);
+  setText(mods, ["comment_count", "comment_count_light", "comment_count_dark"], comments);
+  setText(mods, ["share", "share_light", "share_dark"], shareText);
 
-    // Theme switching
-    post_card_light: { opacity: showLight ? 1 : 0 },
-    post_card_dark: { opacity: showDark ? 1 : 0 },
-    post_bg_light: { opacity: showLight ? 1 : 0 },
-    post_bg_dark: { opacity: showDark ? 1 : 0 },
-  };
+  // Username + PFP already unique in your template
+  setText(mods, ["username_light", "username_dark"], username);
 
-  // PFP exists as TWO separate layers in your template
   if (pfpUrl) {
-    mods.pfp_light = { source: pfpUrl };
-    mods.pfp_dark = { source: pfpUrl };
+    setSource(mods, ["pfp_light", "pfp_dark"], pfpUrl);
   }
 
-  // Background video layer
+  // Background video
   if (bgUrl) {
-    mods.Video = { source: bgUrl };
+    setSource(mods, ["Video"], bgUrl);
   }
+
+  // Theme switching
+  setOpacity(mods, "post_card_light", showLight ? 1 : 0);
+  setOpacity(mods, "post_card_dark", showDark ? 1 : 0);
+
+  // Background rects (you have both)
+  setOpacity(mods, "post_bg_light", showLight ? 1 : 0);
+  setOpacity(mods, "post_bg_dark", showDark ? 1 : 0);
 
   return mods;
 }
@@ -176,7 +159,7 @@ module.exports = async function handler(req, res) {
       return json(res, 500, { ok: false, error: "Missing CREATOMATE_TEMPLATE_ID_REDDIT" });
     }
 
-    // ---- GET: poll render status ----
+    // GET poll
     if (req.method === "GET") {
       const url = new URL(req.url, "http://localhost");
       const id = url.searchParams.get("id");
@@ -186,18 +169,11 @@ module.exports = async function handler(req, res) {
       const status = String(r?.status || "").toLowerCase();
       const finalUrl = r?.url || r?.result?.url || r?.outputs?.[0]?.url || "";
 
-      return json(res, 200, {
-        ok: true,
-        status,
-        url: finalUrl || null,
-        raw: finalUrl ? undefined : r,
-      });
+      return json(res, 200, { ok: true, status, url: finalUrl || null });
     }
 
-    // ---- POST: start render ----
-    if (req.method !== "POST") {
-      return json(res, 405, { ok: false, error: "Use POST or GET" });
-    }
+    // POST start render
+    if (req.method !== "POST") return json(res, 405, { ok: false, error: "Use POST or GET" });
 
     const body = await readBody(req);
 
@@ -205,18 +181,17 @@ module.exports = async function handler(req, res) {
       username: body.username,
       mode: body.mode,
       pfpUrl: body.pfpUrl,
-      postText: body.postText || body.postTitle, // fallback if you ever send only title
+      postText: body.postText || body.postTitle,
       likes: body.likes,
       comments: body.comments,
       shareText: body.shareText,
-      script: body.script,
       backgroundVideoUrl: body.backgroundVideoUrl,
     };
 
     if (!safeStr(payload.username)) return json(res, 400, { ok: false, error: "Missing username" });
     if (!safeStr(payload.postText)) return json(res, 400, { ok: false, error: "Missing postText" });
     if (!safeStr(payload.backgroundVideoUrl))
-      return json(res, 400, { ok: false, error: "Missing backgroundVideoUrl (use library for now)" });
+      return json(res, 400, { ok: false, error: "Missing backgroundVideoUrl" });
 
     const modifications = buildModifications(payload);
 
@@ -226,19 +201,13 @@ module.exports = async function handler(req, res) {
       output_format: "mp4",
     });
 
-    // ✅ Creatomate may return an array (length 1) or an object
     const start = Array.isArray(startResp) ? startResp[0] : startResp;
 
-    const renderId = start?.id;
-    if (!renderId) {
-      return json(res, 500, {
-        ok: false,
-        error: "Creatomate did not return render id",
-        raw: startResp,
-      });
+    if (!start?.id) {
+      return json(res, 500, { ok: false, error: "Creatomate did not return render id", raw: startResp });
     }
 
-    return json(res, 200, { ok: true, renderId, status: start?.status || "queued" });
+    return json(res, 200, { ok: true, renderId: start.id, status: start.status || "planned" });
   } catch (e) {
     console.error(e);
     return json(res, 500, { ok: false, error: String(e?.message || e) });
