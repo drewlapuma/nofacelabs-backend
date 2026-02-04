@@ -1,4 +1,20 @@
 // api/reddit-video.js (CommonJS, Node 18+)
+// POST starts a Creatomate render (template mode)
+// GET polls status
+//
+// Expects POST body:
+// {
+//   username, mode, pfpUrl,
+//   postTitle, postText,
+//   likes, comments, shareText,
+//   script,
+//   backgroundVideoUrl
+// }
+//
+// Env:
+// - CREATOMATE_API_KEY
+// - CREATOMATE_TEMPLATE_ID_REDDIT
+// - ALLOW_ORIGIN or ALLOW_ORIGINS (optional)
 
 const https = require("https");
 
@@ -58,7 +74,7 @@ function creatomateRequest(path, method, payload) {
         headers: {
           Authorization: `Bearer ${CREATOMATE_API_KEY}`,
           "Content-Type": "application/json",
-          ...(payload ? { "Content-Length": Buffer.byteLength(body) } : {}),
+          "Content-Length": Buffer.byteLength(body),
         },
       },
       (res) => {
@@ -72,6 +88,7 @@ function creatomateRequest(path, method, payload) {
             j = { raw: out };
           }
           if (res.statusCode >= 200 && res.statusCode < 300) return resolve(j);
+
           const msg = j?.error || j?.message || j?.raw || `Creatomate HTTP ${res.statusCode}`;
           reject(new Error(msg));
         });
@@ -79,7 +96,7 @@ function creatomateRequest(path, method, payload) {
     );
 
     req.on("error", reject);
-    if (payload) req.write(body);
+    if (body) req.write(body);
     req.end();
   });
 }
@@ -94,58 +111,73 @@ function normalizeMode(v) {
   return s === "dark" ? "dark" : "light";
 }
 
-// Helper: write to multiple possible layer names (old + new)
-function setText(mods, names, text) {
-  names.forEach((n) => (mods[n] = { text }));
-}
-function setSource(mods, names, source) {
-  names.forEach((n) => (mods[n] = { source }));
-}
-function setOpacity(mods, name, opacity) {
-  mods[name] = { opacity };
-}
-
+/**
+ * IMPORTANT:
+ * Creatomate template modifications must be a flat object with dot-keys:
+ *   "element.property": value
+ * For text: ".text"
+ * For images/videos: ".source"
+ * For groups/shapes: ".opacity"
+ */
 function buildModifications(payload) {
   const mode = normalizeMode(payload.mode);
 
   const username = safeStr(payload.username, "Nofacelabs.ai");
-  const postText = safeStr(payload.postText, "—");
+  const postText = safeStr(payload.postText || payload.postTitle, "—");
   const likes = safeStr(payload.likes, "99+");
   const comments = safeStr(payload.comments, "99+");
   const shareText = safeStr(payload.shareText, "share");
   const pfpUrl = safeStr(payload.pfpUrl, "");
-  const bgUrl = safeStr(payload.backgroundVideoUrl, "");
+  const bgUrl = safeStr(payload.backgroundVideoUrl || payload.backgroundUrl, "");
 
   const showLight = mode === "light";
   const showDark = mode === "dark";
 
-  const mods = {};
+  const mods = {
+    // --- TEXT (set BOTH where your template has light/dark variants) ---
+    "username_light.text": username,
+    "username_dark.text": username,
 
-  // ✅ Duplicates fix: write BOTH the old generic names and the new unique names
-  setText(mods, ["post_text", "post_text_light", "post_text_dark"], postText);
-  setText(mods, ["like_count", "like_count_light", "like_count_dark"], likes);
-  setText(mods, ["comment_count", "comment_count_light", "comment_count_dark"], comments);
-  setText(mods, ["share", "share_light", "share_dark"], shareText);
+    // Your template uses post_text in both cards (per your screenshot)
+    "post_text.text": postText,
+    // If you also created variants later, set them too (harmless if missing)
+    "post_text_light.text": postText,
+    "post_text_dark.text": postText,
 
-  // Username + PFP already unique in your template
-  setText(mods, ["username_light", "username_dark"], username);
+    "like_count.text": likes,
+    "like_count_light.text": likes,
+    "like_count_dark.text": likes,
 
-  if (pfpUrl) {
-    setSource(mods, ["pfp_light", "pfp_dark"], pfpUrl);
-  }
+    "comment_count.text": comments,
+    "comment_count_light.text": comments,
+    "comment_count_dark.text": comments,
 
-  // Background video
-  if (bgUrl) {
-    setSource(mods, ["Video"], bgUrl);
-  }
+    // share text exists in both cards in some versions
+    "share.text": shareText,
+    "share_light.text": shareText,
+    "share_dark.text": shareText,
 
-  // Theme switching
-  setOpacity(mods, "post_card_light", showLight ? 1 : 0);
-  setOpacity(mods, "post_card_dark", showDark ? 1 : 0);
+    // --- PFP (your screenshot shows pfp_light and pfp_dark) ---
+    ...(pfpUrl
+      ? {
+          "pfp_light.source": pfpUrl,
+          "pfp_dark.source": pfpUrl,
+          // if you ever still have old name "pfp" somewhere, also set it
+          "pfp.source": pfpUrl,
+        }
+      : {}),
 
-  // Background rects (you have both)
-  setOpacity(mods, "post_bg_light", showLight ? 1 : 0);
-  setOpacity(mods, "post_bg_dark", showDark ? 1 : 0);
+    // --- Background video layer ---
+    ...(bgUrl ? { "Video.source": bgUrl } : {}),
+
+    // --- SHOW/HIDE cards ---
+    "post_card_light.opacity": showLight ? 1 : 0,
+    "post_card_dark.opacity": showDark ? 1 : 0,
+
+    // --- Background shapes (your screenshot shows post_bg_light / post_bg_dark) ---
+    "post_bg_light.opacity": showLight ? 1 : 0,
+    "post_bg_dark.opacity": showDark ? 1 : 0,
+  };
 
   return mods;
 }
@@ -159,7 +191,7 @@ module.exports = async function handler(req, res) {
       return json(res, 500, { ok: false, error: "Missing CREATOMATE_TEMPLATE_ID_REDDIT" });
     }
 
-    // GET poll
+    // ---- GET: poll render status ----
     if (req.method === "GET") {
       const url = new URL(req.url, "http://localhost");
       const id = url.searchParams.get("id");
@@ -169,11 +201,18 @@ module.exports = async function handler(req, res) {
       const status = String(r?.status || "").toLowerCase();
       const finalUrl = r?.url || r?.result?.url || r?.outputs?.[0]?.url || "";
 
-      return json(res, 200, { ok: true, status, url: finalUrl || null });
+      return json(res, 200, {
+        ok: true,
+        status,
+        url: finalUrl || null,
+        raw: finalUrl ? undefined : r,
+      });
     }
 
-    // POST start render
-    if (req.method !== "POST") return json(res, 405, { ok: false, error: "Use POST or GET" });
+    // ---- POST: start render ----
+    if (req.method !== "POST") {
+      return json(res, 405, { ok: false, error: "Use POST or GET" });
+    }
 
     const body = await readBody(req);
 
@@ -181,33 +220,47 @@ module.exports = async function handler(req, res) {
       username: body.username,
       mode: body.mode,
       pfpUrl: body.pfpUrl,
-      postText: body.postText || body.postTitle,
+      postTitle: body.postTitle,
+      postText: body.postText,
       likes: body.likes,
       comments: body.comments,
       shareText: body.shareText,
-      backgroundVideoUrl: body.backgroundVideoUrl,
+      script: body.script, // not used in template yet
+      backgroundVideoUrl: body.backgroundVideoUrl || body.backgroundUrl,
     };
 
-    if (!safeStr(payload.username)) return json(res, 400, { ok: false, error: "Missing username" });
-    if (!safeStr(payload.postText)) return json(res, 400, { ok: false, error: "Missing postText" });
-    if (!safeStr(payload.backgroundVideoUrl))
-      return json(res, 400, { ok: false, error: "Missing backgroundVideoUrl" });
+    if (!safeStr(payload.username)) {
+      return json(res, 400, { ok: false, error: "Missing username" });
+    }
+    if (!safeStr(payload.postText || payload.postTitle)) {
+      return json(res, 400, { ok: false, error: "Missing postText" });
+    }
+    if (!safeStr(payload.backgroundVideoUrl)) {
+      return json(res, 400, { ok: false, error: "Missing backgroundVideoUrl (use library for now)" });
+    }
 
     const modifications = buildModifications(payload);
 
-    const startResp = await creatomateRequest("/v1/renders", "POST", {
+    // Start render (template mode)
+    const start = await creatomateRequest("/v1/renders", "POST", {
       template_id: TEMPLATE_ID,
-      modifications,
+      modifications, // ✅ flat dot-key object
       output_format: "mp4",
     });
 
-    const start = Array.isArray(startResp) ? startResp[0] : startResp;
+    // Creatomate sometimes returns an array
+    const first = Array.isArray(start) ? start[0] : start;
+    const renderId = first?.id;
 
-    if (!start?.id) {
-      return json(res, 500, { ok: false, error: "Creatomate did not return render id", raw: startResp });
+    if (!renderId) {
+      return json(res, 500, {
+        ok: false,
+        error: "Creatomate did not return render id",
+        raw: start,
+      });
     }
 
-    return json(res, 200, { ok: true, renderId: start.id, status: start.status || "planned" });
+    return json(res, 200, { ok: true, renderId, status: first?.status || "queued" });
   } catch (e) {
     console.error(e);
     return json(res, 500, { ok: false, error: String(e?.message || e) });
