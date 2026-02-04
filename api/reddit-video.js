@@ -1,15 +1,6 @@
 // api/reddit-video.js (CommonJS, Node 18+)
-// POST starts a Creatomate render (template mode)
+// POST starts a Creatomate render
 // GET polls status
-//
-// Expects POST body:
-// {
-//   username, mode, pfpUrl,
-//   postTitle, postText,
-//   likes, comments, shareText,
-//   script,
-//   backgroundVideoUrl
-// }
 //
 // Env:
 // - CREATOMATE_API_KEY
@@ -74,21 +65,20 @@ function creatomateRequest(path, method, payload) {
         headers: {
           Authorization: `Bearer ${CREATOMATE_API_KEY}`,
           "Content-Type": "application/json",
-          "Content-Length": Buffer.byteLength(body),
+          ...(body ? { "Content-Length": Buffer.byteLength(body) } : {}),
         },
       },
       (res) => {
         let out = "";
         res.on("data", (c) => (out += c));
         res.on("end", () => {
-          let j = {};
+          let j;
           try {
             j = JSON.parse(out || "{}");
           } catch {
             j = { raw: out };
           }
           if (res.statusCode >= 200 && res.statusCode < 300) return resolve(j);
-
           const msg = j?.error || j?.message || j?.raw || `Creatomate HTTP ${res.statusCode}`;
           reject(new Error(msg));
         });
@@ -113,73 +103,89 @@ function normalizeMode(v) {
 
 /**
  * IMPORTANT:
- * Creatomate template modifications must be a flat object with dot-keys:
- *   "element.property": value
- * For text: ".text"
- * For images/videos: ".source"
- * For groups/shapes: ".opacity"
+ * Your template layer names (from your screenshot) include:
+ * post_card_light, post_card_dark
+ * post_bg_light, post_bg_dark
+ * username_light, username_dark
+ * pfp_light, pfp_dark
+ * post_text (and sometimes post_text_light/dark)
+ * like_count, comment_count, share (and sometimes *_light/dark)
+ * Video (video layer)
+ *
+ * Biggest “card not showing” cause:
+ * the group is hidden, not just opacity=0 → so we force hidden=false too.
  */
-function buildModifications(payload) {
-  const mode = normalizeMode(payload.mode);
-
-  const username = safeStr(payload.username, "Nofacelabs.ai");
-  const postText = safeStr(payload.postText || payload.postTitle, "—");
-  const likes = safeStr(payload.likes, "99+");
-  const comments = safeStr(payload.comments, "99+");
-  const shareText = safeStr(payload.shareText, "share");
-  const pfpUrl = safeStr(payload.pfpUrl, "");
-  const bgUrl = safeStr(payload.backgroundVideoUrl || payload.backgroundUrl, "");
-
+function buildModifications(body) {
+  const mode = normalizeMode(body.mode);
   const showLight = mode === "light";
   const showDark = mode === "dark";
 
-  const mods = {
-    // --- TEXT (set BOTH where your template has light/dark variants) ---
-    "username_light.text": username,
-    "username_dark.text": username,
+  const username = safeStr(body.username, "Nofacelabs.ai");
+  const postText = safeStr(body.postText || body.postTitle, "—");
+  const likes = safeStr(body.likes, "99+");
+  const comments = safeStr(body.comments, "99+");
+  const shareText = safeStr(body.shareText, "share");
+  const pfpUrl = safeStr(body.pfpUrl, "");
+  const bgUrl = safeStr(body.backgroundVideoUrl || body.backgroundVideoUrl, "");
 
-    // Your template uses post_text in both cards (per your screenshot)
-    "post_text.text": postText,
-    // If you also created variants later, set them too (harmless if missing)
-    "post_text_light.text": postText,
-    "post_text_dark.text": postText,
+  // Creatomate expects "modifications" to be an OBJECT.
+  const m = {};
 
-    "like_count.text": likes,
-    "like_count_light.text": likes,
-    "like_count_dark.text": likes,
+  // ---- FORCE CARD VISIBILITY ----
+  // If your template uses hidden=true anywhere, opacity won't matter.
+  m["post_card_light.opacity"] = showLight ? 1 : 0;
+  m["post_card_light.hidden"] = !showLight ? true : false;
 
-    "comment_count.text": comments,
-    "comment_count_light.text": comments,
-    "comment_count_dark.text": comments,
+  m["post_card_dark.opacity"] = showDark ? 1 : 0;
+  m["post_card_dark.hidden"] = !showDark ? true : false;
 
-    // share text exists in both cards in some versions
-    "share.text": shareText,
-    "share_light.text": shareText,
-    "share_dark.text": shareText,
+  // Background rects under the card (in your layer list)
+  m["post_bg_light.opacity"] = showLight ? 1 : 0;
+  m["post_bg_light.hidden"] = !showLight ? true : false;
 
-    // --- PFP (your screenshot shows pfp_light and pfp_dark) ---
-    ...(pfpUrl
-      ? {
-          "pfp_light.source": pfpUrl,
-          "pfp_dark.source": pfpUrl,
-          // if you ever still have old name "pfp" somewhere, also set it
-          "pfp.source": pfpUrl,
-        }
-      : {}),
+  m["post_bg_dark.opacity"] = showDark ? 1 : 0;
+  m["post_bg_dark.hidden"] = !showDark ? true : false;
 
-    // --- Background video layer ---
-    ...(bgUrl ? { "Video.source": bgUrl } : {}),
+  // ---- TEXT (set BOTH base + light/dark variants) ----
+  // Username
+  m["username.text"] = username;
+  m["username_light.text"] = username;
+  m["username_dark.text"] = username;
 
-    // --- SHOW/HIDE cards ---
-    "post_card_light.opacity": showLight ? 1 : 0,
-    "post_card_dark.opacity": showDark ? 1 : 0,
+  // Post text
+  m["post_text.text"] = postText;
+  m["post_text_light.text"] = postText;
+  m["post_text_dark.text"] = postText;
 
-    // --- Background shapes (your screenshot shows post_bg_light / post_bg_dark) ---
-    "post_bg_light.opacity": showLight ? 1 : 0,
-    "post_bg_dark.opacity": showDark ? 1 : 0,
-  };
+  // Like count
+  m["like_count.text"] = likes;
+  m["like_count_light.text"] = likes;
+  m["like_count_dark.text"] = likes;
 
-  return mods;
+  // Comment count
+  m["comment_count.text"] = comments;
+  m["comment_count_light.text"] = comments;
+  m["comment_count_dark.text"] = comments;
+
+  // Share label
+  m["share.text"] = shareText;
+  m["share_light.text"] = shareText;
+  m["share_dark.text"] = shareText;
+
+  // ---- IMAGES ----
+  // PFP: set both variants + base if it exists
+  if (pfpUrl) {
+    m["pfp.source"] = pfpUrl;
+    m["pfp_light.source"] = pfpUrl;
+    m["pfp_dark.source"] = pfpUrl;
+  }
+
+  // ---- VIDEO ----
+  if (bgUrl) {
+    m["Video.source"] = bgUrl;
+  }
+
+  return m;
 }
 
 module.exports = async function handler(req, res) {
@@ -201,12 +207,7 @@ module.exports = async function handler(req, res) {
       const status = String(r?.status || "").toLowerCase();
       const finalUrl = r?.url || r?.result?.url || r?.outputs?.[0]?.url || "";
 
-      return json(res, 200, {
-        ok: true,
-        status,
-        url: finalUrl || null,
-        raw: finalUrl ? undefined : r,
-      });
+      return json(res, 200, { ok: true, status, url: finalUrl || null });
     }
 
     // ---- POST: start render ----
@@ -216,51 +217,44 @@ module.exports = async function handler(req, res) {
 
     const body = await readBody(req);
 
-    const payload = {
-      username: body.username,
-      mode: body.mode,
-      pfpUrl: body.pfpUrl,
-      postTitle: body.postTitle,
-      postText: body.postText,
-      likes: body.likes,
-      comments: body.comments,
-      shareText: body.shareText,
-      script: body.script, // not used in template yet
-      backgroundVideoUrl: body.backgroundVideoUrl || body.backgroundUrl,
-    };
+    const username = safeStr(body.username);
+    const postText = safeStr(body.postText || body.postTitle);
+    const backgroundVideoUrl = safeStr(body.backgroundVideoUrl);
 
-    if (!safeStr(payload.username)) {
-      return json(res, 400, { ok: false, error: "Missing username" });
-    }
-    if (!safeStr(payload.postText || payload.postTitle)) {
-      return json(res, 400, { ok: false, error: "Missing postText" });
-    }
-    if (!safeStr(payload.backgroundVideoUrl)) {
+    if (!username) return json(res, 400, { ok: false, error: "Missing username" });
+    if (!postText) return json(res, 400, { ok: false, error: "Missing postText" });
+    if (!backgroundVideoUrl) {
       return json(res, 400, { ok: false, error: "Missing backgroundVideoUrl (use library for now)" });
     }
 
-    const modifications = buildModifications(payload);
+    const modifications = buildModifications(body);
 
     // Start render (template mode)
-    const start = await creatomateRequest("/v1/renders", "POST", {
+    const startResp = await creatomateRequest("/v1/renders", "POST", {
       template_id: TEMPLATE_ID,
-      modifications, // ✅ flat dot-key object
+      modifications,
       output_format: "mp4",
+      render_scale: 1,
     });
 
-    // Creatomate sometimes returns an array
-    const first = Array.isArray(start) ? start[0] : start;
-    const renderId = first?.id;
+    // Creatomate sometimes returns an array: [ { id, ... } ]
+    const start = Array.isArray(startResp) ? startResp[0] : startResp;
 
+    const renderId = start?.id;
     if (!renderId) {
       return json(res, 500, {
         ok: false,
         error: "Creatomate did not return render id",
-        raw: start,
+        raw: startResp,
       });
     }
 
-    return json(res, 200, { ok: true, renderId, status: first?.status || "queued" });
+    return json(res, 200, {
+      ok: true,
+      renderId,
+      status: start?.status || "queued",
+      modificationsPreview: modifications, // 👈 super helpful for debugging
+    });
   } catch (e) {
     console.error(e);
     return json(res, 500, { ok: false, error: String(e?.message || e) });
