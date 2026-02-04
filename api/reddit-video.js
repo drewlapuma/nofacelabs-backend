@@ -103,17 +103,8 @@ function normalizeMode(v) {
 
 /**
  * IMPORTANT:
- * Your template layer names (from your screenshot) include:
- * post_card_light, post_card_dark
- * post_bg_light, post_bg_dark
- * username_light, username_dark
- * pfp_light, pfp_dark
- * post_text (and sometimes post_text_light/dark)
- * like_count, comment_count, share (and sometimes *_light/dark)
- * Video (video layer)
- *
- * Biggest “card not showing” cause:
- * the group is hidden, not just opacity=0 → so we force hidden=false too.
+ * Creatomate opacity is 0–100 (NOT 0–1).
+ * If hidden=true anywhere, opacity won't matter, so we force hidden=false too.
  */
 function buildModifications(body) {
   const mode = normalizeMode(body.mode);
@@ -126,54 +117,60 @@ function buildModifications(body) {
   const comments = safeStr(body.comments, "99+");
   const shareText = safeStr(body.shareText, "share");
   const pfpUrl = safeStr(body.pfpUrl, "");
-  const bgUrl = safeStr(body.backgroundVideoUrl || body.backgroundVideoUrl, "");
+  const bgUrl = safeStr(body.backgroundVideoUrl, "");
 
-  // Creatomate expects "modifications" to be an OBJECT.
+  // Creatomate expects "modifications" to be an OBJECT
   const m = {};
 
-  // ---- FORCE CARD VISIBILITY ----
-  // If your template uses hidden=true anywhere, opacity won't matter.
-  m["post_card_light.opacity"] = showLight ? 1 : 0;
-  m["post_card_light.hidden"] = !showLight ? true : false;
+  // helper: force visible + set opacity as percent
+  function forceVisible(name, visible = true) {
+    if (!name) return;
+    m[`${name}.hidden`] = !visible;
+    m[`${name}.opacity`] = visible ? 100 : 0;
+  }
 
-  m["post_card_dark.opacity"] = showDark ? 1 : 0;
-  m["post_card_dark.hidden"] = !showDark ? true : false;
+  // ---- CARD VISIBILITY (LIGHT/DARK) ----
+  // Always un-hide both groups; then control visibility via opacity
+  // (This avoids “it’s hidden so opacity doesn’t matter” problems.)
+  m["post_card_light.hidden"] = false;
+  m["post_card_dark.hidden"] = false;
+  m["post_bg_light.hidden"] = false;
+  m["post_bg_dark.hidden"] = false;
 
-  // Background rects under the card (in your layer list)
-  m["post_bg_light.opacity"] = showLight ? 1 : 0;
-  m["post_bg_light.hidden"] = !showLight ? true : false;
+  m["post_card_light.opacity"] = showLight ? 100 : 0;
+  m["post_card_dark.opacity"] = showDark ? 100 : 0;
 
-  m["post_bg_dark.opacity"] = showDark ? 1 : 0;
-  m["post_bg_dark.hidden"] = !showDark ? true : false;
+  m["post_bg_light.opacity"] = showLight ? 100 : 0;
+  m["post_bg_dark.opacity"] = showDark ? 100 : 0;
 
-  // ---- TEXT (set BOTH base + light/dark variants) ----
-  // Username
+  // If you prefer the strict version instead (hide the inactive one), use:
+  // forceVisible("post_card_light", showLight);
+  // forceVisible("post_card_dark", showDark);
+  // forceVisible("post_bg_light", showLight);
+  // forceVisible("post_bg_dark", showDark);
+
+  // ---- TEXT (set base + light/dark variants) ----
   m["username.text"] = username;
   m["username_light.text"] = username;
   m["username_dark.text"] = username;
 
-  // Post text
   m["post_text.text"] = postText;
   m["post_text_light.text"] = postText;
   m["post_text_dark.text"] = postText;
 
-  // Like count
   m["like_count.text"] = likes;
   m["like_count_light.text"] = likes;
   m["like_count_dark.text"] = likes;
 
-  // Comment count
   m["comment_count.text"] = comments;
   m["comment_count_light.text"] = comments;
   m["comment_count_dark.text"] = comments;
 
-  // Share label
   m["share.text"] = shareText;
   m["share_light.text"] = shareText;
   m["share_dark.text"] = shareText;
 
   // ---- IMAGES ----
-  // PFP: set both variants + base if it exists
   if (pfpUrl) {
     m["pfp.source"] = pfpUrl;
     m["pfp_light.source"] = pfpUrl;
@@ -253,7 +250,7 @@ module.exports = async function handler(req, res) {
       ok: true,
       renderId,
       status: start?.status || "queued",
-      modificationsPreview: modifications, // 👈 super helpful for debugging
+      modificationsPreview: modifications, // helpful debugging
     });
   } catch (e) {
     console.error(e);
