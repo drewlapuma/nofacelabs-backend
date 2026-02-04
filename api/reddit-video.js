@@ -1,20 +1,4 @@
 // api/reddit-video.js (CommonJS, Node 18+)
-// POST starts a Creatomate template render
-// GET polls status
-//
-// POST body expected:
-// {
-//   username, mode, pfpUrl,
-//   postTitle, postText,
-//   likes, comments, shareText,
-//   script,
-//   backgroundVideoUrl
-// }
-//
-// Env:
-// - CREATOMATE_API_KEY
-// - CREATOMATE_TEMPLATE_ID_REDDIT
-// - ALLOW_ORIGIN or ALLOW_ORIGINS (optional)
 
 const https = require("https");
 
@@ -82,7 +66,7 @@ function pickBackgroundUrl(body) {
   );
 }
 
-// ✅ Creatomate request wrapper that returns { ok, status, json, raw }
+// returns { ok, status, json, raw }
 function creatomateRequest(path, method, payload) {
   return new Promise((resolve, reject) => {
     if (!CREATOMATE_API_KEY) return reject(new Error("Missing CREATOMATE_API_KEY"));
@@ -129,18 +113,7 @@ function creatomateRequest(path, method, payload) {
 }
 
 /**
- * ✅ IMPORTANT: For TEMPLATE renders, modifications MUST BE AN OBJECT.
- * Keys must match your layer names exactly:
- * - username
- * - post_text
- * - like_count
- * - comment_count
- * - share
- * - pfp
- * - post_card_light
- * - post_card_dark
- * - post_bg_dark (optional)
- * - Video
+ * ✅ TEMPLATE renders require modifications to be an OBJECT keyed by layer name
  */
 function buildModificationsObject(payload) {
   const mode = normalizeMode(payload.mode);
@@ -158,28 +131,31 @@ function buildModificationsObject(payload) {
   const showDark = mode === "dark";
 
   const mods = {
-    // text layers
     username: { text: username },
     post_text: { text: postText },
     like_count: { text: likes },
     comment_count: { text: comments },
     share: { text: shareText },
 
-    // show/hide groups (opacity works on groups/shapes)
     post_card_light: { opacity: showLight ? 1 : 0 },
     post_card_dark: { opacity: showDark ? 1 : 0 },
 
-    // optional
+    // ok if it exists, ignored if it doesn't
     post_bg_dark: { opacity: showDark ? 1 : 0 },
   };
 
-  // image layer
   if (pfpUrl) mods.pfp = { source: pfpUrl };
-
-  // video layer
-  if (bgUrl) mods.Video = { source: bgUrl };
+  if (bgUrl) mods.Video = { source: bgUrl }; // layer name must match your template
 
   return mods;
+}
+
+/** ✅ Creatomate sometimes returns ARRAY for /v1/renders POST */
+function unwrapCreatomateStart(jsonVal) {
+  if (!jsonVal) return null;
+  if (Array.isArray(jsonVal)) return jsonVal[0] || null;
+  if (typeof jsonVal === "object") return jsonVal;
+  return null;
 }
 
 module.exports = async function handler(req, res) {
@@ -241,64 +217,38 @@ module.exports = async function handler(req, res) {
     if (!safeStr(payload.username)) return json(res, 400, { ok: false, error: "Missing username" });
     if (!safeStr(payload.postText)) return json(res, 400, { ok: false, error: "Missing postText" });
     if (!safeStr(payload.backgroundVideoUrl)) {
-      return json(res, 400, {
-        ok: false,
-        error: "Missing backgroundVideoUrl (your frontend isn’t sending it)",
-      });
+      return json(res, 400, { ok: false, error: "Missing backgroundVideoUrl" });
     }
 
     const modifications = buildModificationsObject(payload);
 
-    // ✅ debug
-    console.log("[reddit-video] start payload:", {
-      template_id: TEMPLATE_ID,
-      mode: payload.mode,
-      backgroundVideoUrl: payload.backgroundVideoUrl,
-      pfpUrl: payload.pfpUrl ? "(set)" : "(empty)",
-      postTextLen: String(payload.postText || "").length,
-      keys: Object.keys(modifications),
-    });
-
     const start = await creatomateRequest("/v1/renders", "POST", {
       template_id: TEMPLATE_ID,
-
-      // ✅ FIX: must be an OBJECT, not array
       modifications,
-
-      // Optional but fine:
       output_format: "mp4",
     });
 
     if (!start.ok) {
-      console.error("[reddit-video] Creatomate failed:", start.status, start.raw);
       return json(res, 400, {
         ok: false,
         error: "Creatomate HTTP " + start.status,
         status: start.status,
         creatomate: start.json || start.raw,
-        sent: {
-          template_id: TEMPLATE_ID,
-          backgroundVideoUrl: payload.backgroundVideoUrl,
-          pfpUrl: payload.pfpUrl,
-          mode: payload.mode,
-          modificationsKeys: Object.keys(modifications),
-          modifications,
-        },
       });
     }
 
-    const startJson = start.json || {};
-    const renderId = startJson?.id;
+    const startData = unwrapCreatomateStart(start.json);
+    const renderId = startData?.id;
 
     if (!renderId) {
       return json(res, 500, {
         ok: false,
         error: "Creatomate did not return render id",
-        raw: startJson,
+        raw: start.json,
       });
     }
 
-    return json(res, 200, { ok: true, renderId, status: startJson?.status || "queued" });
+    return json(res, 200, { ok: true, renderId, status: startData?.status || "queued" });
   } catch (e) {
     console.error(e);
     return json(res, 500, { ok: false, error: String(e?.message || e) });
