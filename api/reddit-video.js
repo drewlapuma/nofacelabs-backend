@@ -1,4 +1,20 @@
 // api/reddit-video.js (CommonJS, Node 18+)
+// POST starts a Creatomate render
+// GET polls status
+//
+// Expected POST body (from Webflow UI):
+// {
+//   username, mode, pfpUrl,
+//   postTitle, postText,
+//   likes, comments, shareText,
+//   script,
+//   backgroundVideoUrl, backgroundVideoName
+// }
+//
+// Env:
+// - CREATOMATE_API_KEY
+// - CREATOMATE_TEMPLATE_ID_REDDIT
+// - ALLOW_ORIGIN or ALLOW_ORIGINS (optional)
 
 const https = require("https");
 
@@ -45,28 +61,6 @@ function readBody(req) {
   });
 }
 
-function safeStr(v, fallback = "") {
-  const s = String(v ?? "").trim();
-  return s || fallback;
-}
-
-function normalizeMode(v) {
-  const s = String(v || "").toLowerCase().trim();
-  return s === "dark" ? "dark" : "light";
-}
-
-function pickBackgroundUrl(body) {
-  return (
-    safeStr(body.backgroundVideoUrl) ||
-    safeStr(body.background_url) ||
-    safeStr(body.backgroundUrl) ||
-    safeStr(body.bgUrl) ||
-    safeStr(body.bg_url) ||
-    ""
-  );
-}
-
-// returns { ok, status, json, raw }
 function creatomateRequest(path, method, payload) {
   return new Promise((resolve, reject) => {
     if (!CREATOMATE_API_KEY) return reject(new Error("Missing CREATOMATE_API_KEY"));
@@ -87,21 +81,15 @@ function creatomateRequest(path, method, payload) {
         let out = "";
         res.on("data", (c) => (out += c));
         res.on("end", () => {
-          const status = res.statusCode || 0;
-
-          let parsed = null;
+          let j = {};
           try {
-            parsed = JSON.parse(out || "{}");
+            j = JSON.parse(out || "{}");
           } catch {
-            parsed = null;
+            j = { raw: out };
           }
-
-          resolve({
-            ok: status >= 200 && status < 300,
-            status,
-            json: parsed,
-            raw: out,
-          });
+          if (res.statusCode >= 200 && res.statusCode < 300) return resolve(j);
+          const msg = j?.error || j?.message || j?.raw || `Creatomate HTTP ${res.statusCode}`;
+          reject(new Error(msg));
         });
       }
     );
@@ -112,14 +100,69 @@ function creatomateRequest(path, method, payload) {
   });
 }
 
+function safeStr(v, fallback = "") {
+  const s = String(v ?? "").trim();
+  return s || fallback;
+}
+
+function normalizeMode(v) {
+  const s = String(v || "").toLowerCase().trim();
+  return s === "dark" ? "dark" : "light";
+}
+
+function parseUrlParam(req, key) {
+  try {
+    const url = new URL(req.url, "http://localhost");
+    return url.searchParams.get(key);
+  } catch {
+    return null;
+  }
+}
+
+// ---- helpers to build modifications as OBJECT ----
+function setText(mods, names, text) {
+  const t = safeStr(text, "");
+  if (!t) return;
+  (Array.isArray(names) ? names : [names]).forEach((name) => {
+    mods[name] = { text: t };
+  });
+}
+
+function setOpacity(mods, names, opacity) {
+  (Array.isArray(names) ? names : [names]).forEach((name) => {
+    mods[name] = { opacity: Number(opacity) };
+  });
+}
+
+function setImage(mods, names, url) {
+  const u = safeStr(url, "");
+  if (!u) return;
+  (Array.isArray(names) ? names : [names]).forEach((name) => {
+    mods[name] = { source: u };
+  });
+}
+
+function setVideo(mods, names, url) {
+  const u = safeStr(url, "");
+  if (!u) return;
+  (Array.isArray(names) ? names : [names]).forEach((name) => {
+    mods[name] = { source: u };
+  });
+}
+
 /**
- * ✅ TEMPLATE renders require modifications to be an OBJECT keyed by layer name
+ * IMPORTANT:
+ * If your template layer names are different (case sensitive),
+ * this sends multiple aliases so at least one hits.
+ *
+ * You can still simplify later by renaming your Creatomate layers
+ * to ONE consistent naming scheme.
  */
-function buildModificationsObject(payload) {
+function buildModifications(payload) {
   const mode = normalizeMode(payload.mode);
 
   const username = safeStr(payload.username, "Nofacelabs.ai");
-  const postText = safeStr(payload.postText, "—");
+  const postText = safeStr(payload.postText || payload.postTitle, "—");
   const likes = safeStr(payload.likes, "99+");
   const comments = safeStr(payload.comments, "99+");
   const shareText = safeStr(payload.shareText, "share");
@@ -127,40 +170,43 @@ function buildModificationsObject(payload) {
   const pfpUrl = safeStr(payload.pfpUrl, "");
   const bgUrl = safeStr(payload.backgroundVideoUrl, "");
 
+  const mods = {};
+
+  // ---- TEXT aliases (hit whichever exists) ----
+  setText(mods, ["username", "Username", "user_name", "user"], username);
+
+  // Your screenshot said: post_text
+  // But templates often use: postTitle, title, post_title, postText, etc.
+  setText(mods, ["post_text", "postText", "post_title", "postTitle", "title", "Title"], postText);
+
+  setText(mods, ["like_count", "likes", "Likes", "likeCount"], likes);
+  setText(mods, ["comment_count", "comments", "Comments", "commentCount"], comments);
+  setText(mods, ["share", "share_text", "shareText", "Share"], shareText);
+
+  // ---- THEME group aliases ----
   const showLight = mode === "light";
   const showDark = mode === "dark";
 
-  const mods = {
-    username: { text: username },
-    post_text: { text: postText },
-    like_count: { text: likes },
-    comment_count: { text: comments },
-    share: { text: shareText },
+  // If these are groups/shapes in your template, opacity works
+  setOpacity(mods, ["post_card_light", "card_light", "light_card", "postCardLight"], showLight ? 1 : 0);
+  setOpacity(mods, ["post_card_dark", "card_dark", "dark_card", "postCardDark"], showDark ? 1 : 0);
+  setOpacity(mods, ["post_bg_dark", "bg_dark", "dark_bg", "postBgDark"], showDark ? 1 : 0);
 
-    post_card_light: { opacity: showLight ? 1 : 0 },
-    post_card_dark: { opacity: showDark ? 1 : 0 },
+  // ---- MEDIA aliases ----
+  setImage(mods, ["pfp", "PFP", "avatar", "profile_pic", "profile_picture"], pfpUrl);
 
-    // ok if it exists, ignored if it doesn't
-    post_bg_dark: { opacity: showDark ? 1 : 0 },
-  };
-
-  if (pfpUrl) mods.pfp = { source: pfpUrl };
-  if (bgUrl) mods.Video = { source: bgUrl }; // layer name must match your template
+  // Your screenshot said: Video
+  // Some templates use: background, bg_video, gameplay, etc.
+  setVideo(mods, ["Video", "video", "background", "background_video", "backgroundVideo", "gameplay"], bgUrl);
 
   return mods;
-}
-
-/** ✅ Creatomate sometimes returns ARRAY for /v1/renders POST */
-function unwrapCreatomateStart(jsonVal) {
-  if (!jsonVal) return null;
-  if (Array.isArray(jsonVal)) return jsonVal[0] || null;
-  if (typeof jsonVal === "object") return jsonVal;
-  return null;
 }
 
 module.exports = async function handler(req, res) {
   setCors(req, res);
   if (req.method === "OPTIONS") return res.end();
+
+  const debug = parseUrlParam(req, "debug") === "1";
 
   try {
     if (!TEMPLATE_ID) {
@@ -174,24 +220,14 @@ module.exports = async function handler(req, res) {
       if (!id) return json(res, 400, { ok: false, error: "Missing id" });
 
       const r = await creatomateRequest(`/v1/renders/${encodeURIComponent(id)}`, "GET");
-      if (!r.ok) {
-        return json(res, 400, {
-          ok: false,
-          error: "Creatomate poll error",
-          status: r.status,
-          creatomate: r.json || r.raw,
-        });
-      }
-
-      const data = r.json || {};
-      const status = String(data?.status || "").toLowerCase();
-      const finalUrl = data?.url || data?.result?.url || data?.outputs?.[0]?.url || "";
+      const status = String(r?.status || "").toLowerCase();
+      const finalUrl = r?.url || r?.result?.url || r?.outputs?.[0]?.url || "";
 
       return json(res, 200, {
         ok: true,
         status,
         url: finalUrl || null,
-        raw: finalUrl ? undefined : data,
+        raw: debug ? r : undefined,
       });
     }
 
@@ -202,53 +238,61 @@ module.exports = async function handler(req, res) {
 
     const body = await readBody(req);
 
+    // Accept a few possible background keys (your UI uses backgroundVideoUrl)
+    const backgroundVideoUrl =
+      body.backgroundVideoUrl ||
+      body.background_video_url ||
+      body.background ||
+      body.videoUrl ||
+      body.bgUrl ||
+      "";
+
     const payload = {
       username: body.username,
       mode: body.mode,
       pfpUrl: body.pfpUrl,
-      postText: body.postText || body.post_title || body.postTitle || "",
+      postTitle: body.postTitle,
+      postText: body.postText,
       likes: body.likes,
       comments: body.comments,
       shareText: body.shareText,
       script: body.script,
-      backgroundVideoUrl: pickBackgroundUrl(body),
+      backgroundVideoUrl,
     };
 
     if (!safeStr(payload.username)) return json(res, 400, { ok: false, error: "Missing username" });
-    if (!safeStr(payload.postText)) return json(res, 400, { ok: false, error: "Missing postText" });
-    if (!safeStr(payload.backgroundVideoUrl)) {
-      return json(res, 400, { ok: false, error: "Missing backgroundVideoUrl" });
-    }
+    if (!safeStr(payload.postText || payload.postTitle))
+      return json(res, 400, { ok: false, error: "Missing postText/postTitle" });
+    if (!safeStr(payload.backgroundVideoUrl))
+      return json(res, 400, { ok: false, error: "Missing backgroundVideoUrl (use library for now)" });
 
-    const modifications = buildModificationsObject(payload);
+    const modifications = buildModifications(payload);
 
+    // Start render (template mode)
     const start = await creatomateRequest("/v1/renders", "POST", {
       template_id: TEMPLATE_ID,
-      modifications,
+      modifications, // ✅ must be OBJECT
       output_format: "mp4",
     });
 
-    if (!start.ok) {
-      return json(res, 400, {
-        ok: false,
-        error: "Creatomate HTTP " + start.status,
-        status: start.status,
-        creatomate: start.json || start.raw,
-      });
-    }
-
-    const startData = unwrapCreatomateStart(start.json);
-    const renderId = startData?.id;
+    // Creatomate sometimes returns an ARRAY with one render when batching is enabled
+    const renderId = start?.id || (Array.isArray(start) ? start?.[0]?.id : null);
 
     if (!renderId) {
       return json(res, 500, {
         ok: false,
         error: "Creatomate did not return render id",
-        raw: start.json,
+        raw: debug ? start : undefined,
       });
     }
 
-    return json(res, 200, { ok: true, renderId, status: startData?.status || "queued" });
+    return json(res, 200, {
+      ok: true,
+      renderId,
+      status: start?.status || (Array.isArray(start) ? start?.[0]?.status : "queued"),
+      // helpful debug so you can confirm keys being sent
+      sent: debug ? { template_id: TEMPLATE_ID, modifications } : undefined,
+    });
   } catch (e) {
     console.error(e);
     return json(res, 500, { ok: false, error: String(e?.message || e) });
