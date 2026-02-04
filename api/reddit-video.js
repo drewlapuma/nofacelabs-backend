@@ -13,7 +13,7 @@
 //
 // Env:
 // - CREATOMATE_API_KEY
-// - CREATOMATE_TEMPLATE_ID_REDDIT   (your template ID)
+// - CREATOMATE_TEMPLATE_ID_REDDIT
 // - ALLOW_ORIGIN or ALLOW_ORIGINS (optional)
 
 const https = require("https");
@@ -61,6 +61,21 @@ function readBody(req) {
   });
 }
 
+function safeStr(v, fallback = "") {
+  const s = String(v ?? "").trim();
+  return s || fallback;
+}
+
+function normalizeMode(v) {
+  const s = String(v || "").toLowerCase().trim();
+  return s === "dark" ? "dark" : "light";
+}
+
+/**
+ * ✅ NEW: Creatomate request that NEVER throws.
+ * It returns: { ok, status, raw, json }
+ * So we can forward Creatomate's real error back to the browser.
+ */
 function creatomateRequest(path, method, payload) {
   return new Promise((resolve, reject) => {
     if (!CREATOMATE_API_KEY) return reject(new Error("Missing CREATOMATE_API_KEY"));
@@ -81,15 +96,21 @@ function creatomateRequest(path, method, payload) {
         let out = "";
         res.on("data", (c) => (out += c));
         res.on("end", () => {
-          let j = {};
+          const status = res.statusCode || 0;
+
+          let parsed = null;
           try {
-            j = JSON.parse(out || "{}");
+            parsed = JSON.parse(out || "{}");
           } catch {
-            j = { raw: out };
+            parsed = null;
           }
-          if (res.statusCode >= 200 && res.statusCode < 300) return resolve(j);
-          const msg = j?.error || j?.message || j?.raw || `Creatomate HTTP ${res.statusCode}`;
-          reject(new Error(msg));
+
+          resolve({
+            ok: status >= 200 && status < 300,
+            status,
+            raw: out,
+            json: parsed,
+          });
         });
       }
     );
@@ -100,31 +121,21 @@ function creatomateRequest(path, method, payload) {
   });
 }
 
-function safeStr(v, fallback = "") {
-  const s = String(v ?? "").trim();
-  return s || fallback;
-}
-
-function normalizeMode(v) {
-  const s = String(v || "").toLowerCase().trim();
-  return s === "dark" ? "dark" : "light";
-}
-
 // ---- IMPORTANT: LAYER NAMES (from your screenshot) ----
 // Text:
 //  - username
 //  - post_text
 //  - like_count
 //  - comment_count
-//  - share        (text next to share icon)
+//  - share
 // Images:
 //  - pfp
 // Groups / shapes:
 //  - post_card_light
 //  - post_card_dark
-//  - post_bg_dark  (optional; exists in your layer list)
+//  - post_bg_dark (optional)
 // Video:
-//  - Video         (I saw "Video" in your layer list)
+//  - Video
 function buildModifications(payload) {
   const mode = normalizeMode(payload.mode);
 
@@ -133,6 +144,7 @@ function buildModifications(payload) {
   const likes = safeStr(payload.likes, "99+");
   const comments = safeStr(payload.comments, "99+");
   const shareText = safeStr(payload.shareText, "share");
+
   const pfpUrl = safeStr(payload.pfpUrl, "");
   const bgUrl = safeStr(payload.backgroundVideoUrl, "");
 
@@ -140,33 +152,36 @@ function buildModifications(payload) {
   const showDark = mode === "dark";
 
   const mods = [
-    // --- text fields ---
     { name: "username", type: "text", text: username },
     { name: "post_text", type: "text", text: postText },
     { name: "like_count", type: "text", text: likes },
     { name: "comment_count", type: "text", text: comments },
     { name: "share", type: "text", text: shareText },
 
-    // --- theme toggle (show one card, hide the other) ---
-    // Creatomate supports "opacity" on any element, including groups.
     { name: "post_card_light", type: "shape", opacity: showLight ? 1 : 0 },
     { name: "post_card_dark", type: "shape", opacity: showDark ? 1 : 0 },
-
-    // Optional: if you use a dark background rect
     { name: "post_bg_dark", type: "shape", opacity: showDark ? 1 : 0 },
 
-    // --- gameplay video ---
-    // Set your gameplay layer named "Video"
     ...(bgUrl ? [{ name: "Video", type: "video", source: bgUrl }] : []),
   ];
 
-  // --- profile picture ---
-  // If empty, your template's default stays.
-  if (pfpUrl) {
-    mods.push({ name: "pfp", type: "image", source: pfpUrl });
-  }
+  if (pfpUrl) mods.push({ name: "pfp", type: "image", source: pfpUrl });
 
   return mods;
+}
+
+/**
+ * ✅ NEW: accept background url from multiple keys (frontend may change names)
+ */
+function pickBackgroundUrl(body) {
+  return (
+    safeStr(body.backgroundVideoUrl) ||
+    safeStr(body.background_url) ||
+    safeStr(body.backgroundUrl) ||
+    safeStr(body.bgUrl) ||
+    safeStr(body.bg_url) ||
+    ""
+  );
 }
 
 module.exports = async function handler(req, res) {
@@ -185,17 +200,25 @@ module.exports = async function handler(req, res) {
       if (!id) return json(res, 400, { ok: false, error: "Missing id" });
 
       const r = await creatomateRequest(`/v1/renders/${encodeURIComponent(id)}`, "GET");
-      const status = String(r?.status || "").toLowerCase();
+      if (!r.ok) {
+        // ✅ forward Creatomate error
+        return json(res, 400, {
+          ok: false,
+          error: "Creatomate poll error",
+          status: r.status,
+          creatomate: r.json || r.raw,
+        });
+      }
 
-      // Creatomate usually returns result URL in "url"
-      // Sometimes "result" or "outputs" exist depending on API mode.
-      const finalUrl = r?.url || r?.result?.url || r?.outputs?.[0]?.url || "";
+      const data = r.json || {};
+      const status = String(data?.status || "").toLowerCase();
+      const finalUrl = data?.url || data?.result?.url || data?.outputs?.[0]?.url || "";
 
       return json(res, 200, {
         ok: true,
         status,
         url: finalUrl || null,
-        raw: finalUrl ? undefined : r,
+        raw: finalUrl ? undefined : data,
       });
     }
 
@@ -210,37 +233,76 @@ module.exports = async function handler(req, res) {
       username: body.username,
       mode: body.mode,
       pfpUrl: body.pfpUrl,
-      postText: body.postText,
+      postText: body.postText || body.post_title || body.postTitle || "", // accept alternates
       likes: body.likes,
       comments: body.comments,
       shareText: body.shareText,
-      script: body.script, // (not used in template yet; you’ll use this later for voice/captions)
-      backgroundVideoUrl: body.backgroundVideoUrl,
+      script: body.script, // not used in template yet
+      backgroundVideoUrl: pickBackgroundUrl(body),
     };
 
     if (!safeStr(payload.username)) return json(res, 400, { ok: false, error: "Missing username" });
     if (!safeStr(payload.postText)) return json(res, 400, { ok: false, error: "Missing postText" });
-    if (!safeStr(payload.backgroundVideoUrl))
-      return json(res, 400, { ok: false, error: "Missing backgroundVideoUrl (use library for now)" });
+    if (!safeStr(payload.backgroundVideoUrl)) {
+      return json(res, 400, {
+        ok: false,
+        error:
+          "Missing backgroundVideoUrl. (Your frontend is not sending it — check your library 'setBackground' event and payload build.)",
+      });
+    }
 
     const modifications = buildModifications(payload);
 
-    // Start render (template mode)
+    // ✅ Helpful debug (shows you exactly what you are sending)
+    console.log("[reddit-video] payload:", {
+      username: payload.username,
+      mode: payload.mode,
+      pfpUrl: payload.pfpUrl ? "(set)" : "(empty)",
+      postTextLen: String(payload.postText || "").length,
+      likes: payload.likes,
+      comments: payload.comments,
+      shareText: payload.shareText,
+      backgroundVideoUrl: payload.backgroundVideoUrl,
+      modificationsCount: modifications.length,
+    });
+
     const start = await creatomateRequest("/v1/renders", "POST", {
       template_id: TEMPLATE_ID,
       modifications,
-      // Optional:
-      // "output_format": "mp4",
-      // "render_scale": 1
     });
 
-    // Creatomate render id is usually start.id
-    const renderId = start?.id;
-    if (!renderId) {
-      return json(res, 500, { ok: false, error: "Creatomate did not return render id", raw: start });
+    // ✅ forward REAL Creatomate error details back to the browser
+    if (!start.ok) {
+      console.error("[reddit-video] Creatomate failed:", start.status, start.raw);
+
+      return json(res, 400, {
+        ok: false,
+        error: "Creatomate HTTP " + start.status,
+        status: start.status,
+        creatomate: start.json || start.raw, // ← THIS is what you need to see
+        sent: {
+          template_id: TEMPLATE_ID,
+          // Don't dump everything huge; just enough to diagnose
+          backgroundVideoUrl: payload.backgroundVideoUrl,
+          pfpUrl: payload.pfpUrl,
+          mode: payload.mode,
+          modificationsPreview: modifications.slice(0, 6),
+        },
+      });
     }
 
-    return json(res, 200, { ok: true, renderId, status: start?.status || "queued" });
+    const startJson = start.json || {};
+    const renderId = startJson?.id;
+
+    if (!renderId) {
+      return json(res, 500, {
+        ok: false,
+        error: "Creatomate did not return render id",
+        raw: startJson,
+      });
+    }
+
+    return json(res, 200, { ok: true, renderId, status: startJson?.status || "queued" });
   } catch (e) {
     console.error(e);
     return json(res, 500, { ok: false, error: String(e?.message || e) });
