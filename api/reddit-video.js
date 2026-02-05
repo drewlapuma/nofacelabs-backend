@@ -94,70 +94,19 @@ function normalizeMode(v) {
   return s === "dark" ? "dark" : "light";
 }
 
-/* -----------------------------
-   AUTO-GROW SETTINGS
--------------------------------- */
-
-// Your comp is 720x1280
-const COMP_H_PX = 1280;
-
-// ✅ Put your REAL base bg height here (from Creatomate post_bg_light height)
-const BASE_BG_HEIGHT_PCT = 18.0;
-
-// roughly how tall a line is in the card
-const LINE_HEIGHT_PX = 40;
-const MAX_LINES = 7;
-
-// rough wrap estimate
-const FONT_SIZE_PX = 34;
-const CARD_TEXT_MAX_WIDTH_PX = 520;
-
-function estimateLineCount(text) {
-  const t = String(text || "").trim();
-  if (!t) return 1;
-
-  const avgChar = FONT_SIZE_PX * 0.56;
-  const approxCharsPerLine = Math.max(8, Math.floor(CARD_TEXT_MAX_WIDTH_PX / avgChar));
-
-  const parts = t.split("\n").map((line) => {
-    const len = line.trim().length || 1;
-    return Math.ceil(len / approxCharsPerLine);
-  });
-
-  const total = parts.reduce((a, b) => a + b, 0);
-  return Math.max(1, Math.min(MAX_LINES, total));
-}
-
-function pxToPctY(px) {
-  return (px / COMP_H_PX) * 100;
-}
-
-function pctStr(n) {
-  return `${Number(n).toFixed(4)}%`;
+function clamp(n, min, max) {
+  return Math.max(min, Math.min(max, n));
 }
 
 /**
- * Footer Y baselines you pasted (light). We’ll push these down by growPct.
- * If your dark baselines differ, swap them later.
+ * Dynamic card sizing:
+ * - Base card height in your template: 18%
+ * - Base card center Y shown: 24.27%
+ * - So base top = 24.27 - 18/2 = 15.27%
+ *
+ * We lock card to y_anchor=0% and y=15.27% so it grows DOWN only.
+ * Then we shift footer elements down by deltaHeight to keep them pinned to card bottom.
  */
-const FOOTER_BASE_Y = {
-  icon_like: 31.6571,
-  icon_comment: 31.66,
-  icon_share: 31.66,
-
-  like_count_light: 30.3637,
-  comment_count_light: 30.3637,
-  share_light: 30.5096,
-
-  like_count_dark: 30.3637,
-  comment_count_dark: 30.3637,
-  share_dark: 30.5096,
-};
-
-function bumpY(mods, name, baseY, deltaPct) {
-  mods[`${name}.y`] = pctStr(baseY + deltaPct);
-}
-
 function buildModifications(body) {
   const mode = normalizeMode(body.mode);
   const showLight = mode === "light";
@@ -171,40 +120,72 @@ function buildModifications(body) {
   const pfpUrl = safeStr(body.pfpUrl, "");
   const bgUrl = safeStr(body.backgroundVideoUrl, "");
 
+  // ----- sizing model (tweak if you want) -----
+  // Roughly estimate lines and convert to % height.
+  //  - ~34-40 chars per line is a good starting point for your font size
+  const approxCharsPerLine = 36;
+  const lineCount = Math.max(1, Math.ceil(postText.length / approxCharsPerLine));
+
+  // Base is 18%. Add ~2.8% per extra line beyond 2 lines.
+  const baseCardH = 18;
+  const extraLines = Math.max(0, lineCount - 2);
+  const cardH = clamp(baseCardH + extraLines * 2.8, 18, 42);
+
+  const deltaH = cardH - baseCardH;
+
+  // Base values from your screenshot
+  const baseCardCenterY = 24.27;
+  const baseTop = baseCardCenterY - baseCardH / 2; // 15.27
+
+  // Footer base y's (from the JSON you pasted)
+  // We shift these by +deltaH so they stay inside the growing card.
+  const FOOTER_BASE = {
+    // LIGHT
+    like_count_light: 30.3637,
+    comment_count_light: 30.3637,
+    share_light: 30.5096,
+    icon_like: 31.6571,
+    icon_comment: 31.66,
+    icon_share: 31.66,
+
+    // DARK
+    like_count_dark: 30.3637,
+    comment_count_dark: 30.3637,
+    share_dark: 30.5096,
+    // icons are shared names, so no separate dark icons
+  };
+
+  // Creatomate modifications must be an object
   const m = {};
 
-  // ✅ DO NOT TOUCH post_card_light/post_card_dark hidden anymore.
-  // We ONLY toggle the background rectangles.
-  m["post_bg_light.hidden"] = false;
-  m["post_bg_dark.hidden"] = false;
+  // ---- CARD + BG: top-anchored so it grows downward ----
+  // Light
+  m["post_card_light.hidden"] = !showLight;
+  m["post_card_light.opacity"] = showLight ? 1 : 0;
+  m["post_card_light.y_anchor"] = "0%";
+  m["post_card_light.y"] = `${baseTop}%`;
+  m["post_card_light.height"] = `${cardH}%`;
 
-  m["post_bg_light.opacity"] = showLight ? "100%" : "0%";
-  m["post_bg_dark.opacity"] = showDark ? "100%" : "0%";
+  m["post_bg_light.hidden"] = !showLight;
+  m["post_bg_light.opacity"] = showLight ? 1 : 0;
+  m["post_bg_light.y_anchor"] = "0%";
+  m["post_bg_light.y"] = `${baseTop}%`;
+  m["post_bg_light.height"] = `${cardH}%`;
 
-  // ✅ Always force all card elements visible (prevents “vanish”)
-  // (If any of these don’t exist, Creatomate just ignores.)
-  [
-    "username_light",
-    "username_dark",
-    "post_text_light",
-    "post_text_dark",
-    "like_count_light",
-    "like_count_dark",
-    "comment_count_light",
-    "comment_count_dark",
-    "share_light",
-    "share_dark",
-    "pfp_light",
-    "pfp_dark",
-    "icon_like",
-    "icon_comment",
-    "icon_share",
-  ].forEach((n) => {
-    m[`${n}.hidden`] = false;
-    m[`${n}.opacity`] = "100%";
-  });
+  // Dark
+  m["post_card_dark.hidden"] = !showDark;
+  m["post_card_dark.opacity"] = showDark ? 1 : 0;
+  m["post_card_dark.y_anchor"] = "0%";
+  m["post_card_dark.y"] = `${baseTop}%`;
+  m["post_card_dark.height"] = `${cardH}%`;
 
-  // --- text ---
+  m["post_bg_dark.hidden"] = !showDark;
+  m["post_bg_dark.opacity"] = showDark ? 1 : 0;
+  m["post_bg_dark.y_anchor"] = "0%";
+  m["post_bg_dark.y"] = `${baseTop}%`;
+  m["post_bg_dark.height"] = `${cardH}%`;
+
+  // ---- TEXT: write to base + light/dark variants ----
   m["username_light.text"] = username;
   m["username_dark.text"] = username;
 
@@ -220,44 +201,41 @@ function buildModifications(body) {
   m["share_light.text"] = shareText;
   m["share_dark.text"] = shareText;
 
-  // --- pfp ---
+  // (Optional) If you still have base names in the template, set them too:
+  m["post_text.text"] = postText;
+  m["like_count.text"] = likes;
+  m["comment_count.text"] = comments;
+  m["share.text"] = shareText;
+  m["username.text"] = username;
+
+  // ---- IMAGES ----
   if (pfpUrl) {
     m["pfp_light.source"] = pfpUrl;
     m["pfp_dark.source"] = pfpUrl;
+    m["pfp.source"] = pfpUrl; // if you ever re-add a base pfp
   }
 
-  // --- video ---
+  // ---- VIDEO ----
   if (bgUrl) {
     m["Video.source"] = bgUrl;
   }
 
-  // --- auto-grow background height + push footer down ---
-  const lines = estimateLineCount(postText);
-  const extraLines = Math.max(0, lines - 1);
+  // ---- FOOTER: shift DOWN by deltaH so it stays on the card ----
+  // This is the key fix for “footer going off the card”
+  Object.entries(FOOTER_BASE).forEach(([name, baseY]) => {
+    const newY = baseY + deltaH;
+    m[`${name}.y_anchor`] = "0%";
+    m[`${name}.y`] = `${newY}%`;
+  });
 
-  const growPx = extraLines * LINE_HEIGHT_PX;
-  const growPct = pxToPctY(growPx);
-
-  const newBgHeight = BASE_BG_HEIGHT_PCT + growPct;
-  m["post_bg_light.height"] = pctStr(newBgHeight);
-  m["post_bg_dark.height"] = pctStr(newBgHeight);
-
-  // push footer down
-  bumpY(m, "icon_like", FOOTER_BASE_Y.icon_like, growPct);
-  bumpY(m, "icon_comment", FOOTER_BASE_Y.icon_comment, growPct);
-  bumpY(m, "icon_share", FOOTER_BASE_Y.icon_share, growPct);
-
-  bumpY(m, "like_count_light", FOOTER_BASE_Y.like_count_light, growPct);
-  bumpY(m, "comment_count_light", FOOTER_BASE_Y.comment_count_light, growPct);
-  bumpY(m, "share_light", FOOTER_BASE_Y.share_light, growPct);
-
-  bumpY(m, "like_count_dark", FOOTER_BASE_Y.like_count_dark, growPct);
-  bumpY(m, "comment_count_dark", FOOTER_BASE_Y.comment_count_dark, growPct);
-  bumpY(m, "share_dark", FOOTER_BASE_Y.share_dark, growPct);
-
-  // debug (ignored if layer doesn’t exist)
-  m["_debug_lines.text"] = String(lines);
-  m["_debug_growPct.text"] = String(growPct.toFixed(4));
+  // icons are shared names — shift them once
+  ["icon_like", "icon_comment", "icon_share"].forEach((iconName) => {
+    const baseY = FOOTER_BASE[iconName];
+    if (typeof baseY !== "number") return;
+    const newY = baseY + deltaH;
+    m[`${iconName}.y_anchor`] = "0%";
+    m[`${iconName}.y`] = `${newY}%`;
+  });
 
   return m;
 }
@@ -271,7 +249,7 @@ module.exports = async function handler(req, res) {
       return json(res, 500, { ok: false, error: "Missing CREATOMATE_TEMPLATE_ID_REDDIT" });
     }
 
-    // GET poll
+    // ---- GET: poll render status ----
     if (req.method === "GET") {
       const url = new URL(req.url, "http://localhost");
       const id = url.searchParams.get("id");
@@ -284,7 +262,7 @@ module.exports = async function handler(req, res) {
       return json(res, 200, { ok: true, status, url: finalUrl || null });
     }
 
-    // POST start
+    // ---- POST: start render ----
     if (req.method !== "POST") {
       return json(res, 405, { ok: false, error: "Use POST or GET" });
     }
@@ -298,7 +276,7 @@ module.exports = async function handler(req, res) {
     if (!username) return json(res, 400, { ok: false, error: "Missing username" });
     if (!postText) return json(res, 400, { ok: false, error: "Missing postText" });
     if (!backgroundVideoUrl) {
-      return json(res, 400, { ok: false, error: "Missing backgroundVideoUrl" });
+      return json(res, 400, { ok: false, error: "Missing backgroundVideoUrl (use library for now)" });
     }
 
     const modifications = buildModifications(body);
@@ -311,8 +289,8 @@ module.exports = async function handler(req, res) {
     });
 
     const start = Array.isArray(startResp) ? startResp[0] : startResp;
-
     const renderId = start?.id;
+
     if (!renderId) {
       return json(res, 500, {
         ok: false,
