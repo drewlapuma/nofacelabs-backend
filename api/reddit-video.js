@@ -99,15 +99,10 @@ function clamp(n, min, max) {
 }
 
 /**
- * SAFER dynamic sizing:
- * - We keep original anchors (NO y_anchor changes)
- * - We grow card height
- * - We move card DOWN by delta/2 so the TOP stays constant
- * - We move footer DOWN by delta so it stays at bottom
- *
- * Uses your known base values:
- *   card center Y = 24.27%
- *   base height = 18%
+ * KEY CHANGE:
+ * - Do NOT move/resize post_card_* groups (that causes child elements to “double move” if we also move children)
+ * - Only resize/move post_bg_* (background rect) + expand post_text_* (text box height)
+ * - Leave footer/icons alone so they stay aligned.
  */
 function buildModifications(body) {
   const mode = normalizeMode(body.mode);
@@ -122,69 +117,61 @@ function buildModifications(body) {
   const pfpUrl = safeStr(body.pfpUrl, "");
   const bgUrl = safeStr(body.backgroundVideoUrl, "");
 
-  // ---- estimate lines (tweak charsPerLine if needed) ----
-  const charsPerLine = 36;
+  // ---- estimate lines for growth ----
+  const charsPerLine = 36; // tweak if needed
   const lineCount = Math.max(1, Math.ceil(postText.length / charsPerLine));
-
-  const baseCardH = 18;          // your current card height (%)
-  const baseCardCenterY = 24.27; // your current card center Y (%)
-
   const extraLines = Math.max(0, lineCount - 2);
-  const cardH = clamp(baseCardH + extraLines * 2.8, 18, 45); // let it grow more
-  const deltaH = cardH - baseCardH;
 
-  // move DOWN by delta/2 so top stays fixed
-  const cardCenterY = baseCardCenterY + deltaH / 2;
+  // Your base background rect size (matches your card feel)
+  const baseBgH = 18;        // %
+  const baseBgY = 24.27;     // %
+  const addPerLine = 2.8;    // % per extra line
 
-  // footer base y from your export
-  const footerBase = {
-    like_count_light: 30.3637,
-    comment_count_light: 30.3637,
-    share_light: 30.5096,
+  const bgH = clamp(baseBgH + extraLines * addPerLine, baseBgH, 45);
+  const deltaH = bgH - baseBgH;
 
-    like_count_dark: 30.3637,
-    comment_count_dark: 30.3637,
-    share_dark: 30.5096,
+  // Move bg down by delta/2 so the TOP stays steady (no “space at top”)
+  const bgY = baseBgY + deltaH / 2;
 
-    icon_like: 31.6571,
-    icon_comment: 31.66,
-    icon_share: 31.66,
-  };
-
-  // Creatomate modifications object
-  const m = {};
-
-  // ---- show/hide card groups and backgrounds ----
-  // Use opacity as percent strings (your suspicion is reasonable + harmless).
   const OP_ON = "100%";
   const OP_OFF = "0%";
 
+  const m = {};
+
+  // ---- show/hide groups + backgrounds ----
+  // IMPORTANT: we DO NOT change post_card_* y/height at all anymore.
   m["post_card_light.hidden"] = !showLight;
   m["post_card_light.opacity"] = showLight ? OP_ON : OP_OFF;
-  m["post_card_light.y"] = `${cardCenterY}%`;
-  m["post_card_light.height"] = `${cardH}%`;
-
-  m["post_bg_light.hidden"] = !showLight;
-  m["post_bg_light.opacity"] = showLight ? OP_ON : OP_OFF;
-  m["post_bg_light.y"] = `${cardCenterY}%`;
-  m["post_bg_light.height"] = `${cardH}%`;
 
   m["post_card_dark.hidden"] = !showDark;
   m["post_card_dark.opacity"] = showDark ? OP_ON : OP_OFF;
-  m["post_card_dark.y"] = `${cardCenterY}%`;
-  m["post_card_dark.height"] = `${cardH}%`;
+
+  // Resize the background rectangles (these can safely resize)
+  m["post_bg_light.hidden"] = !showLight;
+  m["post_bg_light.opacity"] = showLight ? OP_ON : OP_OFF;
+  m["post_bg_light.y"] = `${bgY}%`;
+  m["post_bg_light.height"] = `${bgH}%`;
 
   m["post_bg_dark.hidden"] = !showDark;
   m["post_bg_dark.opacity"] = showDark ? OP_ON : OP_OFF;
-  m["post_bg_dark.y"] = `${cardCenterY}%`;
-  m["post_bg_dark.height"] = `${cardH}%`;
+  m["post_bg_dark.y"] = `${bgY}%`;
+  m["post_bg_dark.height"] = `${bgH}%`;
 
-  // ---- text fields (your real names) ----
+  // ---- text fields (your exact names) ----
   m["username_light.text"] = username;
   m["username_dark.text"] = username;
 
   m["post_text_light.text"] = postText;
   m["post_text_dark.text"] = postText;
+
+  // Expand the post text box height so wrapping can happen inside the card
+  // (This is what prevents “text runs off card”)
+  // We grow text box height by most of deltaH, but leave space for header + footer.
+  const baseTextH = 10; // safe default; tweak if your post_text box is different
+  const textH = clamp(baseTextH + deltaH * 0.75, baseTextH, 30);
+
+  m["post_text_light.height"] = `${textH}%`;
+  m["post_text_dark.height"] = `${textH}%`;
 
   m["like_count_light.text"] = likes;
   m["like_count_dark.text"] = likes;
@@ -201,16 +188,10 @@ function buildModifications(body) {
     m["pfp_dark.source"] = pfpUrl;
   }
 
-  // ---- background video ----
+  // ---- video ----
   if (bgUrl) {
     m["Video.source"] = bgUrl;
   }
-
-  // ---- footer: move DOWN by deltaH ----
-  Object.entries(footerBase).forEach(([name, y0]) => {
-    const y1 = y0 + deltaH;
-    m[`${name}.y`] = `${y1}%`;
-  });
 
   return m;
 }
@@ -224,7 +205,6 @@ module.exports = async function handler(req, res) {
       return json(res, 500, { ok: false, error: "Missing CREATOMATE_TEMPLATE_ID_REDDIT" });
     }
 
-    // GET poll
     if (req.method === "GET") {
       const url = new URL(req.url, "http://localhost");
       const id = url.searchParams.get("id");
@@ -236,7 +216,6 @@ module.exports = async function handler(req, res) {
       return json(res, 200, { ok: true, status, url: finalUrl || null });
     }
 
-    // POST start render
     if (req.method !== "POST") {
       return json(res, 405, { ok: false, error: "Use POST or GET" });
     }
