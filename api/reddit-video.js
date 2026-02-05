@@ -1,11 +1,4 @@
 // api/reddit-video.js (CommonJS, Node 18+)
-// POST starts a Creatomate render
-// GET polls status
-//
-// Env:
-// - CREATOMATE_API_KEY
-// - CREATOMATE_TEMPLATE_ID_REDDIT
-// - ALLOW_ORIGIN or ALLOW_ORIGINS (optional)
 
 const https = require("https");
 
@@ -101,11 +94,92 @@ function normalizeMode(v) {
   return s === "dark" ? "dark" : "light";
 }
 
+/* -----------------------------
+   AUTO-GROW SETTINGS
+-------------------------------- */
+
+// Your comp is 720x1280 (from renders)
+const COMP_H_PX = 1280;
+
+// ✅ SET THIS: what is post_bg_light height (in %) when title is 1 line?
+// In Creatomate, click "post_bg_light" and copy the height percent.
+// Example placeholder:
+const BASE_BG_HEIGHT_PCT = 18;
+
+// How much “extra height” per additional wrapped line (in px -> converted to %)
+const FONT_SIZE_PX = 34;     // approx
+const LINE_HEIGHT_PX = 40;   // approx
+const MAX_LINES = 6;
+
+// Rough wrap estimate
+const CARD_TEXT_MAX_WIDTH_PX = 520;
+
+function estimateLineCount(text) {
+  const t = String(text || "").trim();
+  if (!t) return 1;
+
+  const avgChar = FONT_SIZE_PX * 0.56;
+  const approxCharsPerLine = Math.max(8, Math.floor(CARD_TEXT_MAX_WIDTH_PX / avgChar));
+
+  const parts = t.split("\n").map((line) => {
+    const len = line.trim().length || 1;
+    return Math.ceil(len / approxCharsPerLine);
+  });
+
+  const total = parts.reduce((a, b) => a + b, 0);
+  return Math.max(1, Math.min(MAX_LINES, total));
+}
+
+function pxToPctY(px) {
+  return (px / COMP_H_PX) * 100;
+}
+
+function pctStr(n) {
+  return `${Number(n).toFixed(4)}%`;
+}
+
+function parsePct(v) {
+  if (typeof v === "number") return v;
+  const s = String(v || "").trim();
+  const m = s.match(/^(-?\d+(\.\d+)?)%$/);
+  if (!m) return NaN;
+  return Number(m[1]);
+}
+
+function bumpYPercent(mods, layerName, baselineYPct, deltaPct) {
+  const base = Number(baselineYPct);
+  if (!Number.isFinite(base)) return;
+  mods[`${layerName}.y`] = pctStr(base + deltaPct);
+}
+
 /**
- * IMPORTANT:
- * Creatomate opacity is 0–100 (NOT 0–1).
- * If hidden=true anywhere, opacity won't matter, so we force hidden=false too.
+ * Your footer baseline Y% (LIGHT) from what you pasted:
+ * share_light y: 30.5096%
+ * icon_share y: 31.66%
+ * icon_comment y: 31.66%
+ * icon_like y: 31.6571%
+ * comment_count_light y: 30.3637%
+ * like_count_light y: 30.3637%
+ *
+ * If DARK differs, replace the dark baselines below.
  */
+const FOOTER_BASE_Y_PCT = {
+  // shared icons
+  icon_like: 31.6571,
+  icon_comment: 31.66,
+  icon_share: 31.66,
+
+  // light
+  like_count_light: 30.3637,
+  comment_count_light: 30.3637,
+  share_light: 30.5096,
+
+  // dark (assume same until you paste dark values)
+  like_count_dark: 30.3637,
+  comment_count_dark: 30.3637,
+  share_dark: 30.5096,
+};
+
 function buildModifications(body) {
   const mode = normalizeMode(body.mode);
   const showLight = mode === "light";
@@ -119,68 +193,76 @@ function buildModifications(body) {
   const pfpUrl = safeStr(body.pfpUrl, "");
   const bgUrl = safeStr(body.backgroundVideoUrl, "");
 
-  // Creatomate expects "modifications" to be an OBJECT
   const m = {};
 
-  // helper: force visible + set opacity as percent
-  function forceVisible(name, visible = true) {
-    if (!name) return;
-    m[`${name}.hidden`] = !visible;
-    m[`${name}.opacity`] = visible ? 100 : 0;
-  }
+  // --- show/hide cards + backgrounds ---
+  m["post_card_light.hidden"] = !showLight;
+  m["post_card_light.opacity"] = showLight ? 1 : 0;
 
-  // ---- CARD VISIBILITY (LIGHT/DARK) ----
-  // Always un-hide both groups; then control visibility via opacity
-  // (This avoids “it’s hidden so opacity doesn’t matter” problems.)
-  m["post_card_light.hidden"] = false;
-  m["post_card_dark.hidden"] = false;
-  m["post_bg_light.hidden"] = false;
-  m["post_bg_dark.hidden"] = false;
+  m["post_card_dark.hidden"] = !showDark;
+  m["post_card_dark.opacity"] = showDark ? 1 : 0;
 
-  m["post_card_light.opacity"] = showLight ? 100 : 0;
-  m["post_card_dark.opacity"] = showDark ? 100 : 0;
+  m["post_bg_light.hidden"] = !showLight;
+  m["post_bg_light.opacity"] = showLight ? 1 : 0;
 
-  m["post_bg_light.opacity"] = showLight ? 100 : 0;
-  m["post_bg_dark.opacity"] = showDark ? 100 : 0;
+  m["post_bg_dark.hidden"] = !showDark;
+  m["post_bg_dark.opacity"] = showDark ? 1 : 0;
 
-  // If you prefer the strict version instead (hide the inactive one), use:
-  // forceVisible("post_card_light", showLight);
-  // forceVisible("post_card_dark", showDark);
-  // forceVisible("post_bg_light", showLight);
-  // forceVisible("post_bg_dark", showDark);
-
-  // ---- TEXT (set base + light/dark variants) ----
-  m["username.text"] = username;
+  // --- text ---
   m["username_light.text"] = username;
   m["username_dark.text"] = username;
 
-  m["post_text.text"] = postText;
   m["post_text_light.text"] = postText;
   m["post_text_dark.text"] = postText;
 
-  m["like_count.text"] = likes;
   m["like_count_light.text"] = likes;
   m["like_count_dark.text"] = likes;
 
-  m["comment_count.text"] = comments;
   m["comment_count_light.text"] = comments;
   m["comment_count_dark.text"] = comments;
 
-  m["share.text"] = shareText;
   m["share_light.text"] = shareText;
   m["share_dark.text"] = shareText;
 
-  // ---- IMAGES ----
+  // --- images ---
   if (pfpUrl) {
-    m["pfp.source"] = pfpUrl;
     m["pfp_light.source"] = pfpUrl;
     m["pfp_dark.source"] = pfpUrl;
   }
 
-  // ---- VIDEO ----
+  // --- video ---
   if (bgUrl) {
     m["Video.source"] = bgUrl;
   }
+
+  // --- auto-grow background + push footer down (ALL IN %) ---
+  const lines = estimateLineCount(postText);
+  const extraLines = Math.max(0, lines - 1);
+
+  const growPx = extraLines * LINE_HEIGHT_PX;
+  const growPct = pxToPctY(growPx);
+
+  // grow the card background height
+  const newBgHeight = BASE_BG_HEIGHT_PCT + growPct;
+  m["post_bg_light.height"] = pctStr(newBgHeight);
+  m["post_bg_dark.height"] = pctStr(newBgHeight);
+
+  // push footer items down by the same percent
+  bumpYPercent(m, "icon_like", FOOTER_BASE_Y_PCT.icon_like, growPct);
+  bumpYPercent(m, "icon_comment", FOOTER_BASE_Y_PCT.icon_comment, growPct);
+  bumpYPercent(m, "icon_share", FOOTER_BASE_Y_PCT.icon_share, growPct);
+
+  bumpYPercent(m, "like_count_light", FOOTER_BASE_Y_PCT.like_count_light, growPct);
+  bumpYPercent(m, "comment_count_light", FOOTER_BASE_Y_PCT.comment_count_light, growPct);
+  bumpYPercent(m, "share_light", FOOTER_BASE_Y_PCT.share_light, growPct);
+
+  bumpYPercent(m, "like_count_dark", FOOTER_BASE_Y_PCT.like_count_dark, growPct);
+  bumpYPercent(m, "comment_count_dark", FOOTER_BASE_Y_PCT.comment_count_dark, growPct);
+  bumpYPercent(m, "share_dark", FOOTER_BASE_Y_PCT.share_dark, growPct);
+
+  // debug
+  m["_debug.lines"] = lines;
+  m["_debug.growPct"] = growPct;
 
   return m;
 }
@@ -194,7 +276,7 @@ module.exports = async function handler(req, res) {
       return json(res, 500, { ok: false, error: "Missing CREATOMATE_TEMPLATE_ID_REDDIT" });
     }
 
-    // ---- GET: poll render status ----
+    // GET poll
     if (req.method === "GET") {
       const url = new URL(req.url, "http://localhost");
       const id = url.searchParams.get("id");
@@ -207,7 +289,7 @@ module.exports = async function handler(req, res) {
       return json(res, 200, { ok: true, status, url: finalUrl || null });
     }
 
-    // ---- POST: start render ----
+    // POST start render
     if (req.method !== "POST") {
       return json(res, 405, { ok: false, error: "Use POST or GET" });
     }
@@ -226,7 +308,6 @@ module.exports = async function handler(req, res) {
 
     const modifications = buildModifications(body);
 
-    // Start render (template mode)
     const startResp = await creatomateRequest("/v1/renders", "POST", {
       template_id: TEMPLATE_ID,
       modifications,
@@ -234,7 +315,6 @@ module.exports = async function handler(req, res) {
       render_scale: 1,
     });
 
-    // Creatomate sometimes returns an array: [ { id, ... } ]
     const start = Array.isArray(startResp) ? startResp[0] : startResp;
 
     const renderId = start?.id;
@@ -250,7 +330,7 @@ module.exports = async function handler(req, res) {
       ok: true,
       renderId,
       status: start?.status || "queued",
-      modificationsPreview: modifications, // helpful debugging
+      modificationsPreview: modifications,
     });
   } catch (e) {
     console.error(e);
