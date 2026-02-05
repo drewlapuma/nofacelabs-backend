@@ -99,13 +99,15 @@ function clamp(n, min, max) {
 }
 
 /**
- * Dynamic card sizing:
- * - Base card height in your template: 18%
- * - Base card center Y shown: 24.27%
- * - So base top = 24.27 - 18/2 = 15.27%
+ * SAFER dynamic sizing:
+ * - We keep original anchors (NO y_anchor changes)
+ * - We grow card height
+ * - We move card DOWN by delta/2 so the TOP stays constant
+ * - We move footer DOWN by delta so it stays at bottom
  *
- * We lock card to y_anchor=0% and y=15.27% so it grows DOWN only.
- * Then we shift footer elements down by deltaHeight to keep them pinned to card bottom.
+ * Uses your known base values:
+ *   card center Y = 24.27%
+ *   base height = 18%
  */
 function buildModifications(body) {
   const mode = normalizeMode(body.mode);
@@ -120,72 +122,64 @@ function buildModifications(body) {
   const pfpUrl = safeStr(body.pfpUrl, "");
   const bgUrl = safeStr(body.backgroundVideoUrl, "");
 
-  // ----- sizing model (tweak if you want) -----
-  // Roughly estimate lines and convert to % height.
-  //  - ~34-40 chars per line is a good starting point for your font size
-  const approxCharsPerLine = 36;
-  const lineCount = Math.max(1, Math.ceil(postText.length / approxCharsPerLine));
+  // ---- estimate lines (tweak charsPerLine if needed) ----
+  const charsPerLine = 36;
+  const lineCount = Math.max(1, Math.ceil(postText.length / charsPerLine));
 
-  // Base is 18%. Add ~2.8% per extra line beyond 2 lines.
-  const baseCardH = 18;
+  const baseCardH = 18;          // your current card height (%)
+  const baseCardCenterY = 24.27; // your current card center Y (%)
+
   const extraLines = Math.max(0, lineCount - 2);
-  const cardH = clamp(baseCardH + extraLines * 2.8, 18, 42);
-
+  const cardH = clamp(baseCardH + extraLines * 2.8, 18, 45); // let it grow more
   const deltaH = cardH - baseCardH;
 
-  // Base values from your screenshot
-  const baseCardCenterY = 24.27;
-  const baseTop = baseCardCenterY - baseCardH / 2; // 15.27
+  // move DOWN by delta/2 so top stays fixed
+  const cardCenterY = baseCardCenterY + deltaH / 2;
 
-  // Footer base y's (from the JSON you pasted)
-  // We shift these by +deltaH so they stay inside the growing card.
-  const FOOTER_BASE = {
-    // LIGHT
+  // footer base y from your export
+  const footerBase = {
     like_count_light: 30.3637,
     comment_count_light: 30.3637,
     share_light: 30.5096,
-    icon_like: 31.6571,
-    icon_comment: 31.66,
-    icon_share: 31.66,
 
-    // DARK
     like_count_dark: 30.3637,
     comment_count_dark: 30.3637,
     share_dark: 30.5096,
-    // icons are shared names, so no separate dark icons
+
+    icon_like: 31.6571,
+    icon_comment: 31.66,
+    icon_share: 31.66,
   };
 
-  // Creatomate modifications must be an object
+  // Creatomate modifications object
   const m = {};
 
-  // ---- CARD + BG: top-anchored so it grows downward ----
-  // Light
+  // ---- show/hide card groups and backgrounds ----
+  // Use opacity as percent strings (your suspicion is reasonable + harmless).
+  const OP_ON = "100%";
+  const OP_OFF = "0%";
+
   m["post_card_light.hidden"] = !showLight;
-  m["post_card_light.opacity"] = showLight ? 1 : 0;
-  m["post_card_light.y_anchor"] = "0%";
-  m["post_card_light.y"] = `${baseTop}%`;
+  m["post_card_light.opacity"] = showLight ? OP_ON : OP_OFF;
+  m["post_card_light.y"] = `${cardCenterY}%`;
   m["post_card_light.height"] = `${cardH}%`;
 
   m["post_bg_light.hidden"] = !showLight;
-  m["post_bg_light.opacity"] = showLight ? 1 : 0;
-  m["post_bg_light.y_anchor"] = "0%";
-  m["post_bg_light.y"] = `${baseTop}%`;
+  m["post_bg_light.opacity"] = showLight ? OP_ON : OP_OFF;
+  m["post_bg_light.y"] = `${cardCenterY}%`;
   m["post_bg_light.height"] = `${cardH}%`;
 
-  // Dark
   m["post_card_dark.hidden"] = !showDark;
-  m["post_card_dark.opacity"] = showDark ? 1 : 0;
-  m["post_card_dark.y_anchor"] = "0%";
-  m["post_card_dark.y"] = `${baseTop}%`;
+  m["post_card_dark.opacity"] = showDark ? OP_ON : OP_OFF;
+  m["post_card_dark.y"] = `${cardCenterY}%`;
   m["post_card_dark.height"] = `${cardH}%`;
 
   m["post_bg_dark.hidden"] = !showDark;
-  m["post_bg_dark.opacity"] = showDark ? 1 : 0;
-  m["post_bg_dark.y_anchor"] = "0%";
-  m["post_bg_dark.y"] = `${baseTop}%`;
+  m["post_bg_dark.opacity"] = showDark ? OP_ON : OP_OFF;
+  m["post_bg_dark.y"] = `${cardCenterY}%`;
   m["post_bg_dark.height"] = `${cardH}%`;
 
-  // ---- TEXT: write to base + light/dark variants ----
+  // ---- text fields (your real names) ----
   m["username_light.text"] = username;
   m["username_dark.text"] = username;
 
@@ -201,40 +195,21 @@ function buildModifications(body) {
   m["share_light.text"] = shareText;
   m["share_dark.text"] = shareText;
 
-  // (Optional) If you still have base names in the template, set them too:
-  m["post_text.text"] = postText;
-  m["like_count.text"] = likes;
-  m["comment_count.text"] = comments;
-  m["share.text"] = shareText;
-  m["username.text"] = username;
-
-  // ---- IMAGES ----
+  // ---- images ----
   if (pfpUrl) {
     m["pfp_light.source"] = pfpUrl;
     m["pfp_dark.source"] = pfpUrl;
-    m["pfp.source"] = pfpUrl; // if you ever re-add a base pfp
   }
 
-  // ---- VIDEO ----
+  // ---- background video ----
   if (bgUrl) {
     m["Video.source"] = bgUrl;
   }
 
-  // ---- FOOTER: shift DOWN by deltaH so it stays on the card ----
-  // This is the key fix for “footer going off the card”
-  Object.entries(FOOTER_BASE).forEach(([name, baseY]) => {
-    const newY = baseY + deltaH;
-    m[`${name}.y_anchor`] = "0%";
-    m[`${name}.y`] = `${newY}%`;
-  });
-
-  // icons are shared names — shift them once
-  ["icon_like", "icon_comment", "icon_share"].forEach((iconName) => {
-    const baseY = FOOTER_BASE[iconName];
-    if (typeof baseY !== "number") return;
-    const newY = baseY + deltaH;
-    m[`${iconName}.y_anchor`] = "0%";
-    m[`${iconName}.y`] = `${newY}%`;
+  // ---- footer: move DOWN by deltaH ----
+  Object.entries(footerBase).forEach(([name, y0]) => {
+    const y1 = y0 + deltaH;
+    m[`${name}.y`] = `${y1}%`;
   });
 
   return m;
@@ -249,7 +224,7 @@ module.exports = async function handler(req, res) {
       return json(res, 500, { ok: false, error: "Missing CREATOMATE_TEMPLATE_ID_REDDIT" });
     }
 
-    // ---- GET: poll render status ----
+    // GET poll
     if (req.method === "GET") {
       const url = new URL(req.url, "http://localhost");
       const id = url.searchParams.get("id");
@@ -258,11 +233,10 @@ module.exports = async function handler(req, res) {
       const r = await creatomateRequest(`/v1/renders/${encodeURIComponent(id)}`, "GET");
       const status = String(r?.status || "").toLowerCase();
       const finalUrl = r?.url || r?.result?.url || r?.outputs?.[0]?.url || "";
-
       return json(res, 200, { ok: true, status, url: finalUrl || null });
     }
 
-    // ---- POST: start render ----
+    // POST start render
     if (req.method !== "POST") {
       return json(res, 405, { ok: false, error: "Use POST or GET" });
     }
