@@ -98,20 +98,18 @@ function normalizeMode(v) {
    AUTO-GROW SETTINGS
 -------------------------------- */
 
-// Your comp is 720x1280 (from renders)
+// Your comp is 720x1280
 const COMP_H_PX = 1280;
 
-// ✅ SET THIS: what is post_bg_light height (in %) when title is 1 line?
-// In Creatomate, click "post_bg_light" and copy the height percent.
-// Example placeholder:
-const BASE_BG_HEIGHT_PCT = 18;
+// ✅ Put your REAL base bg height here (from Creatomate post_bg_light height)
+const BASE_BG_HEIGHT_PCT = 18.0;
 
-// How much “extra height” per additional wrapped line (in px -> converted to %)
-const FONT_SIZE_PX = 34;     // approx
-const LINE_HEIGHT_PX = 40;   // approx
-const MAX_LINES = 6;
+// roughly how tall a line is in the card
+const LINE_HEIGHT_PX = 40;
+const MAX_LINES = 7;
 
-// Rough wrap estimate
+// rough wrap estimate
+const FONT_SIZE_PX = 34;
 const CARD_TEXT_MAX_WIDTH_PX = 520;
 
 function estimateLineCount(text) {
@@ -138,47 +136,27 @@ function pctStr(n) {
   return `${Number(n).toFixed(4)}%`;
 }
 
-function parsePct(v) {
-  if (typeof v === "number") return v;
-  const s = String(v || "").trim();
-  const m = s.match(/^(-?\d+(\.\d+)?)%$/);
-  if (!m) return NaN;
-  return Number(m[1]);
-}
-
-function bumpYPercent(mods, layerName, baselineYPct, deltaPct) {
-  const base = Number(baselineYPct);
-  if (!Number.isFinite(base)) return;
-  mods[`${layerName}.y`] = pctStr(base + deltaPct);
-}
-
 /**
- * Your footer baseline Y% (LIGHT) from what you pasted:
- * share_light y: 30.5096%
- * icon_share y: 31.66%
- * icon_comment y: 31.66%
- * icon_like y: 31.6571%
- * comment_count_light y: 30.3637%
- * like_count_light y: 30.3637%
- *
- * If DARK differs, replace the dark baselines below.
+ * Footer Y baselines you pasted (light). We’ll push these down by growPct.
+ * If your dark baselines differ, swap them later.
  */
-const FOOTER_BASE_Y_PCT = {
-  // shared icons
+const FOOTER_BASE_Y = {
   icon_like: 31.6571,
   icon_comment: 31.66,
   icon_share: 31.66,
 
-  // light
   like_count_light: 30.3637,
   comment_count_light: 30.3637,
   share_light: 30.5096,
 
-  // dark (assume same until you paste dark values)
   like_count_dark: 30.3637,
   comment_count_dark: 30.3637,
   share_dark: 30.5096,
 };
+
+function bumpY(mods, name, baseY, deltaPct) {
+  mods[`${name}.y`] = pctStr(baseY + deltaPct);
+}
 
 function buildModifications(body) {
   const mode = normalizeMode(body.mode);
@@ -195,18 +173,36 @@ function buildModifications(body) {
 
   const m = {};
 
-  // --- show/hide cards + backgrounds ---
-  m["post_card_light.hidden"] = !showLight;
-  m["post_card_light.opacity"] = showLight ? 1 : 0;
+  // ✅ DO NOT TOUCH post_card_light/post_card_dark hidden anymore.
+  // We ONLY toggle the background rectangles.
+  m["post_bg_light.hidden"] = false;
+  m["post_bg_dark.hidden"] = false;
 
-  m["post_card_dark.hidden"] = !showDark;
-  m["post_card_dark.opacity"] = showDark ? 1 : 0;
+  m["post_bg_light.opacity"] = showLight ? "100%" : "0%";
+  m["post_bg_dark.opacity"] = showDark ? "100%" : "0%";
 
-  m["post_bg_light.hidden"] = !showLight;
-  m["post_bg_light.opacity"] = showLight ? 1 : 0;
-
-  m["post_bg_dark.hidden"] = !showDark;
-  m["post_bg_dark.opacity"] = showDark ? 1 : 0;
+  // ✅ Always force all card elements visible (prevents “vanish”)
+  // (If any of these don’t exist, Creatomate just ignores.)
+  [
+    "username_light",
+    "username_dark",
+    "post_text_light",
+    "post_text_dark",
+    "like_count_light",
+    "like_count_dark",
+    "comment_count_light",
+    "comment_count_dark",
+    "share_light",
+    "share_dark",
+    "pfp_light",
+    "pfp_dark",
+    "icon_like",
+    "icon_comment",
+    "icon_share",
+  ].forEach((n) => {
+    m[`${n}.hidden`] = false;
+    m[`${n}.opacity`] = "100%";
+  });
 
   // --- text ---
   m["username_light.text"] = username;
@@ -224,7 +220,7 @@ function buildModifications(body) {
   m["share_light.text"] = shareText;
   m["share_dark.text"] = shareText;
 
-  // --- images ---
+  // --- pfp ---
   if (pfpUrl) {
     m["pfp_light.source"] = pfpUrl;
     m["pfp_dark.source"] = pfpUrl;
@@ -235,34 +231,33 @@ function buildModifications(body) {
     m["Video.source"] = bgUrl;
   }
 
-  // --- auto-grow background + push footer down (ALL IN %) ---
+  // --- auto-grow background height + push footer down ---
   const lines = estimateLineCount(postText);
   const extraLines = Math.max(0, lines - 1);
 
   const growPx = extraLines * LINE_HEIGHT_PX;
   const growPct = pxToPctY(growPx);
 
-  // grow the card background height
   const newBgHeight = BASE_BG_HEIGHT_PCT + growPct;
   m["post_bg_light.height"] = pctStr(newBgHeight);
   m["post_bg_dark.height"] = pctStr(newBgHeight);
 
-  // push footer items down by the same percent
-  bumpYPercent(m, "icon_like", FOOTER_BASE_Y_PCT.icon_like, growPct);
-  bumpYPercent(m, "icon_comment", FOOTER_BASE_Y_PCT.icon_comment, growPct);
-  bumpYPercent(m, "icon_share", FOOTER_BASE_Y_PCT.icon_share, growPct);
+  // push footer down
+  bumpY(m, "icon_like", FOOTER_BASE_Y.icon_like, growPct);
+  bumpY(m, "icon_comment", FOOTER_BASE_Y.icon_comment, growPct);
+  bumpY(m, "icon_share", FOOTER_BASE_Y.icon_share, growPct);
 
-  bumpYPercent(m, "like_count_light", FOOTER_BASE_Y_PCT.like_count_light, growPct);
-  bumpYPercent(m, "comment_count_light", FOOTER_BASE_Y_PCT.comment_count_light, growPct);
-  bumpYPercent(m, "share_light", FOOTER_BASE_Y_PCT.share_light, growPct);
+  bumpY(m, "like_count_light", FOOTER_BASE_Y.like_count_light, growPct);
+  bumpY(m, "comment_count_light", FOOTER_BASE_Y.comment_count_light, growPct);
+  bumpY(m, "share_light", FOOTER_BASE_Y.share_light, growPct);
 
-  bumpYPercent(m, "like_count_dark", FOOTER_BASE_Y_PCT.like_count_dark, growPct);
-  bumpYPercent(m, "comment_count_dark", FOOTER_BASE_Y_PCT.comment_count_dark, growPct);
-  bumpYPercent(m, "share_dark", FOOTER_BASE_Y_PCT.share_dark, growPct);
+  bumpY(m, "like_count_dark", FOOTER_BASE_Y.like_count_dark, growPct);
+  bumpY(m, "comment_count_dark", FOOTER_BASE_Y.comment_count_dark, growPct);
+  bumpY(m, "share_dark", FOOTER_BASE_Y.share_dark, growPct);
 
-  // debug
-  m["_debug.lines"] = lines;
-  m["_debug.growPct"] = growPct;
+  // debug (ignored if layer doesn’t exist)
+  m["_debug_lines.text"] = String(lines);
+  m["_debug_growPct.text"] = String(growPct.toFixed(4));
 
   return m;
 }
@@ -289,7 +284,7 @@ module.exports = async function handler(req, res) {
       return json(res, 200, { ok: true, status, url: finalUrl || null });
     }
 
-    // POST start render
+    // POST start
     if (req.method !== "POST") {
       return json(res, 405, { ok: false, error: "Use POST or GET" });
     }
@@ -303,7 +298,7 @@ module.exports = async function handler(req, res) {
     if (!username) return json(res, 400, { ok: false, error: "Missing username" });
     if (!postText) return json(res, 400, { ok: false, error: "Missing postText" });
     if (!backgroundVideoUrl) {
-      return json(res, 400, { ok: false, error: "Missing backgroundVideoUrl (use library for now)" });
+      return json(res, 400, { ok: false, error: "Missing backgroundVideoUrl" });
     }
 
     const modifications = buildModifications(body);
