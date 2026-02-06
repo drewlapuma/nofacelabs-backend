@@ -99,10 +99,20 @@ function clamp(n, min, max) {
 }
 
 function pct(n) {
+  // keep nice clean percent strings
   const v = Number(n);
   return `${Math.round(v * 1000) / 1000}%`;
 }
 
+/**
+ * Card growth + footer pinning (no footer group required).
+ *
+ * We stretch:
+ *  - post_bg_light / post_bg_dark height
+ *  - post_text_light / post_text_dark height
+ *
+ * And we push footer elements down by the same “center shift” we applied to the bg.
+ */
 function buildModifications(body) {
   const mode = normalizeMode(body.mode);
   const showLight = mode === "light";
@@ -117,13 +127,15 @@ function buildModifications(body) {
   const bgUrl = safeStr(body.backgroundVideoUrl, "");
 
   // ---- line estimate ----
-  const charsPerLine = 36;
+  const charsPerLine = 36; // tweak if you change font size/width
   const lineCount = Math.max(1, Math.ceil(postText.length / charsPerLine));
   const extraLines = Math.max(0, lineCount - 2);
 
-  // ---- your base bg rect numbers ----
+  // ---- your base bg rect numbers (from your card) ----
   const baseBgH = 18;      // %
   const baseBgY = 24.27;   // %
+
+  // how much taller per extra line
   const addPerLine = 2.8;  // %
 
   const bgH = clamp(baseBgH + extraLines * addPerLine, baseBgH, 45);
@@ -133,6 +145,7 @@ function buildModifications(body) {
   const centerShift = deltaH / 2;
   const bgY = baseBgY + centerShift;
 
+  // ---- base footer Y values (these are YOUR current y's) ----
   const BASE = {
     like_count_y: 30.3637,
     comment_count_y: 30.3637,
@@ -142,23 +155,20 @@ function buildModifications(body) {
     icon_share_y: 31.66,
   };
 
-  // ✅ ONLY FIX: footer must move by FULL deltaH (removes blank space)
-  const footerShift = deltaH;
+  // ✅ ONLY CHANGE: use deltaH (full growth) instead of centerShift (half)
+  const likeY = BASE.like_count_y + deltaH;
+  const commentY = BASE.comment_count_y + deltaH;
+  const shareTextY = BASE.share_text_y + deltaH;
+  const iconLikeY = BASE.icon_like_y + deltaH;
+  const iconCommentY = BASE.icon_comment_y + deltaH;
+  const iconShareY = BASE.icon_share_y + deltaH;
 
-  const likeY = BASE.like_count_y + footerShift;
-  const commentY = BASE.comment_count_y + footerShift;
-  const shareTextY = BASE.share_text_y + footerShift;
-  const iconLikeY = BASE.icon_like_y + footerShift;
-  const iconCommentY = BASE.icon_comment_y + footerShift;
-  const iconShareY = BASE.icon_share_y + footerShift;
-
-  // KEEP your original opacity logic (numbers)
-  const OP_ON = 1;
-  const OP_OFF = 0;
+  const OP_ON = "100%";
+  const OP_OFF = "0%";
 
   const m = {};
 
-  // ---- show/hide cards (your original logic) ----
+  // ---- show/hide cards (do NOT move card groups) ----
   m["post_card_light.hidden"] = !showLight;
   m["post_card_light.opacity"] = showLight ? OP_ON : OP_OFF;
 
@@ -183,8 +193,8 @@ function buildModifications(body) {
   m["post_text_light.text"] = postText;
   m["post_text_dark.text"] = postText;
 
-  // expand post_text box height so it wraps
-  const baseTextH = 10;
+  // expand post_text box height so it wraps instead of running out
+  const baseTextH = 10; // tweak if your post_text box differs
   const textH = clamp(baseTextH + deltaH * 0.75, baseTextH, 30);
   m["post_text_light.height"] = pct(textH);
   m["post_text_dark.height"] = pct(textH);
@@ -199,7 +209,7 @@ function buildModifications(body) {
   m["share_light.text"] = shareText;
   m["share_dark.text"] = shareText;
 
-  // ---- footer pinning (only Y changes) ----
+  // ---- ✅ FOOTER PINNING (move down as card grows) ----
   m["like_count_light.y"] = pct(likeY);
   m["like_count_dark.y"] = pct(likeY);
 
@@ -209,6 +219,7 @@ function buildModifications(body) {
   m["share_light.y"] = pct(shareTextY);
   m["share_dark.y"] = pct(shareTextY);
 
+  // Icons y (same icon names in both cards)
   m["icon_like.y"] = pct(iconLikeY);
   m["icon_comment.y"] = pct(iconCommentY);
   m["icon_share.y"] = pct(iconShareY);
@@ -236,6 +247,7 @@ module.exports = async function handler(req, res) {
       return json(res, 500, { ok: false, error: "Missing CREATOMATE_TEMPLATE_ID_REDDIT" });
     }
 
+    // ---- GET: poll render status ----
     if (req.method === "GET") {
       const url = new URL(req.url, "http://localhost");
       const id = url.searchParams.get("id");
@@ -247,6 +259,7 @@ module.exports = async function handler(req, res) {
       return json(res, 200, { ok: true, status, url: finalUrl || null });
     }
 
+    // ---- POST: start render ----
     if (req.method !== "POST") {
       return json(res, 405, { ok: false, error: "Use POST or GET" });
     }
