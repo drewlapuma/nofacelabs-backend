@@ -103,12 +103,6 @@ function pct(n) {
   return `${Math.round(v * 1000) / 1000}%`;
 }
 
-/**
- * Card growth + footer pinning (no footer group required).
- *
- * Fix: when card grows, footer must move by FULL deltaH (not deltaH/2),
- * or else you get blank space under footer.
- */
 function buildModifications(body) {
   const mode = normalizeMode(body.mode);
   const showLight = mode === "light";
@@ -130,17 +124,15 @@ function buildModifications(body) {
   // ---- your base bg rect numbers ----
   const baseBgH = 18;      // %
   const baseBgY = 24.27;   // %
-
   const addPerLine = 2.8;  // %
-  const bgH = clamp(baseBgH + extraLines * addPerLine, baseBgH, 45);
 
+  const bgH = clamp(baseBgH + extraLines * addPerLine, baseBgH, 45);
   const deltaH = bgH - baseBgH;
 
-  // Keep top visually steady by shifting center down half the growth
+  // keep top visually steady: move bg down by delta/2
   const centerShift = deltaH / 2;
   const bgY = baseBgY + centerShift;
 
-  // ---- base footer Y values (YOUR current y's) ----
   const BASE = {
     like_count_y: 30.3637,
     comment_count_y: 30.3637,
@@ -150,8 +142,7 @@ function buildModifications(body) {
     icon_share_y: 31.66,
   };
 
-  // ✅ KEY FIX:
-  // Move footer by FULL deltaH so it stays pinned near the bottom edge.
+  // ✅ ONLY FIX: footer must move by FULL deltaH (removes blank space)
   const footerShift = deltaH;
 
   const likeY = BASE.like_count_y + footerShift;
@@ -161,13 +152,13 @@ function buildModifications(body) {
   const iconCommentY = BASE.icon_comment_y + footerShift;
   const iconShareY = BASE.icon_share_y + footerShift;
 
-  // ✅ opacity MUST be 0..1 numbers in Creatomate
+  // KEEP your original opacity logic (numbers)
   const OP_ON = 1;
   const OP_OFF = 0;
 
   const m = {};
 
-  // ---- show/hide cards ----
+  // ---- show/hide cards (your original logic) ----
   m["post_card_light.hidden"] = !showLight;
   m["post_card_light.opacity"] = showLight ? OP_ON : OP_OFF;
 
@@ -193,7 +184,7 @@ function buildModifications(body) {
   m["post_text_dark.text"] = postText;
 
   // expand post_text box height so it wraps
-  const baseTextH = 10; // %
+  const baseTextH = 10;
   const textH = clamp(baseTextH + deltaH * 0.75, baseTextH, 30);
   m["post_text_light.height"] = pct(textH);
   m["post_text_dark.height"] = pct(textH);
@@ -208,7 +199,7 @@ function buildModifications(body) {
   m["share_light.text"] = shareText;
   m["share_dark.text"] = shareText;
 
-  // ---- footer pinning ----
+  // ---- footer pinning (only Y changes) ----
   m["like_count_light.y"] = pct(likeY);
   m["like_count_dark.y"] = pct(likeY);
 
