@@ -98,11 +98,20 @@ function clamp(n, min, max) {
   return Math.max(min, Math.min(max, n));
 }
 
+function pct(n) {
+  // keep nice clean percent strings
+  const v = Number(n);
+  return `${Math.round(v * 1000) / 1000}%`;
+}
+
 /**
- * KEY CHANGE:
- * - Do NOT move/resize post_card_* groups (that causes child elements to “double move” if we also move children)
- * - Only resize/move post_bg_* (background rect) + expand post_text_* (text box height)
- * - Leave footer/icons alone so they stay aligned.
+ * Card growth + footer pinning (no footer group required).
+ *
+ * We stretch:
+ *  - post_bg_light / post_bg_dark height
+ *  - post_text_light / post_text_dark height
+ *
+ * And we push footer elements down by the same “center shift” we applied to the bg.
  */
 function buildModifications(body) {
   const mode = normalizeMode(body.mode);
@@ -117,62 +126,89 @@ function buildModifications(body) {
   const pfpUrl = safeStr(body.pfpUrl, "");
   const bgUrl = safeStr(body.backgroundVideoUrl, "");
 
-  // ---- estimate lines for growth ----
-  const charsPerLine = 36; // tweak if needed
+  // ---- line estimate ----
+  const charsPerLine = 36; // tweak if you change font size/width
   const lineCount = Math.max(1, Math.ceil(postText.length / charsPerLine));
   const extraLines = Math.max(0, lineCount - 2);
 
-  // Your base background rect size (matches your card feel)
-  const baseBgH = 18;        // %
-  const baseBgY = 24.27;     // %
-  const addPerLine = 2.8;    // % per extra line
+  // ---- your base bg rect numbers (from your card) ----
+  const baseBgH = 18;      // %
+  const baseBgY = 24.27;   // %
+
+  // how much taller per extra line
+  const addPerLine = 2.8;  // %
 
   const bgH = clamp(baseBgH + extraLines * addPerLine, baseBgH, 45);
   const deltaH = bgH - baseBgH;
 
-  // Move bg down by delta/2 so the TOP stays steady (no “space at top”)
-  const bgY = baseBgY + deltaH / 2;
+  // keep top visually steady: move bg down by delta/2
+  const centerShift = deltaH / 2;
+  const bgY = baseBgY + centerShift;
+
+  // ---- base footer Y values (these are YOUR current y's) ----
+  // From your JSON:
+  // like_count_light y = 30.3637%
+  // comment_count_light y = 30.3637%
+  // icon_like y = 31.6571%
+  // icon_comment y = 31.66%
+  // icon_share y = 31.66%
+  // share_light y = 30.5096%
+  //
+  // Dark should match these (same positions).
+  const BASE = {
+    like_count_y: 30.3637,
+    comment_count_y: 30.3637,
+    share_text_y: 30.5096,
+    icon_like_y: 31.6571,
+    icon_comment_y: 31.66,
+    icon_share_y: 31.66,
+  };
+
+  // push footer down with the card expansion
+  const likeY = BASE.like_count_y + centerShift;
+  const commentY = BASE.comment_count_y + centerShift;
+  const shareTextY = BASE.share_text_y + centerShift;
+  const iconLikeY = BASE.icon_like_y + centerShift;
+  const iconCommentY = BASE.icon_comment_y + centerShift;
+  const iconShareY = BASE.icon_share_y + centerShift;
 
   const OP_ON = "100%";
   const OP_OFF = "0%";
 
   const m = {};
 
-  // ---- show/hide groups + backgrounds ----
-  // IMPORTANT: we DO NOT change post_card_* y/height at all anymore.
+  // ---- show/hide cards (do NOT move card groups) ----
   m["post_card_light.hidden"] = !showLight;
   m["post_card_light.opacity"] = showLight ? OP_ON : OP_OFF;
 
   m["post_card_dark.hidden"] = !showDark;
   m["post_card_dark.opacity"] = showDark ? OP_ON : OP_OFF;
 
-  // Resize the background rectangles (these can safely resize)
+  // ---- background rects (stretch + shift) ----
   m["post_bg_light.hidden"] = !showLight;
   m["post_bg_light.opacity"] = showLight ? OP_ON : OP_OFF;
-  m["post_bg_light.y"] = `${bgY}%`;
-  m["post_bg_light.height"] = `${bgH}%`;
+  m["post_bg_light.y"] = pct(bgY);
+  m["post_bg_light.height"] = pct(bgH);
 
   m["post_bg_dark.hidden"] = !showDark;
   m["post_bg_dark.opacity"] = showDark ? OP_ON : OP_OFF;
-  m["post_bg_dark.y"] = `${bgY}%`;
-  m["post_bg_dark.height"] = `${bgH}%`;
+  m["post_bg_dark.y"] = pct(bgY);
+  m["post_bg_dark.height"] = pct(bgH);
 
-  // ---- text fields (your exact names) ----
+  // ---- header + main text ----
   m["username_light.text"] = username;
   m["username_dark.text"] = username;
 
   m["post_text_light.text"] = postText;
   m["post_text_dark.text"] = postText;
 
-  // Expand the post text box height so wrapping can happen inside the card
-  // (This is what prevents “text runs off card”)
-  // We grow text box height by most of deltaH, but leave space for header + footer.
-  const baseTextH = 10; // safe default; tweak if your post_text box is different
+  // expand post_text box height so it wraps instead of running out
+  const baseTextH = 10; // tweak if your post_text box differs
   const textH = clamp(baseTextH + deltaH * 0.75, baseTextH, 30);
+  m["post_text_light.height"] = pct(textH);
+  m["post_text_dark.height"] = pct(textH);
 
-  m["post_text_light.height"] = `${textH}%`;
-  m["post_text_dark.height"] = `${textH}%`;
-
+  // ---- counts + share ----
   m["like_count_light.text"] = likes;
   m["like_count_dark.text"] = likes;
 
@@ -181,6 +217,22 @@ function buildModifications(body) {
 
   m["share_light.text"] = shareText;
   m["share_dark.text"] = shareText;
+
+  // ---- ✅ FOOTER PINNING (move down as card grows) ----
+  // Counts + share y
+  m["like_count_light.y"] = pct(likeY);
+  m["like_count_dark.y"] = pct(likeY);
+
+  m["comment_count_light.y"] = pct(commentY);
+  m["comment_count_dark.y"] = pct(commentY);
+
+  m["share_light.y"] = pct(shareTextY);
+  m["share_dark.y"] = pct(shareTextY);
+
+  // Icons y (same icon names in both cards)
+  m["icon_like.y"] = pct(iconLikeY);
+  m["icon_comment.y"] = pct(iconCommentY);
+  m["icon_share.y"] = pct(iconShareY);
 
   // ---- images ----
   if (pfpUrl) {
@@ -205,6 +257,7 @@ module.exports = async function handler(req, res) {
       return json(res, 500, { ok: false, error: "Missing CREATOMATE_TEMPLATE_ID_REDDIT" });
     }
 
+    // ---- GET: poll render status ----
     if (req.method === "GET") {
       const url = new URL(req.url, "http://localhost");
       const id = url.searchParams.get("id");
@@ -216,6 +269,7 @@ module.exports = async function handler(req, res) {
       return json(res, 200, { ok: true, status, url: finalUrl || null });
     }
 
+    // ---- POST: start render ----
     if (req.method !== "POST") {
       return json(res, 405, { ok: false, error: "Use POST or GET" });
     }
