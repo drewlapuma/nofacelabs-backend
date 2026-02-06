@@ -96,37 +96,30 @@ function safeStr(v, fallback = "") {
   return s || fallback;
 }
 
-function normalizeMode(v) {
-  const s = String(v || "").toLowerCase().trim();
-  return s === "dark" ? "dark" : "light";
-}
-
 function clamp(n, a, b) {
   return Math.max(a, Math.min(b, n));
 }
 
 // ------------------------------
-// BASE POSITIONS (your template)
+// BASE VALUES from YOUR template
 // ------------------------------
-
-// post_bg_light from your inspector:
-// y: 24.2746%   height: 18%
+// post_bg_light inspector:
+// y: 24.2746%
+// height: 18%
 const BASE_BG_Y = 24.2746;
 const BASE_BG_H = 18.0;
 
-// Footer Y values (from your element JSON you pasted)
+// Footer Y values (from your element JSON paste)
 const BASE_SHARE_Y = 30.5096;     // share_light
 const BASE_COUNTS_Y = 30.3637;    // like_count_light / comment_count_light
 const BASE_ICONS_Y = 31.66;       // icon_share / icon_comment
 const BASE_ICON_LIKE_Y = 31.6571; // icon_like
 
-// ------------------------------
-// Heuristic wrap -> height grow
-// ------------------------------
-const WRAP_CHARS_PER_LINE = 34; // tune if needed
-const LINES_FREE = 3;           // no growth up to this many lines
-const PER_EXTRA_LINE_H = 3.15;  // % height added per extra line (tune)
-const MAX_EXTRA_H = 22;         // cap
+// Wrapping heuristic → how much to grow bg height
+const WRAP_CHARS_PER_LINE = 34;  // tune if needed
+const LINES_FREE = 3;            // no growth up to this many lines
+const PER_EXTRA_LINE_H = 3.15;   // % height added per extra line
+const MAX_EXTRA_H = 22;          // cap
 
 function estimateLines(text) {
   const t = safeStr(text, "—");
@@ -145,10 +138,6 @@ function estimateLines(text) {
 }
 
 function buildModifications(body) {
-  const mode = normalizeMode(body.mode);
-  const showLight = mode === "light";
-  const showDark = mode === "dark";
-
   const username = safeStr(body.username, "Nofacelabs.ai");
   const postText = safeStr(body.postText || body.postTitle, "—");
   const likes = safeStr(body.likes, "99+");
@@ -157,41 +146,40 @@ function buildModifications(body) {
   const pfpUrl = safeStr(body.pfpUrl, "");
   const bgUrl = safeStr(body.backgroundVideoUrl, "");
 
-  // dynamic growth
+  // grow logic
   const lines = estimateLines(postText);
   const extraLines = Math.max(0, lines - LINES_FREE);
   const deltaH = clamp(extraLines * PER_EXTRA_LINE_H, 0, MAX_EXTRA_H);
 
-  // Background is center-anchored, so to “pin” top:
-  // move center DOWN by half of deltaH
   const newBgH = BASE_BG_H + deltaH;
+
+  // center-anchored shape: to keep TOP pinned, move center down by deltaH/2
   const newBgY = clamp(BASE_BG_Y + (deltaH / 2), 0, 100);
 
-  // Footer should follow the bottom edge.
-  // Bottom moved down by deltaH/2, so footer shifts by deltaH/2 too.
+  // bottom edge moves down by deltaH/2, so footer shift = deltaH/2
   const footerShift = deltaH / 2;
 
   const m = {};
 
-  // Theme show/hide (keep this simple)
-  m["post_card_light.hidden"] = !showLight;
-  m["post_card_light.opacity"] = showLight ? 1 : 0;
+  // ✅ HARD FORCE: card groups ALWAYS visible (prevents “disappeared”)
+  m["post_card_light.hidden"] = false;
+  m["post_card_light.opacity"] = 1;
 
-  m["post_card_dark.hidden"] = !showDark;
-  m["post_card_dark.opacity"] = showDark ? 1 : 0;
+  m["post_card_dark.hidden"] = false;
+  m["post_card_dark.opacity"] = 1;
 
-  // Background rects
-  m["post_bg_light.hidden"] = !showLight;
-  m["post_bg_light.opacity"] = showLight ? 1 : 0;
+  // Background shapes: always visible too (we’re debugging stability first)
+  m["post_bg_light.hidden"] = false;
+  m["post_bg_light.opacity"] = 1;
   m["post_bg_light.height"] = `${newBgH}%`;
   m["post_bg_light.y"] = `${newBgY}%`;
 
-  m["post_bg_dark.hidden"] = !showDark;
-  m["post_bg_dark.opacity"] = showDark ? 1 : 0;
+  m["post_bg_dark.hidden"] = false;
+  m["post_bg_dark.opacity"] = 1;
   m["post_bg_dark.height"] = `${newBgH}%`;
   m["post_bg_dark.y"] = `${newBgY}%`;
 
-  // Text fields
+  // Text (ONLY your real names)
   m["username_light.text"] = username;
   m["username_dark.text"] = username;
 
@@ -218,23 +206,21 @@ function buildModifications(body) {
     m["Video.source"] = bgUrl;
   }
 
-  // Footer follows bottom (shift by HALF delta)
+  // Footer follow
   const yCounts = clamp(BASE_COUNTS_Y + footerShift, 0, 100);
   const yShare = clamp(BASE_SHARE_Y + footerShift, 0, 100);
   const yIcons = clamp(BASE_ICONS_Y + footerShift, 0, 100);
   const yLikeIcon = clamp(BASE_ICON_LIKE_Y + footerShift, 0, 100);
 
-  // counts (light + dark)
   m["like_count_light.y"] = `${yCounts}%`;
   m["comment_count_light.y"] = `${yCounts}%`;
   m["like_count_dark.y"] = `${yCounts}%`;
   m["comment_count_dark.y"] = `${yCounts}%`;
 
-  // share labels
   m["share_light.y"] = `${yShare}%`;
   m["share_dark.y"] = `${yShare}%`;
 
-  // icons (same names in both cards)
+  // Icons (same names in both cards)
   m["icon_share.y"] = `${yIcons}%`;
   m["icon_comment.y"] = `${yIcons}%`;
   m["icon_like.y"] = `${yLikeIcon}%`;
