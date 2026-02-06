@@ -99,7 +99,6 @@ function clamp(n, min, max) {
 }
 
 function pct(n) {
-  // keep nice clean percent strings
   const v = Number(n);
   return `${Math.round(v * 1000) / 1000}%`;
 }
@@ -107,11 +106,8 @@ function pct(n) {
 /**
  * Card growth + footer pinning (no footer group required).
  *
- * We stretch:
- *  - post_bg_light / post_bg_dark height
- *  - post_text_light / post_text_dark height
- *
- * And we push footer elements down by the same “center shift” we applied to the bg.
+ * Fix: when card grows, footer must move by FULL deltaH (not deltaH/2),
+ * or else you get blank space under footer.
  */
 function buildModifications(body) {
   const mode = normalizeMode(body.mode);
@@ -127,34 +123,24 @@ function buildModifications(body) {
   const bgUrl = safeStr(body.backgroundVideoUrl, "");
 
   // ---- line estimate ----
-  const charsPerLine = 36; // tweak if you change font size/width
+  const charsPerLine = 36;
   const lineCount = Math.max(1, Math.ceil(postText.length / charsPerLine));
   const extraLines = Math.max(0, lineCount - 2);
 
-  // ---- your base bg rect numbers (from your card) ----
+  // ---- your base bg rect numbers ----
   const baseBgH = 18;      // %
   const baseBgY = 24.27;   // %
 
-  // how much taller per extra line
   const addPerLine = 2.8;  // %
-
   const bgH = clamp(baseBgH + extraLines * addPerLine, baseBgH, 45);
+
   const deltaH = bgH - baseBgH;
 
-  // keep top visually steady: move bg down by delta/2
+  // Keep top visually steady by shifting center down half the growth
   const centerShift = deltaH / 2;
   const bgY = baseBgY + centerShift;
 
-  // ---- base footer Y values (these are YOUR current y's) ----
-  // From your JSON:
-  // like_count_light y = 30.3637%
-  // comment_count_light y = 30.3637%
-  // icon_like y = 31.6571%
-  // icon_comment y = 31.66%
-  // icon_share y = 31.66%
-  // share_light y = 30.5096%
-  //
-  // Dark should match these (same positions).
+  // ---- base footer Y values (YOUR current y's) ----
   const BASE = {
     like_count_y: 30.3637,
     comment_count_y: 30.3637,
@@ -164,20 +150,24 @@ function buildModifications(body) {
     icon_share_y: 31.66,
   };
 
-  // push footer down with the card expansion
-  const likeY = BASE.like_count_y + centerShift;
-  const commentY = BASE.comment_count_y + centerShift;
-  const shareTextY = BASE.share_text_y + centerShift;
-  const iconLikeY = BASE.icon_like_y + centerShift;
-  const iconCommentY = BASE.icon_comment_y + centerShift;
-  const iconShareY = BASE.icon_share_y + centerShift;
+  // ✅ KEY FIX:
+  // Move footer by FULL deltaH so it stays pinned near the bottom edge.
+  const footerShift = deltaH;
 
-  const OP_ON = "100%";
-  const OP_OFF = "0%";
+  const likeY = BASE.like_count_y + footerShift;
+  const commentY = BASE.comment_count_y + footerShift;
+  const shareTextY = BASE.share_text_y + footerShift;
+  const iconLikeY = BASE.icon_like_y + footerShift;
+  const iconCommentY = BASE.icon_comment_y + footerShift;
+  const iconShareY = BASE.icon_share_y + footerShift;
+
+  // ✅ opacity MUST be 0..1 numbers in Creatomate
+  const OP_ON = 1;
+  const OP_OFF = 0;
 
   const m = {};
 
-  // ---- show/hide cards (do NOT move card groups) ----
+  // ---- show/hide cards ----
   m["post_card_light.hidden"] = !showLight;
   m["post_card_light.opacity"] = showLight ? OP_ON : OP_OFF;
 
@@ -202,8 +192,8 @@ function buildModifications(body) {
   m["post_text_light.text"] = postText;
   m["post_text_dark.text"] = postText;
 
-  // expand post_text box height so it wraps instead of running out
-  const baseTextH = 10; // tweak if your post_text box differs
+  // expand post_text box height so it wraps
+  const baseTextH = 10; // %
   const textH = clamp(baseTextH + deltaH * 0.75, baseTextH, 30);
   m["post_text_light.height"] = pct(textH);
   m["post_text_dark.height"] = pct(textH);
@@ -218,8 +208,7 @@ function buildModifications(body) {
   m["share_light.text"] = shareText;
   m["share_dark.text"] = shareText;
 
-  // ---- ✅ FOOTER PINNING (move down as card grows) ----
-  // Counts + share y
+  // ---- footer pinning ----
   m["like_count_light.y"] = pct(likeY);
   m["like_count_dark.y"] = pct(likeY);
 
@@ -229,7 +218,6 @@ function buildModifications(body) {
   m["share_light.y"] = pct(shareTextY);
   m["share_dark.y"] = pct(shareTextY);
 
-  // Icons y (same icon names in both cards)
   m["icon_like.y"] = pct(iconLikeY);
   m["icon_comment.y"] = pct(iconCommentY);
   m["icon_share.y"] = pct(iconShareY);
@@ -257,7 +245,6 @@ module.exports = async function handler(req, res) {
       return json(res, 500, { ok: false, error: "Missing CREATOMATE_TEMPLATE_ID_REDDIT" });
     }
 
-    // ---- GET: poll render status ----
     if (req.method === "GET") {
       const url = new URL(req.url, "http://localhost");
       const id = url.searchParams.get("id");
@@ -269,7 +256,6 @@ module.exports = async function handler(req, res) {
       return json(res, 200, { ok: true, status, url: finalUrl || null });
     }
 
-    // ---- POST: start render ----
     if (req.method !== "POST") {
       return json(res, 405, { ok: false, error: "Use POST or GET" });
     }
