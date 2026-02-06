@@ -99,6 +99,7 @@ function clamp(n, min, max) {
 }
 
 function pct(n) {
+  // keep nice clean percent strings
   const v = Number(n);
   return `${Math.round(v * 1000) / 1000}%`;
 }
@@ -110,9 +111,7 @@ function pct(n) {
  *  - post_bg_light / post_bg_dark height
  *  - post_text_light / post_text_dark height
  *
- * And we push footer elements down by the same “center shift” we applied to bg.
- *
- * NOTE: opacity is 0..1 in Creatomate (NOT percent).
+ * And we push footer elements down by the same “center shift” we applied to the bg.
  */
 function buildModifications(body) {
   const mode = normalizeMode(body.mode);
@@ -128,22 +127,13 @@ function buildModifications(body) {
   const bgUrl = safeStr(body.backgroundVideoUrl, "");
 
   // ---- line estimate ----
-  // If you tweak font size or text box width in Creatomate, adjust this.
-  const charsPerLine = 36;
-  const hardLines = postText.split("\n");
-  let lineCount = 0;
-  for (const ln of hardLines) {
-    const s = (ln || "").trim();
-    lineCount += Math.max(1, Math.ceil((s ? s.length : 1) / charsPerLine));
-  }
-  lineCount = clamp(lineCount, 1, 20);
-
-  // Allow 2 lines before growing.
+  const charsPerLine = 36; // tweak if you change font size/width
+  const lineCount = Math.max(1, Math.ceil(postText.length / charsPerLine));
   const extraLines = Math.max(0, lineCount - 2);
 
-  // ---- base bg rect numbers (your inspector) ----
+  // ---- your base bg rect numbers (from your card) ----
   const baseBgH = 18;      // %
-  const baseBgY = 24.2746; // %
+  const baseBgY = 24.27;   // %
 
   // how much taller per extra line
   const addPerLine = 2.8;  // %
@@ -151,11 +141,20 @@ function buildModifications(body) {
   const bgH = clamp(baseBgH + extraLines * addPerLine, baseBgH, 45);
   const deltaH = bgH - baseBgH;
 
-  // keep TOP visually steady: move bg center down by delta/2
+  // keep top visually steady: move bg down by delta/2
   const centerShift = deltaH / 2;
-  const bgY = clamp(baseBgY + centerShift, 0, 100);
+  const bgY = baseBgY + centerShift;
 
-  // ---- base footer Y values (your current y's) ----
+  // ---- base footer Y values (these are YOUR current y's) ----
+  // From your JSON:
+  // like_count_light y = 30.3637%
+  // comment_count_light y = 30.3637%
+  // icon_like y = 31.6571%
+  // icon_comment y = 31.66%
+  // icon_share y = 31.66%
+  // share_light y = 30.5096%
+  //
+  // Dark should match these (same positions).
   const BASE = {
     like_count_y: 30.3637,
     comment_count_y: 30.3637,
@@ -166,21 +165,19 @@ function buildModifications(body) {
   };
 
   // push footer down with the card expansion
-  const likeY = clamp(BASE.like_count_y + centerShift, 0, 100);
-  const commentY = clamp(BASE.comment_count_y + centerShift, 0, 100);
-  const shareTextY = clamp(BASE.share_text_y + centerShift, 0, 100);
-  const iconLikeY = clamp(BASE.icon_like_y + centerShift, 0, 100);
-  const iconCommentY = clamp(BASE.icon_comment_y + centerShift, 0, 100);
-  const iconShareY = clamp(BASE.icon_share_y + centerShift, 0, 100);
+  const likeY = BASE.like_count_y + centerShift;
+  const commentY = BASE.comment_count_y + centerShift;
+  const shareTextY = BASE.share_text_y + centerShift;
+  const iconLikeY = BASE.icon_like_y + centerShift;
+  const iconCommentY = BASE.icon_comment_y + centerShift;
+  const iconShareY = BASE.icon_share_y + centerShift;
 
-  // Creatomate expects opacity as number 0..1
-  const OP_ON = 1;
-  const OP_OFF = 0;
+  const OP_ON = "100%";
+  const OP_OFF = "0%";
 
   const m = {};
 
-  // ---- show/hide cards safely ----
-  // Hidden is the real killer. Opacity alone is fine but hidden MUST match.
+  // ---- show/hide cards (do NOT move card groups) ----
   m["post_card_light.hidden"] = !showLight;
   m["post_card_light.opacity"] = showLight ? OP_ON : OP_OFF;
 
@@ -205,8 +202,8 @@ function buildModifications(body) {
   m["post_text_light.text"] = postText;
   m["post_text_dark.text"] = postText;
 
-  // expand post_text box height so it wraps (tune baseTextH if needed)
-  const baseTextH = 10; // %
+  // expand post_text box height so it wraps instead of running out
+  const baseTextH = 10; // tweak if your post_text box differs
   const textH = clamp(baseTextH + deltaH * 0.75, baseTextH, 30);
   m["post_text_light.height"] = pct(textH);
   m["post_text_dark.height"] = pct(textH);
@@ -221,7 +218,8 @@ function buildModifications(body) {
   m["share_light.text"] = shareText;
   m["share_dark.text"] = shareText;
 
-  // ---- footer pinning ----
+  // ---- ✅ FOOTER PINNING (move down as card grows) ----
+  // Counts + share y
   m["like_count_light.y"] = pct(likeY);
   m["like_count_dark.y"] = pct(likeY);
 
@@ -231,7 +229,7 @@ function buildModifications(body) {
   m["share_light.y"] = pct(shareTextY);
   m["share_dark.y"] = pct(shareTextY);
 
-  // Icons (same names in both cards)
+  // Icons y (same icon names in both cards)
   m["icon_like.y"] = pct(iconLikeY);
   m["icon_comment.y"] = pct(iconCommentY);
   m["icon_share.y"] = pct(iconShareY);
