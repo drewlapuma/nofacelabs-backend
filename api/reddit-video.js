@@ -1,4 +1,11 @@
 // api/reddit-video.js (CommonJS, Node 18+)
+// POST starts a Creatomate render
+// GET polls status
+//
+// Env:
+// - CREATOMATE_API_KEY
+// - CREATOMATE_TEMPLATE_ID_REDDIT
+// - ALLOW_ORIGIN or ALLOW_ORIGINS (optional)
 
 const https = require("https");
 
@@ -94,24 +101,61 @@ function normalizeMode(v) {
   return s === "dark" ? "dark" : "light";
 }
 
-function clamp(n, min, max) {
-  return Math.max(min, Math.min(max, n));
+function clamp(n, a, b) {
+  return Math.max(a, Math.min(b, n));
 }
 
-function pct(n) {
-  // keep nice clean percent strings
-  const v = Number(n);
-  return `${Math.round(v * 1000) / 1000}%`;
+// ------------------------------------------
+// 🔧 YOUR BASE GEOMETRY (from your inspector)
+// ------------------------------------------
+
+// post_bg_light (you pasted)
+const BASE_BG_Y = 24.2746;   // %
+const BASE_BG_H = 18.0;      // %
+
+/**
+ * Footer base Y values (from the element JSON you pasted)
+ * NOTE: we shift these DOWN by FULL deltaH so they stick to the bottom.
+ */
+const BASE_SHARE_Y = 30.5096;        // share_light y
+const BASE_COUNTS_Y = 30.3637;       // like_count_light/comment_count_light y
+const BASE_ICONS_Y = 31.66;          // icon_share/icon_comment y
+const BASE_ICON_LIKE_Y = 31.6571;    // icon_like y (slightly different)
+
+//
+// Heuristic tuning:
+// We need to estimate how many lines the post text will wrap to.
+// Since Creatomate doesn't auto-resize groups based on text,
+// we approximate and stretch the card by adding height per extra line.
+//
+const WRAP_CHARS_PER_LINE = 34; // tune if you want earlier/later wrapping
+const LINES_FREE = 3;          // how many lines fit before we start stretching
+const PER_EXTRA_LINE_H = 3.15; // % height added per extra wrapped line (tune)
+const MAX_EXTRA_H = 22;        // max extra % height (prevents gigantic cards)
+
+/**
+ * Estimate wrapped lines based on characters.
+ * (No perfect way without real text measurement — this is the practical approach.)
+ */
+function estimateLines(text) {
+  const t = safeStr(text, "—");
+  const hardLines = t.split("\n");
+  let total = 0;
+
+  for (const ln of hardLines) {
+    const s = (ln || "").trim();
+    if (!s) {
+      total += 1;
+      continue;
+    }
+    total += Math.max(1, Math.ceil(s.length / WRAP_CHARS_PER_LINE));
+  }
+  return clamp(total, 1, 20);
 }
 
 /**
- * Card growth + footer pinning (no footer group required).
- *
- * We stretch:
- *  - post_bg_light / post_bg_dark height
- *  - post_text_light / post_text_dark height
- *
- * And we push footer elements down by the same “center shift” we applied to the bg.
+ * Build modifications as an OBJECT (not an array).
+ * Uses dotted keys like "post_bg_light.height" etc.
  */
 function buildModifications(body) {
   const mode = normalizeMode(body.mode);
@@ -126,124 +170,121 @@ function buildModifications(body) {
   const pfpUrl = safeStr(body.pfpUrl, "");
   const bgUrl = safeStr(body.backgroundVideoUrl, "");
 
-  // ---- line estimate ----
-  const charsPerLine = 36; // tweak if you change font size/width
-  const lineCount = Math.max(1, Math.ceil(postText.length / charsPerLine));
-  const extraLines = Math.max(0, lineCount - 2);
+  // ---- dynamic height based on wrapped lines ----
+  const lines = estimateLines(postText);
+  const extraLines = Math.max(0, lines - LINES_FREE);
+  const deltaH = clamp(extraLines * PER_EXTRA_LINE_H, 0, MAX_EXTRA_H);
 
-  // ---- your base bg rect numbers (from your card) ----
-  const baseBgH = 18;      // %
-  const baseBgY = 24.27;   // %
+  // ✅ keep top pinned: increase height, then move center down by half delta
+  const newBgH = BASE_BG_H + deltaH;
+  const newBgY = BASE_BG_Y + (deltaH / 2);
 
-  // how much taller per extra line
-  const addPerLine = 2.8;  // %
-
-  const bgH = clamp(baseBgH + extraLines * addPerLine, baseBgH, 45);
-  const deltaH = bgH - baseBgH;
-
-  // keep top visually steady: move bg down by delta/2
-  const centerShift = deltaH / 2;
-  const bgY = baseBgY + centerShift;
-
-  // ---- base footer Y values (these are YOUR current y's) ----
-  // From your JSON:
-  // like_count_light y = 30.3637%
-  // comment_count_light y = 30.3637%
-  // icon_like y = 31.6571%
-  // icon_comment y = 31.66%
-  // icon_share y = 31.66%
-  // share_light y = 30.5096%
-  //
-  // Dark should match these (same positions).
-  const BASE = {
-    like_count_y: 30.3637,
-    comment_count_y: 30.3637,
-    share_text_y: 30.5096,
-    icon_like_y: 31.6571,
-    icon_comment_y: 31.66,
-    icon_share_y: 31.66,
-  };
-
-  // push footer down with the card expansion
-  const likeY = BASE.like_count_y + centerShift;
-  const commentY = BASE.comment_count_y + centerShift;
-  const shareTextY = BASE.share_text_y + centerShift;
-  const iconLikeY = BASE.icon_like_y + centerShift;
-  const iconCommentY = BASE.icon_comment_y + centerShift;
-  const iconShareY = BASE.icon_share_y + centerShift;
-
-  const OP_ON = "100%";
-  const OP_OFF = "0%";
+  // ✅ footer sticks to new bottom: shift by FULL delta
+  // If you want a tiny bottom padding when stretched, use 0.92–0.97 multiplier.
+  const footerShift = deltaH;
 
   const m = {};
 
-  // ---- show/hide cards (do NOT move card groups) ----
+  // --------------------------
+  // Theme visibility toggles
+  // --------------------------
+  // We keep using hidden + opacity; numbers 0/1 are correct in Creatomate.
   m["post_card_light.hidden"] = !showLight;
-  m["post_card_light.opacity"] = showLight ? OP_ON : OP_OFF;
+  m["post_card_light.opacity"] = showLight ? 1 : 0;
 
   m["post_card_dark.hidden"] = !showDark;
-  m["post_card_dark.opacity"] = showDark ? OP_ON : OP_OFF;
+  m["post_card_dark.opacity"] = showDark ? 1 : 0;
 
-  // ---- background rects (stretch + shift) ----
+  // Background rects
   m["post_bg_light.hidden"] = !showLight;
-  m["post_bg_light.opacity"] = showLight ? OP_ON : OP_OFF;
-  m["post_bg_light.y"] = pct(bgY);
-  m["post_bg_light.height"] = pct(bgH);
+  m["post_bg_light.opacity"] = showLight ? 1 : 0;
 
   m["post_bg_dark.hidden"] = !showDark;
-  m["post_bg_dark.opacity"] = showDark ? OP_ON : OP_OFF;
-  m["post_bg_dark.y"] = pct(bgY);
-  m["post_bg_dark.height"] = pct(bgH);
+  m["post_bg_dark.opacity"] = showDark ? 1 : 0;
 
-  // ---- header + main text ----
+  // --------------------------
+  // Stretch the backgrounds
+  // --------------------------
+  m["post_bg_light.height"] = `${newBgH}%`;
+  m["post_bg_light.y"] = `${newBgY}%`;
+
+  m["post_bg_dark.height"] = `${newBgH}%`;
+  m["post_bg_dark.y"] = `${newBgY}%`;
+
+  // OPTIONAL but recommended:
+  // If your card groups are the actual container sizing, stretch them too
+  // so any child positioning stays logically inside that bigger space.
+  m["post_card_light.height"] = `${newBgH}%`;
+  m["post_card_light.y"] = `${newBgY}%`;
+
+  m["post_card_dark.height"] = `${newBgH}%`;
+  m["post_card_dark.y"] = `${newBgY}%`;
+
+  // --------------------------
+  // Text fields (set both)
+  // --------------------------
   m["username_light.text"] = username;
   m["username_dark.text"] = username;
+  m["username.text"] = username; // harmless if it doesn't exist
 
   m["post_text_light.text"] = postText;
   m["post_text_dark.text"] = postText;
+  m["post_text.text"] = postText;
 
-  // expand post_text box height so it wraps instead of running out
-  const baseTextH = 10; // tweak if your post_text box differs
-  const textH = clamp(baseTextH + deltaH * 0.75, baseTextH, 30);
-  m["post_text_light.height"] = pct(textH);
-  m["post_text_dark.height"] = pct(textH);
-
-  // ---- counts + share ----
   m["like_count_light.text"] = likes;
   m["like_count_dark.text"] = likes;
+  m["like_count.text"] = likes;
 
   m["comment_count_light.text"] = comments;
   m["comment_count_dark.text"] = comments;
+  m["comment_count.text"] = comments;
 
   m["share_light.text"] = shareText;
   m["share_dark.text"] = shareText;
+  m["share.text"] = shareText;
 
-  // ---- ✅ FOOTER PINNING (move down as card grows) ----
-  // Counts + share y
-  m["like_count_light.y"] = pct(likeY);
-  m["like_count_dark.y"] = pct(likeY);
-
-  m["comment_count_light.y"] = pct(commentY);
-  m["comment_count_dark.y"] = pct(commentY);
-
-  m["share_light.y"] = pct(shareTextY);
-  m["share_dark.y"] = pct(shareTextY);
-
-  // Icons y (same icon names in both cards)
-  m["icon_like.y"] = pct(iconLikeY);
-  m["icon_comment.y"] = pct(iconCommentY);
-  m["icon_share.y"] = pct(iconShareY);
-
-  // ---- images ----
+  // --------------------------
+  // PFP (both variants)
+  // --------------------------
   if (pfpUrl) {
     m["pfp_light.source"] = pfpUrl;
     m["pfp_dark.source"] = pfpUrl;
+    m["pfp.source"] = pfpUrl; // harmless if it doesn't exist
   }
 
-  // ---- video ----
+  // --------------------------
+  // Background video
+  // --------------------------
   if (bgUrl) {
     m["Video.source"] = bgUrl;
   }
+
+  // ----------------------------------------------
+  // ✅ Footer follows stretch (no blank space below)
+  // ----------------------------------------------
+  // Counts
+  m["like_count_light.y"] = `${BASE_COUNTS_Y + footerShift}%`;
+  m["comment_count_light.y"] = `${BASE_COUNTS_Y + footerShift}%`;
+  m["like_count_dark.y"] = `${BASE_COUNTS_Y + footerShift}%`;
+  m["comment_count_dark.y"] = `${BASE_COUNTS_Y + footerShift}%`;
+
+  // Share label
+  m["share_light.y"] = `${BASE_SHARE_Y + footerShift}%`;
+  m["share_dark.y"] = `${BASE_SHARE_Y + footerShift}%`;
+
+  // Icons (same icon names for both cards)
+  m["icon_share.y"] = `${BASE_ICONS_Y + footerShift}%`;
+  m["icon_comment.y"] = `${BASE_ICONS_Y + footerShift}%`;
+  m["icon_like.y"] = `${BASE_ICON_LIKE_Y + footerShift}%`;
+
+  // (Optional) if icons ever get hidden by mistake, force them visible:
+  // m["icon_share.hidden"] = false;
+  // m["icon_comment.hidden"] = false;
+  // m["icon_like.hidden"] = false;
+
+  // Helpful for debugging in console if you log modificationsPreview
+  m["__debug.lines"] = lines;
+  m["__debug.deltaH"] = deltaH;
 
   return m;
 }
@@ -266,6 +307,7 @@ module.exports = async function handler(req, res) {
       const r = await creatomateRequest(`/v1/renders/${encodeURIComponent(id)}`, "GET");
       const status = String(r?.status || "").toLowerCase();
       const finalUrl = r?.url || r?.result?.url || r?.outputs?.[0]?.url || "";
+
       return json(res, 200, { ok: true, status, url: finalUrl || null });
     }
 
@@ -295,9 +337,10 @@ module.exports = async function handler(req, res) {
       render_scale: 1,
     });
 
+    // Creatomate sometimes returns an array: [ { id, ... } ]
     const start = Array.isArray(startResp) ? startResp[0] : startResp;
-    const renderId = start?.id;
 
+    const renderId = start?.id;
     if (!renderId) {
       return json(res, 500, {
         ok: false,
