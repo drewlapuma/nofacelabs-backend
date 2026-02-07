@@ -182,42 +182,51 @@ function buildModifications(body) {
   const iconCommentY = currentBottom - (baseBottom - BASE_Y.icon_comment_y);
   const iconShareY = currentBottom - (baseBottom - BASE_Y.icon_share_y);
 
-  // ---- X layout fixes (this is the important part) ----
-  // baseline comment positions (from your JSON)
+   // ---- X layout fixes (updated spacing + collision-safe) ----
+  const BASE_LIKE_TEXT_X = 19.0572;
+
   const BASE_COMMENT_ICON_X = 29.0172;
   const BASE_COMMENT_TEXT_X = 31.6676;
 
-  // baseline share positions (from your JSON)
-  // icon_share.x = 71.279%, share_light.x = 74.5318% (x_anchor 0)
-  // We'll re-anchor share text to RIGHT (x_anchor=100) and compute icon x based on share text length.
+  // SHARE pinned to inside-right of card, grows LEFT
+  const RIGHT_PAD = 3.2;
+  const SHARE_TEXT_X = cardRight - RIGHT_PAD;
 
-  // 1) SHARE GROUP: always pinned to inside-right edge of the card,
-  // and grows LEFT (so it never runs off the card)
-  const RIGHT_PAD = 3.2; // % padding inside the card
-  const SHARE_TEXT_X = cardRight - RIGHT_PAD; // right edge for the share text (x_anchor=100)
-
-  // Estimate share text width in % of comp width.
-  // Tuned for Inter ~3.5 vmin at 720x1280 outputs.
   const shareLen = String(shareText || "").length;
-  const estShareTextW = clamp(shareLen * 1.7, 6, 42); // %
+  const estShareTextW = clamp(shareLen * 1.7, 6, 42);
 
-  // Place icon to the LEFT of the share text block:
-  // icon half-width ~2.7% + gap ~1.2% => ~3.9%
-  const SHARE_ICON_X = SHARE_TEXT_X - estShareTextW - 3.9;
+  // ✅ more gap so icon doesn't clip into share text
+  const SHARE_ICON_GAP = 5.1; // was ~3.9
+  const SHARE_ICON_X = SHARE_TEXT_X - estShareTextW - SHARE_ICON_GAP;
 
-  // 2) LIKE -> pushes COMMENT group right (stronger than before)
+  // LIKE pushes comment group right (stronger)
   const likeLen = String(likes || "").length;
   const likeExtra = Math.max(0, likeLen - 3);
 
-  // stronger push per extra char
-  let likeShift = likeExtra * 1.55;
-  likeShift = clamp(likeShift, 0, 26);
+  let likeShift = likeExtra * 1.75;     // was 1.55
+  likeShift = clamp(likeShift, 0, 30);  // a little more headroom
 
-  // Comments must NOT collide into the share group.
-  // Keep comment text left of the share icon area.
-  const maxCommentTextX = SHARE_ICON_X - 6.5; // buffer before share icon/text
-  const commentTextX = clamp(BASE_COMMENT_TEXT_X + likeShift, BASE_COMMENT_TEXT_X, maxCommentTextX);
-  const commentIconX = commentTextX - (BASE_COMMENT_TEXT_X - BASE_COMMENT_ICON_X);
+  // Start with shift-based position
+  let commentTextX = BASE_COMMENT_TEXT_X + likeShift;
+  let commentIconX = commentTextX - (BASE_COMMENT_TEXT_X - BASE_COMMENT_ICON_X);
+
+  // ✅ GUARANTEE comment icon clears the rendered like text width
+  const estLikeTextW = clamp(likeLen * 1.7, 6, 42);
+  const LIKE_CLEAR_GAP = 4.0; // extra breathing room so it doesn't clip
+  const minCommentIconX = BASE_LIKE_TEXT_X + estLikeTextW + LIKE_CLEAR_GAP;
+
+  if (commentIconX < minCommentIconX) {
+    commentIconX = minCommentIconX;
+    commentTextX = commentIconX + (BASE_COMMENT_TEXT_X - BASE_COMMENT_ICON_X);
+  }
+
+  // ✅ also guarantee comment group never collides with share group
+  const maxCommentTextX = SHARE_ICON_X - 7.0; // slightly more buffer than before
+  if (commentTextX > maxCommentTextX) {
+    commentTextX = maxCommentTextX;
+    commentIconX = commentTextX - (BASE_COMMENT_TEXT_X - BASE_COMMENT_ICON_X);
+  }
+
 
   // ---- build modifications ----
   const OP_ON = "100%";
