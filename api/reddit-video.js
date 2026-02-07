@@ -120,9 +120,9 @@ function buildModifications(body) {
   const lineCount = Math.max(1, Math.ceil(postText.length / charsPerLine));
   const extraLines = Math.max(0, lineCount - 2);
 
-  const baseBgH = 18;     
-  const baseBgY = 24.27;  
-  const addPerLine = 2.8; 
+  const baseBgH = 18;
+  const baseBgY = 24.27;
+  const addPerLine = 2.8;
 
   const bgH = clamp(baseBgH + extraLines * addPerLine, baseBgH, 45);
   const deltaH = bgH - baseBgH;
@@ -139,15 +139,23 @@ function buildModifications(body) {
     icon_share_y: 31.66,
   };
 
-  // ✅ ONLY CHANGE: reduce footer shift to tighten the gap
-  const footerShift = deltaH * 0.80;
+  // ✅ ONLY CHANGE: anchor footer to the bottom of the card (removes blank bottom space)
+  const baseBottom = baseBgY + baseBgH / 2;       // original bg bottom
+  const currentBottom = bgY + bgH / 2;            // new bg bottom after stretching
 
-  const likeY = BASE.like_count_y + footerShift;
-  const commentY = BASE.comment_count_y + footerShift;
-  const shareTextY = BASE.share_text_y + footerShift;
-  const iconLikeY = BASE.icon_like_y + footerShift;
-  const iconCommentY = BASE.icon_comment_y + footerShift;
-  const iconShareY = BASE.icon_share_y + footerShift;
+  const distLike = baseBottom - BASE.like_count_y;
+  const distComment = baseBottom - BASE.comment_count_y;
+  const distShareText = baseBottom - BASE.share_text_y;
+  const distIconLike = baseBottom - BASE.icon_like_y;
+  const distIconComment = baseBottom - BASE.icon_comment_y;
+  const distIconShare = baseBottom - BASE.icon_share_y;
+
+  const likeY = currentBottom - distLike;
+  const commentY = currentBottom - distComment;
+  const shareTextY = currentBottom - distShareText;
+  const iconLikeY = currentBottom - distIconLike;
+  const iconCommentY = currentBottom - distIconComment;
+  const iconShareY = currentBottom - distIconShare;
 
   const OP_ON = "100%";
   const OP_OFF = "0%";
@@ -190,6 +198,7 @@ function buildModifications(body) {
   m["share_light.text"] = shareText;
   m["share_dark.text"] = shareText;
 
+  // footer y (now pinned to bg bottom)
   m["like_count_light.y"] = pct(likeY);
   m["like_count_dark.y"] = pct(likeY);
 
