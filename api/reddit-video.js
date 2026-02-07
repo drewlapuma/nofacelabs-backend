@@ -162,7 +162,7 @@ function buildModifications(body) {
   };
 
   // ✅ your “blank space fix” logic stays as-is (this is what you were using)
-  const footerPadUp = clamp(2 + deltaH * 0.18, 0.65, 1.5);
+  const footerPadUp = clamp(0.1 + deltaH * 0.18, 0.65, 1.5);
   bgH = clamp(bgH - footerPadUp * 2, baseBgH, 45);
   bgY = bgY - footerPadUp;
 
