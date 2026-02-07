@@ -317,10 +317,14 @@ function buildModifications(body) {
   if (pfpUrl) {
     setMulti(m, ["pfp_light.source", "post_card_light.pfp_light.source"], pfpUrl);
     setMulti(m, ["pfp_dark.source", "post_card_dark.pfp_dark.source"], pfpUrl);
-  }
-  if (bgUrl) {
-    m["Video.source"] = bgUrl;
-  }
+  
+    if (bgUrl) {
+  m["Video.source"] = bgUrl;
+
+  // ✅ Crop instead of stretch
+  m["Video.fit"] = "cover";
+}
+
 
   return m;
 }
