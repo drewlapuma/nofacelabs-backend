@@ -103,18 +103,18 @@ function pct(n) {
   return `${Math.round(v * 1000) / 1000}%`;
 }
 
-/** reject blob:/data: URLs early with a clear message */
+/** reject blob:/data: URLs early (Creatomate can't fetch them) */
 function ensurePublicHttpUrl(url, label) {
   const u = String(url || "").trim();
   if (!u) return "";
   if (u.startsWith("blob:")) {
     throw new Error(
-      `${label} is a blob: URL (browser-only). Upload the file and send the public https URL instead.`
+      `${label} is a blob: URL (browser-only). Upload to Supabase/R2 and send the public https URL instead.`
     );
   }
   if (u.startsWith("data:")) {
     throw new Error(
-      `${label} is a data: URL. Upload the file and send the public https URL instead.`
+      `${label} is a data: URL. Upload to Supabase/R2 and send the public https URL instead.`
     );
   }
   if (!/^https?:\/\//i.test(u)) {
@@ -137,24 +137,34 @@ function buildModifications(body) {
   const pfpUrl = ensurePublicHttpUrl(body.pfpUrl, "pfpUrl");
   const bgUrl = ensurePublicHttpUrl(body.backgroundVideoUrl, "backgroundVideoUrl");
 
-  // ---- line estimate ----
+  // ---------- text -> background sizing ----------
   const charsPerLine = 36;
   const lineCount = Math.max(1, Math.ceil(postText.length / charsPerLine));
   const extraLines = Math.max(0, lineCount - 2);
 
-  // ---- your base bg rect numbers ----
   const baseBgH = 18;
-  const baseBgY = 24.27;
+  const baseBgY = 24.2746;
   const addPerLine = 2.8;
 
   let bgH = clamp(baseBgH + extraLines * addPerLine, baseBgH, 45);
   const deltaH = bgH - baseBgH;
 
-  const centerShift = deltaH / 2;
-  let bgY = baseBgY + centerShift;
+  // Center the bg while it grows
+  let bgY = baseBgY + deltaH / 2;
 
-  // ---- base footer Y values ----
-  const BASE = {
+  // ✅ IMPORTANT FIX:
+  // Only trim the bottom when bg actually grew (deltaH > 0).
+  // This prevents short titles from having footer too close.
+  const footerPadUp = clamp(deltaH * 0.22, 0, 1.5); // 0..1.5
+  bgH = clamp(bgH - footerPadUp * 2, baseBgH, 45);
+  bgY = bgY - footerPadUp;
+
+  // ---------- header top padding reduction ----------
+  // Move header group up slightly (pfp/username/flairs)
+  const headerLift = 0.55;
+
+  // ---------- footer anchoring ----------
+  const BASE_Y = {
     like_count_y: 30.3637,
     comment_count_y: 30.3637,
     share_text_y: 30.5096,
@@ -163,21 +173,15 @@ function buildModifications(body) {
     icon_share_y: 31.66,
   };
 
-  // ---- your blank-space fix (keep it) ----
-  const footerPadUp = clamp(0.1 + deltaH * 0.18, 0.65, 1.5);
-  bgH = clamp(bgH - footerPadUp * 2, baseBgH, 45);
-  bgY = bgY - footerPadUp;
-
-  // footer pinned to bottom
   const baseBottom = baseBgY + baseBgH / 2;
   const currentBottom = bgY + bgH / 2;
 
-  const distLike = baseBottom - BASE.like_count_y;
-  const distComment = baseBottom - BASE.comment_count_y;
-  const distShareText = baseBottom - BASE.share_text_y;
-  const distIconLike = baseBottom - BASE.icon_like_y;
-  const distIconComment = baseBottom - BASE.icon_comment_y;
-  const distIconShare = baseBottom - BASE.icon_share_y;
+  const distLike = baseBottom - BASE_Y.like_count_y;
+  const distComment = baseBottom - BASE_Y.comment_count_y;
+  const distShareText = baseBottom - BASE_Y.share_text_y;
+  const distIconLike = baseBottom - BASE_Y.icon_like_y;
+  const distIconComment = baseBottom - BASE_Y.icon_comment_y;
+  const distIconShare = baseBottom - BASE_Y.icon_share_y;
 
   const likeY = currentBottom - distLike;
   const commentY = currentBottom - distComment;
@@ -186,75 +190,97 @@ function buildModifications(body) {
   const iconCommentY = currentBottom - distIconComment;
   const iconShareY = currentBottom - distIconShare;
 
-  // ===============================
-  // ✅ FOOTER X BEHAVIOR (THIS is the fix)
-  // - share never goes off card: shift share group LEFT when long
-  // - likes pushes comment group RIGHT when long
-  // ===============================
-
-  // Your real X values from template
-  const XBASE = {
-    icon_like_x: 16.2,
-    like_text_x: 19.0572, // x_anchor 0
-    icon_comment_x: 29.0172,
-    comment_text_x: 31.6676, // x_anchor 0
-    icon_share_x: 71.279,
-    share_text_x: 74.5318, // x_anchor 0
+  // ---------- X layout fixes for long counts ----------
+  // Base X from your template JSON
+  const BASE_X = {
+    like_text_x: 19.0572,
+    comment_icon_x: 29.0172,
+    comment_text_x: 31.6676,
+    share_icon_x: 71.279,
+    share_text_x: 74.5318,
+    bg_width: 75.0,
+    bg_x_anchor: 50.0, // implied by x_anchor 50%
   };
 
-  const likesLen = String(likes || "").length;
-  const shareLen = String(shareText || "").length;
+  // 1) Likes pushes comment group to the right
+  // baseline is "99+" (3 chars). Add shift per extra char.
+  const likeExtra = Math.max(0, String(likes).length - 3);
+  let likeShift = likeExtra * 0.85; // % per char (tune 0.6-1.0)
 
-  // How much to push comment right (likes grows)
-  const extraLikeChars = Math.max(0, likesLen - 3); // baseline "99+"
-  const pushComment = clamp(extraLikeChars * 0.9, 0, 14);
+  // cap so comment doesn't run into share area
+  // keep at least ~10% gap before share icon
+  const maxShift = (BASE_X.share_icon_x - 10) - BASE_X.comment_text_x;
+  likeShift = clamp(likeShift, 0, maxShift);
 
-  // How much to pull share left (share grows)
-  const extraShareChars = Math.max(0, shareLen - 5); // baseline "share"
-  const pullShareLeft = clamp(extraShareChars * 0.8, 0, 22);
+  const commentIconX = BASE_X.comment_icon_x + likeShift;
+  const commentTextX = BASE_X.comment_text_x + likeShift;
 
-  const iconCommentX = XBASE.icon_comment_x + pushComment;
-  const commentTextX = XBASE.comment_text_x + pushComment;
+  // 2) Share text: extend card bg to the right if share is long
+  // baseline "share" (5 chars)
+  const shareExtra = Math.max(0, String(shareText).length - 5);
 
-  const iconShareX = XBASE.icon_share_x - pullShareLeft;
-  const shareTextX = XBASE.share_text_x - pullShareLeft;
+  // grow bg width up to +12%
+  const bgExtraW = clamp(shareExtra * 0.65, 0, 12);
+
+  // Keep left edge same (original left edge is 50 - 75/2 = 12.5)
+  // If we increase width by bgExtraW, shift bg center right by bgExtraW/2
+  const bgW = BASE_X.bg_width + bgExtraW;
+  const bgCenterX = 50 + bgExtraW / 2;
+
+  // (We do NOT move the footer elements; they stay in same coordinate system,
+  // so the new white bg covers the area under long share text.)
 
   const OP_ON = "100%";
   const OP_OFF = "0%";
 
   const m = {};
 
-  // ---- show/hide cards (KEEP your opacity logic) ----
+  // show/hide modes
   m["post_card_light.hidden"] = !showLight;
   m["post_card_light.opacity"] = showLight ? OP_ON : OP_OFF;
 
   m["post_card_dark.hidden"] = !showDark;
   m["post_card_dark.opacity"] = showDark ? OP_ON : OP_OFF;
 
-  // ---- background rects (stretch + shift) ----
+  // bg position/size (and width expansion to right)
   m["post_bg_light.hidden"] = !showLight;
   m["post_bg_light.opacity"] = showLight ? OP_ON : OP_OFF;
   m["post_bg_light.y"] = pct(bgY);
   m["post_bg_light.height"] = pct(bgH);
+  m["post_bg_light.width"] = pct(bgW);
+  m["post_bg_light.x"] = pct(bgCenterX);
 
   m["post_bg_dark.hidden"] = !showDark;
   m["post_bg_dark.opacity"] = showDark ? OP_ON : OP_OFF;
   m["post_bg_dark.y"] = pct(bgY);
   m["post_bg_dark.height"] = pct(bgH);
+  m["post_bg_dark.width"] = pct(bgW);
+  m["post_bg_dark.x"] = pct(bgCenterX);
 
-  // ---- header + main text ----
+  // header lift (reduce top padding)
+  // (These names exist in your template: pfp_light, username_light, flair1..10, and dark versions)
+  m["pfp_light.y"] = pct(19.5679 - headerLift);
+  m["username_light.y"] = pct(16.8449 - headerLift);
+  for (let i = 1; i <= 10; i++) m[`flair${i}.y`] = pct(20.9268 - headerLift);
+
+  // if you also have dark versions named similarly:
+  m["pfp_dark.y"] = pct(19.5679 - headerLift);
+  m["username_dark.y"] = pct(16.8449 - headerLift);
+
+  // text content
   m["username_light.text"] = username;
   m["username_dark.text"] = username;
 
   m["post_text_light.text"] = postText;
   m["post_text_dark.text"] = postText;
 
+  // text height scaling
   const baseTextH = 10;
   const textH = clamp(baseTextH + deltaH * 0.75, baseTextH, 30);
   m["post_text_light.height"] = pct(textH);
   m["post_text_dark.height"] = pct(textH);
 
-  // ---- counts + share ----
+  // footer text
   m["like_count_light.text"] = likes;
   m["like_count_dark.text"] = likes;
 
@@ -264,7 +290,7 @@ function buildModifications(body) {
   m["share_light.text"] = shareText;
   m["share_dark.text"] = shareText;
 
-  // ---- FOOTER Y ----
+  // footer Y pinned to bg bottom
   m["like_count_light.y"] = pct(likeY);
   m["like_count_dark.y"] = pct(likeY);
 
@@ -278,22 +304,16 @@ function buildModifications(body) {
   m["icon_comment.y"] = pct(iconCommentY);
   m["icon_share.y"] = pct(iconShareY);
 
-  // ---- ✅ FOOTER X (NEW) ----
-  m["icon_comment.x"] = pct(iconCommentX);
+  // ✅ comment group X push when likes are long
+  m["icon_comment.x"] = pct(commentIconX);
   m["comment_count_light.x"] = pct(commentTextX);
   m["comment_count_dark.x"] = pct(commentTextX);
 
-  m["icon_share.x"] = pct(iconShareX);
-  m["share_light.x"] = pct(shareTextX);
-  m["share_dark.x"] = pct(shareTextX);
-
-  // ---- images ----
+  // set sources
   if (pfpUrl) {
     m["pfp_light.source"] = pfpUrl;
     m["pfp_dark.source"] = pfpUrl;
   }
-
-  // ---- video ----
   if (bgUrl) {
     m["Video.source"] = bgUrl;
   }
