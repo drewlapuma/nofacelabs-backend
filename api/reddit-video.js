@@ -209,7 +209,7 @@ function buildModifications(body) {
 
     // Estimate text width, then place icon safely before it
     const estShareTextW = clamp(shareLen * 1.7, 6, 42);
-    const SHARE_ICON_GAP = 4.6; // enough space so icon won't clip into text
+    const SHARE_ICON_GAP = 5; // enough space so icon won't clip into text
     shareTextX = shareRightX;
     shareIconX = shareTextX - estShareTextW - SHARE_ICON_GAP;
   }
