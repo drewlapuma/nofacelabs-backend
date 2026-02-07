@@ -140,7 +140,7 @@ function buildModifications(body) {
   };
 
   // ✅ ONLY CHANGE: reduce footer shift to tighten the gap
-  const footerShift = deltaH * 0.75;
+  const footerShift = deltaH * 0.80;
 
   const likeY = BASE.like_count_y + footerShift;
   const commentY = BASE.comment_count_y + footerShift;
