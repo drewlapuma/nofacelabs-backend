@@ -182,51 +182,67 @@ function buildModifications(body) {
   const iconCommentY = currentBottom - (baseBottom - BASE_Y.icon_comment_y);
   const iconShareY = currentBottom - (baseBottom - BASE_Y.icon_share_y);
 
-   // ---- X layout fixes (updated spacing + collision-safe) ----
+  // ---- X layout fixes (ADAPTIVE: tight by default, expands only when needed) ----
   const BASE_LIKE_TEXT_X = 19.0572;
 
   const BASE_COMMENT_ICON_X = 29.0172;
   const BASE_COMMENT_TEXT_X = 31.6676;
 
-  // SHARE pinned to inside-right of card, grows LEFT
-  const RIGHT_PAD = 3.2;
-  const SHARE_TEXT_X = cardRight - RIGHT_PAD;
+  const BASE_SHARE_ICON_X = 71.279;
+  const BASE_SHARE_TEXT_X = 74.5318;
 
-  const shareLen = String(shareText || "").length;
-  const estShareTextW = clamp(shareLen * 1.7, 6, 42);
-
-  // ✅ more gap so icon doesn't clip into share text
-  const SHARE_ICON_GAP = 5.1; // was ~3.9
-  const SHARE_ICON_X = SHARE_TEXT_X - estShareTextW - SHARE_ICON_GAP;
-
-  // LIKE pushes comment group right (stronger)
   const likeLen = String(likes || "").length;
-  const likeExtra = Math.max(0, likeLen - 3);
+  const shareLen = String(shareText || "").length;
 
-  let likeShift = likeExtra * 1.75;     // was 1.55
-  likeShift = clamp(likeShift, 0, 30);  // a little more headroom
+  // Only go into "long" mode when needed
+  const likeLong = likeLen > 4;     // normal: "99+" (3)
+  const shareLong = shareLen > 6;   // normal: "share" (5)
 
-  // Start with shift-based position
-  let commentTextX = BASE_COMMENT_TEXT_X + likeShift;
-  let commentIconX = commentTextX - (BASE_COMMENT_TEXT_X - BASE_COMMENT_ICON_X);
+  // -------- SHARE (default = original template positions) --------
+  let shareTextX = BASE_SHARE_TEXT_X;
+  let shareIconX = BASE_SHARE_ICON_X;
 
-  // ✅ GUARANTEE comment icon clears the rendered like text width
-  const estLikeTextW = clamp(likeLen * 1.7, 6, 42);
-  const LIKE_CLEAR_GAP = 7.5; // extra breathing room so it doesn't clip
-  const minCommentIconX = BASE_LIKE_TEXT_X + estLikeTextW + LIKE_CLEAR_GAP;
+  if (shareLong) {
+    // Pin share text inside-right of the card, grow LEFT
+    const RIGHT_PAD = 3.2;
+    const shareRightX = cardRight - RIGHT_PAD;
 
-  if (commentIconX < minCommentIconX) {
-    commentIconX = minCommentIconX;
-    commentTextX = commentIconX + (BASE_COMMENT_TEXT_X - BASE_COMMENT_ICON_X);
+    // Estimate text width, then place icon safely before it
+    const estShareTextW = clamp(shareLen * 1.7, 6, 42);
+    const SHARE_ICON_GAP = 4.6; // enough space so icon won't clip into text
+    shareTextX = shareRightX;
+    shareIconX = shareTextX - estShareTextW - SHARE_ICON_GAP;
   }
 
-  // ✅ also guarantee comment group never collides with share group
-  const maxCommentTextX = SHARE_ICON_X - 7.0; // slightly more buffer than before
-  if (commentTextX > maxCommentTextX) {
-    commentTextX = maxCommentTextX;
+  // -------- COMMENTS (default = original template positions) --------
+  let commentTextX = BASE_COMMENT_TEXT_X;
+  let commentIconX = BASE_COMMENT_ICON_X;
+
+  if (likeLong) {
+    // Push comment group right as likes gets longer
+    const likeExtra = Math.max(0, likeLen - 3);
+    let likeShift = clamp(likeExtra * 1.35, 0, 22);
+
+    commentTextX = BASE_COMMENT_TEXT_X + likeShift;
     commentIconX = commentTextX - (BASE_COMMENT_TEXT_X - BASE_COMMENT_ICON_X);
-  }
 
+    // Ensure comment icon clears the like text width
+    const estLikeTextW = clamp(likeLen * 1.7, 6, 42);
+    const LIKE_CLEAR_GAP = 6.6;
+    const minCommentIconX = BASE_LIKE_TEXT_X + estLikeTextW + LIKE_CLEAR_GAP;
+
+    if (commentIconX < minCommentIconX) {
+      commentIconX = minCommentIconX;
+      commentTextX = commentIconX + (BASE_COMMENT_TEXT_X - BASE_COMMENT_ICON_X);
+    }
+
+    // Ensure comment group doesn't collide with share group area
+    const maxCommentTextX = (shareLong ? (shareIconX - 7.0) : (BASE_SHARE_ICON_X - 6.0));
+    if (commentTextX > maxCommentTextX) {
+      commentTextX = maxCommentTextX;
+      commentIconX = commentTextX - (BASE_COMMENT_TEXT_X - BASE_COMMENT_ICON_X);
+    }
+  }
 
   // ---- build modifications ----
   const OP_ON = "100%";
@@ -277,19 +293,25 @@ function buildModifications(body) {
   setMulti(m, ["icon_comment.y", "post_card_light.icon_comment.y", "post_card_dark.icon_comment.y"], pct(iconCommentY));
   setMulti(m, ["icon_share.y", "post_card_light.icon_share.y", "post_card_dark.icon_share.y"], pct(iconShareY));
 
-  // ✅ LIKE pushes COMMENT group to the right (X)
+  // ✅ comment push (X)
   setMulti(m, ["icon_comment.x", "post_card_light.icon_comment.x", "post_card_dark.icon_comment.x"], pct(commentIconX));
   setMulti(m, ["comment_count_light.x", "post_card_light.comment_count_light.x"], pct(commentTextX));
   setMulti(m, ["comment_count_dark.x", "post_card_dark.comment_count_dark.x"], pct(commentTextX));
 
-  // ✅ SHARE: text grows LEFT and icon always stays BEFORE it
-  setMulti(m, ["share_light.x_anchor", "post_card_light.share_light.x_anchor"], "100%");
-  setMulti(m, ["share_dark.x_anchor", "post_card_dark.share_dark.x_anchor"], "100%");
+  // ✅ share positioning (only anchor-right when share is long)
+  if (shareLong) {
+    setMulti(m, ["share_light.x_anchor", "post_card_light.share_light.x_anchor"], "100%");
+    setMulti(m, ["share_dark.x_anchor", "post_card_dark.share_dark.x_anchor"], "100%");
+  } else {
+    // reset to template default (left/top)
+    setMulti(m, ["share_light.x_anchor", "post_card_light.share_light.x_anchor"], "0%");
+    setMulti(m, ["share_dark.x_anchor", "post_card_dark.share_dark.x_anchor"], "0%");
+  }
 
-  setMulti(m, ["share_light.x", "post_card_light.share_light.x"], pct(SHARE_TEXT_X));
-  setMulti(m, ["share_dark.x", "post_card_dark.share_dark.x"], pct(SHARE_TEXT_X));
+  setMulti(m, ["share_light.x", "post_card_light.share_light.x"], pct(shareTextX));
+  setMulti(m, ["share_dark.x", "post_card_dark.share_dark.x"], pct(shareTextX));
 
-  setMulti(m, ["icon_share.x", "post_card_light.icon_share.x", "post_card_dark.icon_share.x"], pct(SHARE_ICON_X));
+  setMulti(m, ["icon_share.x", "post_card_light.icon_share.x", "post_card_dark.icon_share.x"], pct(shareIconX));
 
   // sources
   if (pfpUrl) {
@@ -302,6 +324,7 @@ function buildModifications(body) {
 
   return m;
 }
+
 
 module.exports = async function handler(req, res) {
   setCors(req, res);
