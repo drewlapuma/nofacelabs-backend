@@ -30,19 +30,18 @@ function json(res, status, body) {
   res.end(JSON.stringify(body));
 }
 
-function readBody(req) {
-  return new Promise((resolve) => {
-    if (req.body) return resolve(req.body);
-    let data = "";
-    req.on("data", (c) => (data += c));
-    req.on("end", () => {
-      try {
-        resolve(JSON.parse(data || "{}"));
-      } catch {
-        resolve({});
-      }
-    });
-  });
+async function readBody(req) {
+  // Works reliably on Vercel Node serverless
+  if (req.body && typeof req.body === "object") return req.body;
+
+  let data = "";
+  for await (const chunk of req) data += chunk;
+  if (!data.trim()) return {};
+  try {
+    return JSON.parse(data);
+  } catch {
+    return {};
+  }
 }
 
 function creatomateRequest(path, method, payload) {
@@ -140,8 +139,7 @@ function buildModifications(body) {
   // post_bg_light.width = "75%" centered at x=50%
   const BG_WIDTH = 75;
   const BG_CENTER_X = 50;
-  const cardLeft = BG_CENTER_X - BG_WIDTH / 2;   // 12.5
-  const cardRight = BG_CENTER_X + BG_WIDTH / 2;  // 87.5
+  const cardRight = BG_CENTER_X + BG_WIDTH / 2; // 87.5
 
   // ---- height logic (your existing approach) ----
   const charsPerLine = 36;
@@ -195,8 +193,8 @@ function buildModifications(body) {
   const shareLen = String(shareText || "").length;
 
   // Only go into "long" mode when needed
-  const likeLong = likeLen > 4;     // normal: "99+" (3)
-  const shareLong = shareLen > 6;   // normal: "share" (5)
+  const likeLong = likeLen > 4; // normal: "99+" (3)
+  const shareLong = shareLen > 6; // normal: "share" (5)
 
   // -------- SHARE (default = original template positions) --------
   let shareTextX = BASE_SHARE_TEXT_X;
@@ -221,7 +219,7 @@ function buildModifications(body) {
   if (likeLong) {
     // Push comment group right as likes gets longer
     const likeExtra = Math.max(0, likeLen - 3);
-    let likeShift = clamp(likeExtra * 1.35, 0, 22);
+    const likeShift = clamp(likeExtra * 1.35, 0, 22);
 
     commentTextX = BASE_COMMENT_TEXT_X + likeShift;
     commentIconX = commentTextX - (BASE_COMMENT_TEXT_X - BASE_COMMENT_ICON_X);
@@ -237,7 +235,7 @@ function buildModifications(body) {
     }
 
     // Ensure comment group doesn't collide with share group area
-    const maxCommentTextX = (shareLong ? (shareIconX - 7.0) : (BASE_SHARE_ICON_X - 6.0));
+    const maxCommentTextX = shareLong ? shareIconX - 7.0 : BASE_SHARE_ICON_X - 6.0;
     if (commentTextX > maxCommentTextX) {
       commentTextX = maxCommentTextX;
       commentIconX = commentTextX - (BASE_COMMENT_TEXT_X - BASE_COMMENT_ICON_X);
@@ -247,7 +245,6 @@ function buildModifications(body) {
   // ---- build modifications ----
   const OP_ON = "100%";
   const OP_OFF = "0%";
-
   const m = {};
 
   // show/hide light/dark
@@ -293,46 +290,49 @@ function buildModifications(body) {
   setMulti(m, ["icon_comment.y", "post_card_light.icon_comment.y", "post_card_dark.icon_comment.y"], pct(iconCommentY));
   setMulti(m, ["icon_share.y", "post_card_light.icon_share.y", "post_card_dark.icon_share.y"], pct(iconShareY));
 
-  // ✅ comment push (X)
+  // comment push (X)
   setMulti(m, ["icon_comment.x", "post_card_light.icon_comment.x", "post_card_dark.icon_comment.x"], pct(commentIconX));
   setMulti(m, ["comment_count_light.x", "post_card_light.comment_count_light.x"], pct(commentTextX));
   setMulti(m, ["comment_count_dark.x", "post_card_dark.comment_count_dark.x"], pct(commentTextX));
 
-  // ✅ share positioning (only anchor-right when share is long)
+  // share positioning (only anchor-right when share is long)
   if (shareLong) {
     setMulti(m, ["share_light.x_anchor", "post_card_light.share_light.x_anchor"], "100%");
     setMulti(m, ["share_dark.x_anchor", "post_card_dark.share_dark.x_anchor"], "100%");
   } else {
-    // reset to template default (left/top)
     setMulti(m, ["share_light.x_anchor", "post_card_light.share_light.x_anchor"], "0%");
     setMulti(m, ["share_dark.x_anchor", "post_card_dark.share_dark.x_anchor"], "0%");
   }
 
   setMulti(m, ["share_light.x", "post_card_light.share_light.x"], pct(shareTextX));
   setMulti(m, ["share_dark.x", "post_card_dark.share_dark.x"], pct(shareTextX));
-
   setMulti(m, ["icon_share.x", "post_card_light.icon_share.x", "post_card_dark.icon_share.x"], pct(shareIconX));
 
-  // sources
+  // sources (✅ FIXED: bgUrl block is NOT inside pfpUrl)
   if (pfpUrl) {
     setMulti(m, ["pfp_light.source", "post_card_light.pfp_light.source"], pfpUrl);
     setMulti(m, ["pfp_dark.source", "post_card_dark.pfp_dark.source"], pfpUrl);
-  
-    if (bgUrl) {
-  m["Video.source"] = bgUrl;
+  }
 
-  // ✅ Crop instead of stretch
-  m["Video.fit"] = "cover";
-}
+  if (bgUrl) {
+    m["Video.source"] = bgUrl;
 
+    // ✅ Crop instead of stretch
+    m["Video.fit"] = "cover";
+  }
 
   return m;
 }
 
-
 module.exports = async function handler(req, res) {
   setCors(req, res);
-  if (req.method === "OPTIONS") return res.end();
+
+  // ✅ FIX: preflight must return 200 WITH CORS headers
+  if (req.method === "OPTIONS") {
+    res.statusCode = 200;
+    res.end();
+    return;
+  }
 
   try {
     if (!TEMPLATE_ID) {
