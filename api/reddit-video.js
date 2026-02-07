@@ -141,7 +141,9 @@ function buildModifications(body) {
 
   // ✅ ONLY ADDITION: if footer is moved up, shrink card bottom to end after footer
   // This keeps the TOP of the card identical while pulling the BOTTOM up.
-  const footerPadUp = 1.5; // tweak 0.4–1.2 if you want tighter/looser
+  // Dynamic: keep space on short titles, trim more only when card grows
+const footerPadUp = clamp(0.65 + deltaH * 0.18, 0.65, 1.5);
+// tweak 0.4–1.2 if you want tighter/looser
   bgH = clamp(bgH - footerPadUp * 2, baseBgH, 45);
   bgY = bgY - footerPadUp;
 
