@@ -144,7 +144,7 @@ function buildModifications(body) {
   const baseBottom = baseBgY + baseBgH / 2; // original bg bottom
   const currentBottom = bgY + bgH / 2;      // new bg bottom after stretching
 
-  const footerPadUp = 1;                  // ← tweak 0.6–1.2 to taste
+  const footerPadUp = 1.5;                  // ← tweak 0.6–1.2 to taste
   const footerBottom = currentBottom - footerPadUp;
 
   const distLike = baseBottom - BASE.like_count_y;
