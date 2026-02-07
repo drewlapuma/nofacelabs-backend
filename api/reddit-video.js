@@ -134,7 +134,7 @@ function buildModifications(body) {
   const comments = safeStr(body.comments, "99+");
   const shareText = safeStr(body.shareText, "share");
 
-  // ✅ only change here is: make sure URLs are real public URLs
+  // ✅ make sure URLs are real public URLs
   const pfpUrl = ensurePublicHttpUrl(body.pfpUrl, "pfpUrl");
   const bgUrl = ensurePublicHttpUrl(body.backgroundVideoUrl, "backgroundVideoUrl");
 
@@ -161,7 +161,7 @@ function buildModifications(body) {
     icon_share_y: 31.66,
   };
 
-  // ✅ your “blank space fix” logic stays as-is (this is what you were using)
+  // ✅ your “blank space fix” logic stays as-is
   const footerPadUp = clamp(0.1 + deltaH * 0.18, 0.65, 1.5);
   bgH = clamp(bgH - footerPadUp * 2, baseBgH, 45);
   bgY = bgY - footerPadUp;
@@ -188,12 +188,14 @@ function buildModifications(body) {
 
   const m = {};
 
+  // ---- show/hide cards (KEEP YOUR ORIGINAL OPACITY LOGIC) ----
   m["post_card_light.hidden"] = !showLight;
   m["post_card_light.opacity"] = showLight ? OP_ON : OP_OFF;
 
   m["post_card_dark.hidden"] = !showDark;
   m["post_card_dark.opacity"] = showDark ? OP_ON : OP_OFF;
 
+  // ---- bg rect (height/y) ----
   m["post_bg_light.hidden"] = !showLight;
   m["post_bg_light.opacity"] = showLight ? OP_ON : OP_OFF;
   m["post_bg_light.y"] = pct(bgY);
@@ -204,6 +206,7 @@ function buildModifications(body) {
   m["post_bg_dark.y"] = pct(bgY);
   m["post_bg_dark.height"] = pct(bgH);
 
+  // ---- text ----
   m["username_light.text"] = username;
   m["username_dark.text"] = username;
 
@@ -215,6 +218,7 @@ function buildModifications(body) {
   m["post_text_light.height"] = pct(textH);
   m["post_text_dark.height"] = pct(textH);
 
+  // ---- footer text ----
   m["like_count_light.text"] = likes;
   m["like_count_dark.text"] = likes;
 
@@ -224,6 +228,7 @@ function buildModifications(body) {
   m["share_light.text"] = shareText;
   m["share_dark.text"] = shareText;
 
+  // ---- footer Y pinned to bg bottom ----
   m["like_count_light.y"] = pct(likeY);
   m["like_count_dark.y"] = pct(likeY);
 
@@ -237,11 +242,62 @@ function buildModifications(body) {
   m["icon_comment.y"] = pct(iconCommentY);
   m["icon_share.y"] = pct(iconShareY);
 
+  // ===============================
+  // ✅ HORIZONTAL FOOTER LAYOUT (v2 using YOUR real X values)
+  // - share grows to the right (card widens to the right)
+  // - likes text pushes comment group right
+  // ===============================
+
+  // From your template JSON (all %)
+  const BG_BASE_W = 75; // post_bg_light.width
+  const BG_BASE_X = 50; // centered, x_anchor 50%
+
+  const LIKE_ICON_X = 16.2;
+  const LIKE_TEXT_X = 19.0572; // like_count_light.x (x_anchor 0)
+
+  const COMMENT_ICON_X = 29.0172;
+  const COMMENT_TEXT_X = 31.6676; // comment_count_light.x (x_anchor 0)
+
+  const SHARE_ICON_X = 71.279;
+  const SHARE_TEXT_X = 74.5318; // share_light.x (x_anchor 0)
+
+  const shareLen = String(shareText || "").length;
+  const likesLen = String(likes || "").length;
+
+  const extraShareChars = Math.max(0, shareLen - 5); // "share" baseline
+  const shareExtra = clamp(extraShareChars * 0.85, 0, 22); // % widen
+
+  const extraLikeChars = Math.max(0, likesLen - 3); // "99+" baseline
+  const commentsPush = clamp(extraLikeChars * 0.95, 0, 18); // % push right
+
+  // Widen mostly based on share, lightly on likes (keeps left edge fixed)
+  const widen = Math.max(shareExtra, commentsPush * 0.35);
+
+  const newBgW = clamp(BG_BASE_W + widen, BG_BASE_W, 92);
+  const newBgX = BG_BASE_X + (newBgW - BG_BASE_W) / 2;
+
+  m["post_bg_light.width"] = pct(newBgW);
+  m["post_bg_dark.width"] = pct(newBgW);
+  m["post_bg_light.x"] = pct(newBgX);
+  m["post_bg_dark.x"] = pct(newBgX);
+
+  // Share group follows the widened right edge
+  m["icon_share.x"] = pct(SHARE_ICON_X + widen);
+  m["share_light.x"] = pct(SHARE_TEXT_X + widen);
+  m["share_dark.x"] = pct(SHARE_TEXT_X + widen);
+
+  // Likes stays anchored; comment group gets pushed right as likes grows
+  m["icon_comment.x"] = pct(COMMENT_ICON_X + commentsPush);
+  m["comment_count_light.x"] = pct(COMMENT_TEXT_X + commentsPush);
+  m["comment_count_dark.x"] = pct(COMMENT_TEXT_X + commentsPush);
+
+  // ---- images ----
   if (pfpUrl) {
     m["pfp_light.source"] = pfpUrl;
     m["pfp_dark.source"] = pfpUrl;
   }
 
+  // ---- video ----
   if (bgUrl) {
     m["Video.source"] = bgUrl;
   }
@@ -258,6 +314,7 @@ module.exports = async function handler(req, res) {
       return json(res, 500, { ok: false, error: "Missing CREATOMATE_TEMPLATE_ID_REDDIT" });
     }
 
+    // ---- GET: poll render status ----
     if (req.method === "GET") {
       const url = new URL(req.url, "http://localhost");
       const id = url.searchParams.get("id");
@@ -269,6 +326,7 @@ module.exports = async function handler(req, res) {
       return json(res, 200, { ok: true, status, url: finalUrl || null });
     }
 
+    // ---- POST: start render ----
     if (req.method !== "POST") {
       return json(res, 405, { ok: false, error: "Use POST or GET" });
     }
