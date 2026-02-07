@@ -112,6 +112,12 @@ function ensurePublicHttpUrl(url, label) {
   return u;
 }
 
+/**
+ * Writes the same value to multiple modification paths.
+ * This helps because sometimes Creatomate returns nested keys like:
+ *  - post_card_light.icon_share.x
+ * even if we originally set icon_share.x
+ */
 function setMulti(m, paths, value) {
   for (const p of paths) m[p] = value;
 }
@@ -131,12 +137,13 @@ function buildModifications(body) {
   const bgUrl = ensurePublicHttpUrl(body.backgroundVideoUrl, "backgroundVideoUrl");
 
   // ---- card bg geometry (from your template) ----
-  const BG_WIDTH = 75;      // post_bg_light.width = "75%"
-  const BG_CENTER_X = 50;   // centered
+  // post_bg_light.width = "75%" centered at x=50%
+  const BG_WIDTH = 75;
+  const BG_CENTER_X = 50;
   const cardLeft = BG_CENTER_X - BG_WIDTH / 2;   // 12.5
   const cardRight = BG_CENTER_X + BG_WIDTH / 2;  // 87.5
 
-  // ---- height logic ----
+  // ---- height logic (your existing approach) ----
   const charsPerLine = 36;
   const lineCount = Math.max(1, Math.ceil(postText.length / charsPerLine));
   const extraLines = Math.max(0, lineCount - 2);
@@ -150,11 +157,12 @@ function buildModifications(body) {
 
   let bgY = baseBgY + deltaH / 2;
 
-  // trim only when it grew
+  // shrink bottom padding only when it grew (prevents blank space)
   const footerPadUp = clamp(deltaH * 0.22, 0, 1.5);
   bgH = clamp(bgH - footerPadUp * 2, baseBgH, 45);
   bgY = bgY - footerPadUp;
 
+  // base Y positions from your template
   const BASE_Y = {
     like_count_y: 30.3637,
     comment_count_y: 30.3637,
@@ -174,35 +182,53 @@ function buildModifications(body) {
   const iconCommentY = currentBottom - (baseBottom - BASE_Y.icon_comment_y);
   const iconShareY = currentBottom - (baseBottom - BASE_Y.icon_share_y);
 
-  // ---- X layout fixes (inside the 75% card) ----
-  // baseline comment group positions from your JSON:
+  // ---- X layout fixes (this is the important part) ----
+  // baseline comment positions (from your JSON)
   const BASE_COMMENT_ICON_X = 29.0172;
   const BASE_COMMENT_TEXT_X = 31.6676;
 
-  // share group anchored to the cardRight (87.5%)
-  // keep a little “right padding” so it never touches the edge
-  const RIGHT_PAD = 3.2;        // % padding inside card
-  const SHARE_TEXT_X = cardRight - RIGHT_PAD;         // right-anchored text position
-  const SHARE_ICON_X = SHARE_TEXT_X - 3.4;            // icon just left of text (tweak 3.0–3.8)
+  // baseline share positions (from your JSON)
+  // icon_share.x = 71.279%, share_light.x = 74.5318% (x_anchor 0)
+  // We'll re-anchor share text to RIGHT (x_anchor=100) and compute icon x based on share text length.
 
-  // likes pushes comment group, but never into share group
-  const likeExtra = Math.max(0, String(likes).length - 3);
-  let likeShift = likeExtra * 0.85;   // % per extra char
-  likeShift = clamp(likeShift, 0, 18);
+  // 1) SHARE GROUP: always pinned to inside-right edge of the card,
+  // and grows LEFT (so it never runs off the card)
+  const RIGHT_PAD = 3.2; // % padding inside the card
+  const SHARE_TEXT_X = cardRight - RIGHT_PAD; // right edge for the share text (x_anchor=100)
 
-  // clamp comments so comment text stays left of share icon area
-  const maxCommentTextX = SHARE_ICON_X - 6.5; // keep room between comments and share group
+  // Estimate share text width in % of comp width.
+  // Tuned for Inter ~3.5 vmin at 720x1280 outputs.
+  const shareLen = String(shareText || "").length;
+  const estShareTextW = clamp(shareLen * 1.7, 6, 42); // %
+
+  // Place icon to the LEFT of the share text block:
+  // icon half-width ~2.7% + gap ~1.2% => ~3.9%
+  const SHARE_ICON_X = SHARE_TEXT_X - estShareTextW - 3.9;
+
+  // 2) LIKE -> pushes COMMENT group right (stronger than before)
+  const likeLen = String(likes || "").length;
+  const likeExtra = Math.max(0, likeLen - 3);
+
+  // stronger push per extra char
+  let likeShift = likeExtra * 1.55;
+  likeShift = clamp(likeShift, 0, 26);
+
+  // Comments must NOT collide into the share group.
+  // Keep comment text left of the share icon area.
+  const maxCommentTextX = SHARE_ICON_X - 6.5; // buffer before share icon/text
   const commentTextX = clamp(BASE_COMMENT_TEXT_X + likeShift, BASE_COMMENT_TEXT_X, maxCommentTextX);
   const commentIconX = commentTextX - (BASE_COMMENT_TEXT_X - BASE_COMMENT_ICON_X);
 
+  // ---- build modifications ----
   const OP_ON = "100%";
   const OP_OFF = "0%";
 
   const m = {};
 
-  // show/hide
+  // show/hide light/dark
   m["post_card_light.hidden"] = !showLight;
   m["post_card_light.opacity"] = showLight ? OP_ON : OP_OFF;
+
   m["post_card_dark.hidden"] = !showDark;
   m["post_card_dark.opacity"] = showDark ? OP_ON : OP_OFF;
 
@@ -212,24 +238,29 @@ function buildModifications(body) {
   setMulti(m, ["post_bg_dark.y", "post_card_dark.post_bg_dark.y"], pct(bgY));
   setMulti(m, ["post_bg_dark.height", "post_card_dark.post_bg_dark.height"], pct(bgH));
 
-  // content
+  // content texts
   setMulti(m, ["username_light.text", "post_card_light.username_light.text"], username);
   setMulti(m, ["username_dark.text", "post_card_dark.username_dark.text"], username);
+
   setMulti(m, ["post_text_light.text", "post_card_light.post_text_light.text"], postText);
   setMulti(m, ["post_text_dark.text", "post_card_dark.post_text_dark.text"], postText);
 
   setMulti(m, ["like_count_light.text", "post_card_light.like_count_light.text"], likes);
   setMulti(m, ["like_count_dark.text", "post_card_dark.like_count_dark.text"], likes);
+
   setMulti(m, ["comment_count_light.text", "post_card_light.comment_count_light.text"], comments);
   setMulti(m, ["comment_count_dark.text", "post_card_dark.comment_count_dark.text"], comments);
+
   setMulti(m, ["share_light.text", "post_card_light.share_light.text"], shareText);
   setMulti(m, ["share_dark.text", "post_card_dark.share_dark.text"], shareText);
 
-  // footer Y pinned
+  // footer Y pinned to bg bottom
   setMulti(m, ["like_count_light.y", "post_card_light.like_count_light.y"], pct(likeY));
   setMulti(m, ["like_count_dark.y", "post_card_dark.like_count_dark.y"], pct(likeY));
+
   setMulti(m, ["comment_count_light.y", "post_card_light.comment_count_light.y"], pct(commentY));
   setMulti(m, ["comment_count_dark.y", "post_card_dark.comment_count_dark.y"], pct(commentY));
+
   setMulti(m, ["share_light.y", "post_card_light.share_light.y"], pct(shareTextY));
   setMulti(m, ["share_dark.y", "post_card_dark.share_dark.y"], pct(shareTextY));
 
@@ -237,17 +268,18 @@ function buildModifications(body) {
   setMulti(m, ["icon_comment.y", "post_card_light.icon_comment.y", "post_card_dark.icon_comment.y"], pct(iconCommentY));
   setMulti(m, ["icon_share.y", "post_card_light.icon_share.y", "post_card_dark.icon_share.y"], pct(iconShareY));
 
-  // ✅ comment push (X)
+  // ✅ LIKE pushes COMMENT group to the right (X)
   setMulti(m, ["icon_comment.x", "post_card_light.icon_comment.x", "post_card_dark.icon_comment.x"], pct(commentIconX));
   setMulti(m, ["comment_count_light.x", "post_card_light.comment_count_light.x"], pct(commentTextX));
   setMulti(m, ["comment_count_dark.x", "post_card_dark.comment_count_dark.x"], pct(commentTextX));
 
-  // ✅ share stays inside the 75% card
-  // make share text grow LEFT instead of RIGHT
+  // ✅ SHARE: text grows LEFT and icon always stays BEFORE it
   setMulti(m, ["share_light.x_anchor", "post_card_light.share_light.x_anchor"], "100%");
   setMulti(m, ["share_dark.x_anchor", "post_card_dark.share_dark.x_anchor"], "100%");
+
   setMulti(m, ["share_light.x", "post_card_light.share_light.x"], pct(SHARE_TEXT_X));
   setMulti(m, ["share_dark.x", "post_card_dark.share_dark.x"], pct(SHARE_TEXT_X));
+
   setMulti(m, ["icon_share.x", "post_card_light.icon_share.x", "post_card_dark.icon_share.x"], pct(SHARE_ICON_X));
 
   // sources
