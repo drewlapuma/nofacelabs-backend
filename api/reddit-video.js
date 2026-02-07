@@ -143,7 +143,7 @@ function buildModifications(body) {
   const baseBottom = baseBgY + baseBgH / 2;       // original bg bottom
   const currentBottom = bgY + bgH / 2;    // new bg bottom after stretching
 
-  const padUp = 1; // percent; try 0.4 to 1.2
+  const padUp = 2; // percent; try 0.4 to 1.2
   const bottom = currentBottom - padUp;
 
   const distLike = baseBottom - BASE.like_count_y;
