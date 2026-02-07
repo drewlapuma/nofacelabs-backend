@@ -153,12 +153,13 @@ function buildModifications(body) {
   const distIconComment = baseBottom - BASE.icon_comment_y;
   const distIconShare = baseBottom - BASE.icon_share_y;
 
- const likeY = footerBottom - distLike;
- const commentY = footerBottom - distComment;
- const shareTextY = footerBottom - distShareText;
- const iconLikeY = footerBottom - distIconLike;
- const iconCommentY = footerBottom - distIconComment;
- const iconShareY = footerBottom - distIconShare;
+const likeY = currentBottom - distLike;
+const commentY = currentBottom - distComment;
+const shareTextY = currentBottom - distShareText;
+const iconLikeY = currentBottom - distIconLike;
+const iconCommentY = currentBottom - distIconComment;
+const iconShareY = currentBottom - distIconShare;
+
 
 
   const OP_ON = "100%";
