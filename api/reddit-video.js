@@ -124,11 +124,11 @@ function buildModifications(body) {
   const baseBgY = 24.27;
   const addPerLine = 2.8;
 
-  const bgH = clamp(baseBgH + extraLines * addPerLine, baseBgH, 45);
+  let bgH = clamp(baseBgH + extraLines * addPerLine, baseBgH, 45);
   const deltaH = bgH - baseBgH;
 
   const centerShift = deltaH / 2;
-  const bgY = baseBgY + centerShift;
+  let bgY = baseBgY + centerShift;
 
   const BASE = {
     like_count_y: 30.3637,
@@ -139,13 +139,15 @@ function buildModifications(body) {
     icon_share_y: 31.66,
   };
 
-  // ✅ CHANGE ADDED: move the entire footer UP a little while staying pinned to the bottom
-  // (removes blank space at the bottom AND tightens the gap above the footer)
-  const baseBottom = baseBgY + baseBgH / 2; // original bg bottom
-  const currentBottom = bgY + bgH / 2;      // new bg bottom after stretching
+  // ✅ ONLY ADDITION: if footer is moved up, shrink card bottom to end after footer
+  // This keeps the TOP of the card identical while pulling the BOTTOM up.
+  const footerPadUp = 0.9; // tweak 0.4–1.2 if you want tighter/looser
+  bgH = clamp(bgH - footerPadUp * 2, baseBgH, 45);
+  bgY = bgY - footerPadUp;
 
-  const footerPadUp = 1.5;                  // ← tweak 0.6–1.2 to taste
-  const footerBottom = currentBottom - footerPadUp;
+  // footer pinned to the (trimmed) bottom of the bg
+  const baseBottom = baseBgY + baseBgH / 2;
+  const currentBottom = bgY + bgH / 2;
 
   const distLike = baseBottom - BASE.like_count_y;
   const distComment = baseBottom - BASE.comment_count_y;
@@ -154,12 +156,12 @@ function buildModifications(body) {
   const distIconComment = baseBottom - BASE.icon_comment_y;
   const distIconShare = baseBottom - BASE.icon_share_y;
 
-  const likeY = footerBottom - distLike;
-  const commentY = footerBottom - distComment;
-  const shareTextY = footerBottom - distShareText;
-  const iconLikeY = footerBottom - distIconLike;
-  const iconCommentY = footerBottom - distIconComment;
-  const iconShareY = footerBottom - distIconShare;
+  const likeY = currentBottom - distLike;
+  const commentY = currentBottom - distComment;
+  const shareTextY = currentBottom - distShareText;
+  const iconLikeY = currentBottom - distIconLike;
+  const iconCommentY = currentBottom - distIconComment;
+  const iconShareY = currentBottom - distIconShare;
 
   const OP_ON = "100%";
   const OP_OFF = "0%";
@@ -202,7 +204,6 @@ function buildModifications(body) {
   m["share_light.text"] = shareText;
   m["share_dark.text"] = shareText;
 
-  // footer y (pinned to bg bottom, then nudged up)
   m["like_count_light.y"] = pct(likeY);
   m["like_count_dark.y"] = pct(likeY);
 
