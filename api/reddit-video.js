@@ -228,7 +228,7 @@ function buildModifications(body) {
 
     // Ensure comment icon clears the like text width
     const estLikeTextW = clamp(likeLen * 1.7, 6, 42);
-    const LIKE_CLEAR_GAP = 6.6;
+    const LIKE_CLEAR_GAP = 7.5;
     const minCommentIconX = BASE_LIKE_TEXT_X + estLikeTextW + LIKE_CLEAR_GAP;
 
     if (commentIconX < minCommentIconX) {
