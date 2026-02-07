@@ -103,6 +103,26 @@ function pct(n) {
   return `${Math.round(v * 1000) / 1000}%`;
 }
 
+/** ✅ ADDED: reject blob:/data: URLs early with a clear message */
+function ensurePublicHttpUrl(url, label) {
+  const u = String(url || "").trim();
+  if (!u) return "";
+  if (u.startsWith("blob:")) {
+    throw new Error(
+      `${label} is a blob: URL (browser-only). Upload the file to Supabase/R2 and send the public https URL instead.`
+    );
+  }
+  if (u.startsWith("data:")) {
+    throw new Error(
+      `${label} is a data: URL. Upload the file to Supabase/R2 and send the public https URL instead.`
+    );
+  }
+  if (!/^https?:\/\//i.test(u)) {
+    throw new Error(`${label} must be an http(s) URL.`);
+  }
+  return u;
+}
+
 function buildModifications(body) {
   const mode = normalizeMode(body.mode);
   const showLight = mode === "light";
@@ -113,8 +133,10 @@ function buildModifications(body) {
   const likes = safeStr(body.likes, "99+");
   const comments = safeStr(body.comments, "99+");
   const shareText = safeStr(body.shareText, "share");
-  const pfpUrl = safeStr(body.pfpUrl, "");
-  const bgUrl = safeStr(body.backgroundVideoUrl, "");
+
+  // ✅ only change here is: make sure URLs are real public URLs
+  const pfpUrl = ensurePublicHttpUrl(body.pfpUrl, "pfpUrl");
+  const bgUrl = ensurePublicHttpUrl(body.backgroundVideoUrl, "backgroundVideoUrl");
 
   const charsPerLine = 36;
   const lineCount = Math.max(1, Math.ceil(postText.length / charsPerLine));
@@ -139,15 +161,11 @@ function buildModifications(body) {
     icon_share_y: 31.66,
   };
 
-  // ✅ ONLY ADDITION: if footer is moved up, shrink card bottom to end after footer
-  // This keeps the TOP of the card identical while pulling the BOTTOM up.
-  // Dynamic: keep space on short titles, trim more only when card grows
-const footerPadUp = clamp(0.15 + deltaH * 0.18, 0.65, 1.5);
-// tweak 0.4–1.2 if you want tighter/looser
+  // ✅ your “blank space fix” logic stays as-is (this is what you were using)
+  const footerPadUp = clamp(0.15 + deltaH * 0.18, 0.65, 1.5);
   bgH = clamp(bgH - footerPadUp * 2, baseBgH, 45);
   bgY = bgY - footerPadUp;
 
-  // footer pinned to the (trimmed) bottom of the bg
   const baseBottom = baseBgY + baseBgH / 2;
   const currentBottom = bgY + bgH / 2;
 
