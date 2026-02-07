@@ -139,9 +139,13 @@ function buildModifications(body) {
     icon_share_y: 31.66,
   };
 
-  // ✅ ONLY CHANGE: anchor footer to the bottom of the card (removes blank bottom space)
-  const baseBottom = baseBgY + baseBgH / 2;       // original bg bottom
-  const currentBottom = bgY + bgH / 2;    // new bg bottom after stretching
+  // ✅ CHANGE ADDED: move the entire footer UP a little while staying pinned to the bottom
+  // (removes blank space at the bottom AND tightens the gap above the footer)
+  const baseBottom = baseBgY + baseBgH / 2; // original bg bottom
+  const currentBottom = bgY + bgH / 2;      // new bg bottom after stretching
+
+  const footerPadUp = 1;                  // ← tweak 0.6–1.2 to taste
+  const footerBottom = currentBottom - footerPadUp;
 
   const distLike = baseBottom - BASE.like_count_y;
   const distComment = baseBottom - BASE.comment_count_y;
@@ -150,14 +154,12 @@ function buildModifications(body) {
   const distIconComment = baseBottom - BASE.icon_comment_y;
   const distIconShare = baseBottom - BASE.icon_share_y;
 
-const likeY = currentBottom - distLike;
-const commentY = currentBottom - distComment;
-const shareTextY = currentBottom - distShareText;
-const iconLikeY = currentBottom - distIconLike;
-const iconCommentY = currentBottom - distIconComment;
-const iconShareY = currentBottom - distIconShare;
-
-
+  const likeY = footerBottom - distLike;
+  const commentY = footerBottom - distComment;
+  const shareTextY = footerBottom - distShareText;
+  const iconLikeY = footerBottom - distIconLike;
+  const iconCommentY = footerBottom - distIconComment;
+  const iconShareY = footerBottom - distIconShare;
 
   const OP_ON = "100%";
   const OP_OFF = "0%";
@@ -200,7 +202,7 @@ const iconShareY = currentBottom - distIconShare;
   m["share_light.text"] = shareText;
   m["share_dark.text"] = shareText;
 
-  // footer y (now pinned to bg bottom)
+  // footer y (pinned to bg bottom, then nudged up)
   m["like_count_light.y"] = pct(likeY);
   m["like_count_dark.y"] = pct(likeY);
 
