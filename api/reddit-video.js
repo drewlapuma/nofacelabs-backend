@@ -301,11 +301,11 @@ function buildModifications(body) {
     setMulti(m, ["share_dark.x_anchor", "post_card_dark.share_dark.x_anchor"], "100%");
   } else {
     setMulti(m, ["share_light.x_anchor", "post_card_light.share_light.x_anchor"], "0%");
-    setMulti(m, ["share_dark.x_anchor", "post_card_dark.share_dark.x_anchor"], "0%");
+    setMulti(m, ["share_dark.x_anchor", "post_card_dark.share_light.x_anchor"], "0%");
   }
 
   setMulti(m, ["share_light.x", "post_card_light.share_light.x"], pct(shareTextX));
-  setMulti(m, ["share_dark.x", "post_card_dark.share_dark.x"], pct(shareTextX));
+  setMulti(m, ["share_dark.x", "post_card_dark.share_light.x"], pct(shareTextX));
   setMulti(m, ["icon_share.x", "post_card_light.icon_share.x", "post_card_dark.icon_share.x"], pct(shareIconX));
 
   // sources (✅ FIXED: bgUrl block is NOT inside pfpUrl)
@@ -320,6 +320,10 @@ function buildModifications(body) {
     // ✅ Crop instead of stretch
     m["Video.fit"] = "cover";
   }
+
+  // ✅ NEW: set TTS audio layer sources (layer names must match your template)
+  m["post_voice.source"] = postText; // reads title/post first
+  m["script_voice.source"] = safeStr(body.script, ""); // reads script next
 
   return m;
 }
