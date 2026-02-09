@@ -136,7 +136,6 @@ function buildModifications(body) {
   const bgUrl = ensurePublicHttpUrl(body.backgroundVideoUrl, "backgroundVideoUrl");
 
   // ---- card bg geometry (from your template) ----
-  // post_bg_light.width = "75%" centered at x=50%
   const BG_WIDTH = 75;
   const BG_CENTER_X = 50;
   const cardRight = BG_CENTER_X + BG_WIDTH / 2; // 87.5
@@ -308,7 +307,7 @@ function buildModifications(body) {
   setMulti(m, ["share_dark.x", "post_card_dark.share_light.x"], pct(shareTextX));
   setMulti(m, ["icon_share.x", "post_card_light.icon_share.x", "post_card_dark.icon_share.x"], pct(shareIconX));
 
-  // sources (✅ FIXED: bgUrl block is NOT inside pfpUrl)
+  // sources
   if (pfpUrl) {
     setMulti(m, ["pfp_light.source", "post_card_light.pfp_light.source"], pfpUrl);
     setMulti(m, ["pfp_dark.source", "post_card_dark.pfp_dark.source"], pfpUrl);
@@ -316,37 +315,36 @@ function buildModifications(body) {
 
   if (bgUrl) {
     m["Video.source"] = bgUrl;
-    // ✅ Crop instead of stretch
     m["Video.fit"] = "cover";
   }
 
-  // ✅ TTS audio layer sources
-  m["post_voice.source"] = postText; // reads title/post first
-  m["script_voice.source"] = safeStr(body.script, ""); // reads script next
+  // ✅ TTS audio sources
+  m["post_voice.source"] = postText;
+  m["script_voice.source"] = safeStr(body.script, "");
 
-  // ✅ NEW: hide card after post_voice is done (code-controlled, estimated)
+  // ✅ NEW: make the card end when title narration ends (duration-based)
   function estimateSpeechSeconds(text) {
     const words = String(text || "").trim().split(/\s+/).filter(Boolean).length;
-    const WPS = 2.35; // tweak if needed (lower = slower voice)
-    return Math.max(0.6, words / WPS);
+    const WPS = 2.35; // tweak if needed
+    return Math.max(0.75, words / WPS);
   }
 
   const postSecs = estimateSpeechSeconds(postText);
-  const hideAt = postSecs + 0.05;
 
-  // Keep the active mode visible initially, then hide both cards after title
-  // (hidden keyframes override the earlier boolean, which is fine)
-  m["post_card_light.hidden"] = [
-    { time: 0, value: !showLight },         // show only if light mode
-    { time: hideAt, value: true },          // hide after title
-  ];
-  m["post_card_dark.hidden"] = [
-    { time: 0, value: !showDark },          // show only if dark mode
-    { time: hideAt, value: true },          // hide after title
-  ];
+  // Force the cards to only exist during the title voice
+  m["post_card_light.time"] = 0;
+  m["post_card_light.duration"] = postSecs;
+
+  m["post_card_dark.time"] = 0;
+  m["post_card_dark.duration"] = postSecs;
+
+  // Ensure voices are sequential (script starts after title)
+  m["post_voice.time"] = 0;
+  m["script_voice.time"] = postSecs + 0.05;
 
   return m;
 }
+
 
 
 module.exports = async function handler(req, res) {
