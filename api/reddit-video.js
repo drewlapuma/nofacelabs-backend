@@ -316,17 +316,38 @@ function buildModifications(body) {
 
   if (bgUrl) {
     m["Video.source"] = bgUrl;
-
     // ✅ Crop instead of stretch
     m["Video.fit"] = "cover";
   }
 
-  // ✅ NEW: set TTS audio layer sources (layer names must match your template)
+  // ✅ TTS audio layer sources
   m["post_voice.source"] = postText; // reads title/post first
   m["script_voice.source"] = safeStr(body.script, ""); // reads script next
 
+  // ✅ NEW: hide card after post_voice is done (code-controlled, estimated)
+  function estimateSpeechSeconds(text) {
+    const words = String(text || "").trim().split(/\s+/).filter(Boolean).length;
+    const WPS = 2.35; // tweak if needed (lower = slower voice)
+    return Math.max(0.6, words / WPS);
+  }
+
+  const postSecs = estimateSpeechSeconds(postText);
+  const hideAt = postSecs + 0.05;
+
+  // Keep the active mode visible initially, then hide both cards after title
+  // (hidden keyframes override the earlier boolean, which is fine)
+  m["post_card_light.hidden"] = [
+    { time: 0, value: !showLight },         // show only if light mode
+    { time: hideAt, value: true },          // hide after title
+  ];
+  m["post_card_dark.hidden"] = [
+    { time: 0, value: !showDark },          // show only if dark mode
+    { time: hideAt, value: true },          // hide after title
+  ];
+
   return m;
 }
+
 
 module.exports = async function handler(req, res) {
   setCors(req, res);
