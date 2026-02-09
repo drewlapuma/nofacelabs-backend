@@ -121,7 +121,85 @@ function setMulti(m, paths, value) {
   for (const p of paths) m[p] = value;
 }
 
-function buildModifications(body) {
+async function elevenlabsTtsToMp3Buffer(text, voiceId) {
+  const apiKey = process.env.ELEVENLABS_API_KEY;
+  if (!apiKey) throw new Error("Missing ELEVENLABS_API_KEY");
+
+  // ElevenLabs TTS (mp3)
+  const url = `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}`;
+
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: {
+      "xi-api-key": apiKey,
+      "Content-Type": "application/json",
+      Accept: "audio/mpeg",
+    },
+    body: JSON.stringify({
+      text: String(text || ""),
+      model_id: "eleven_monolingual_v1", // you can change later
+      voice_settings: {
+        stability: 0.5,
+        similarity_boost: 0.75,
+      },
+    }),
+  });
+
+  if (!resp.ok) {
+    const t = await resp.text().catch(() => "");
+    throw new Error(`ElevenLabs TTS failed (${resp.status}): ${t || "unknown error"}`);
+  }
+
+  const arr = await resp.arrayBuffer();
+  return Buffer.from(arr);
+}
+
+async function uploadMp3ToSupabasePublic(mp3Buffer, filePath) {
+  const supabaseUrl = process.env.SUPABASE_URL;
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const bucket = process.env.SUPABASE_VOICE_BUCKET;
+
+  if (!supabaseUrl) throw new Error("Missing SUPABASE_URL");
+  if (!serviceKey) throw new Error("Missing SUPABASE_SERVICE_ROLE_KEY");
+  if (!bucket) throw new Error("Missing SUPABASE_VOICE_BUCKET");
+
+  // Storage upload endpoint (upsert=true so reruns overwrite)
+  const uploadUrl = `${supabaseUrl}/storage/v1/object/${bucket}/${filePath}?upsert=true`;
+
+  const resp = await fetch(uploadUrl, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${serviceKey}`,
+      apikey: serviceKey,
+      "Content-Type": "audio/mpeg",
+    },
+    body: mp3Buffer,
+  });
+
+  if (!resp.ok) {
+    const t = await resp.text().catch(() => "");
+    throw new Error(`Supabase upload failed (${resp.status}): ${t || "unknown error"}`);
+  }
+
+  // Public URL (bucket must be public)
+  return `${supabaseUrl}/storage/v1/object/public/${bucket}/${filePath}`;
+}
+
+// helper: map your dropdown values to real ElevenLabs voice IDs
+function mapUiVoiceToElevenId(v) {
+  const s = String(v || "").trim().toLowerCase();
+
+  // ✅ REPLACE these with your real ElevenLabs voice IDs
+  const MAP = {
+    default: "YOUR_ELEVEN_DEFAULT_VOICE_ID",
+    voice1: "YOUR_ELEVEN_VOICE_1_ID",
+    voice2: "YOUR_ELEVEN_VOICE_2_ID",
+  };
+
+  return MAP[s] || MAP.default;
+}
+
+async function buildModifications(body) {
   const mode = normalizeMode(body.mode);
   const showLight = mode === "light";
   const showDark = mode === "dark";
@@ -135,12 +213,11 @@ function buildModifications(body) {
   const pfpUrl = ensurePublicHttpUrl(body.pfpUrl, "pfpUrl");
   const bgUrl = ensurePublicHttpUrl(body.backgroundVideoUrl, "backgroundVideoUrl");
 
-  // ---- card bg geometry (from your template) ----
+  // --- your existing layout math unchanged ---
   const BG_WIDTH = 75;
   const BG_CENTER_X = 50;
-  const cardRight = BG_CENTER_X + BG_WIDTH / 2; // 87.5
+  const cardRight = BG_CENTER_X + BG_WIDTH / 2;
 
-  // ---- height logic (your existing approach) ----
   const charsPerLine = 36;
   const lineCount = Math.max(1, Math.ceil(postText.length / charsPerLine));
   const extraLines = Math.max(0, lineCount - 2);
@@ -154,12 +231,10 @@ function buildModifications(body) {
 
   let bgY = baseBgY + deltaH / 2;
 
-  // shrink bottom padding only when it grew (prevents blank space)
   const footerPadUp = clamp(deltaH * 0.22, 0, 1.5);
   bgH = clamp(bgH - footerPadUp * 2, baseBgH, 45);
   bgY = bgY - footerPadUp;
 
-  // base Y positions from your template
   const BASE_Y = {
     like_count_y: 30.3637,
     comment_count_y: 30.3637,
@@ -179,51 +254,40 @@ function buildModifications(body) {
   const iconCommentY = currentBottom - (baseBottom - BASE_Y.icon_comment_y);
   const iconShareY = currentBottom - (baseBottom - BASE_Y.icon_share_y);
 
-  // ---- X layout fixes (ADAPTIVE: tight by default, expands only when needed) ----
   const BASE_LIKE_TEXT_X = 19.0572;
-
   const BASE_COMMENT_ICON_X = 29.0172;
   const BASE_COMMENT_TEXT_X = 31.6676;
-
   const BASE_SHARE_ICON_X = 71.279;
   const BASE_SHARE_TEXT_X = 74.5318;
 
   const likeLen = String(likes || "").length;
   const shareLen = String(shareText || "").length;
 
-  // Only go into "long" mode when needed
-  const likeLong = likeLen > 4; // normal: "99+" (3)
-  const shareLong = shareLen > 6; // normal: "share" (5)
+  const likeLong = likeLen > 4;
+  const shareLong = shareLen > 6;
 
-  // -------- SHARE (default = original template positions) --------
   let shareTextX = BASE_SHARE_TEXT_X;
   let shareIconX = BASE_SHARE_ICON_X;
 
   if (shareLong) {
-    // Pin share text inside-right of the card, grow LEFT
     const RIGHT_PAD = 3.2;
     const shareRightX = cardRight - RIGHT_PAD;
-
-    // Estimate text width, then place icon safely before it
     const estShareTextW = clamp(shareLen * 1.7, 6, 42);
-    const SHARE_ICON_GAP = 5.5; // enough space so icon won't clip into text
+    const SHARE_ICON_GAP = 5.5;
     shareTextX = shareRightX;
     shareIconX = shareTextX - estShareTextW - SHARE_ICON_GAP;
   }
 
-  // -------- COMMENTS (default = original template positions) --------
   let commentTextX = BASE_COMMENT_TEXT_X;
   let commentIconX = BASE_COMMENT_ICON_X;
 
   if (likeLong) {
-    // Push comment group right as likes gets longer
     const likeExtra = Math.max(0, likeLen - 3);
     const likeShift = clamp(likeExtra * 1.35, 0, 22);
 
     commentTextX = BASE_COMMENT_TEXT_X + likeShift;
     commentIconX = commentTextX - (BASE_COMMENT_TEXT_X - BASE_COMMENT_ICON_X);
 
-    // Ensure comment icon clears the like text width
     const estLikeTextW = clamp(likeLen * 1.7, 6, 42);
     const LIKE_CLEAR_GAP = 7.5;
     const minCommentIconX = BASE_LIKE_TEXT_X + estLikeTextW + LIKE_CLEAR_GAP;
@@ -233,7 +297,6 @@ function buildModifications(body) {
       commentTextX = commentIconX + (BASE_COMMENT_TEXT_X - BASE_COMMENT_ICON_X);
     }
 
-    // Ensure comment group doesn't collide with share group area
     const maxCommentTextX = shareLong ? shareIconX - 7.0 : BASE_SHARE_ICON_X - 6.0;
     if (commentTextX > maxCommentTextX) {
       commentTextX = maxCommentTextX;
@@ -241,7 +304,6 @@ function buildModifications(body) {
     }
   }
 
-  // ---- build modifications ----
   const OP_ON = "100%";
   const OP_OFF = "0%";
   const m = {};
@@ -253,13 +315,13 @@ function buildModifications(body) {
   m["post_card_dark.hidden"] = !showDark;
   m["post_card_dark.opacity"] = showDark ? OP_ON : OP_OFF;
 
-  // bg sizing (scoped + fallback)
+  // bg sizing
   setMulti(m, ["post_bg_light.y", "post_card_light.post_bg_light.y"], pct(bgY));
   setMulti(m, ["post_bg_light.height", "post_card_light.post_bg_light.height"], pct(bgH));
   setMulti(m, ["post_bg_dark.y", "post_card_dark.post_bg_dark.y"], pct(bgY));
   setMulti(m, ["post_bg_dark.height", "post_card_dark.post_bg_dark.height"], pct(bgH));
 
-  // content texts
+  // texts
   setMulti(m, ["username_light.text", "post_card_light.username_light.text"], username);
   setMulti(m, ["username_dark.text", "post_card_dark.username_dark.text"], username);
 
@@ -275,7 +337,7 @@ function buildModifications(body) {
   setMulti(m, ["share_light.text", "post_card_light.share_light.text"], shareText);
   setMulti(m, ["share_dark.text", "post_card_dark.share_dark.text"], shareText);
 
-  // footer Y pinned to bg bottom
+  // footer Y
   setMulti(m, ["like_count_light.y", "post_card_light.like_count_light.y"], pct(likeY));
   setMulti(m, ["like_count_dark.y", "post_card_dark.like_count_dark.y"], pct(likeY));
 
@@ -289,22 +351,22 @@ function buildModifications(body) {
   setMulti(m, ["icon_comment.y", "post_card_light.icon_comment.y", "post_card_dark.icon_comment.y"], pct(iconCommentY));
   setMulti(m, ["icon_share.y", "post_card_light.icon_share.y", "post_card_dark.icon_share.y"], pct(iconShareY));
 
-  // comment push (X)
+  // comment X
   setMulti(m, ["icon_comment.x", "post_card_light.icon_comment.x", "post_card_dark.icon_comment.x"], pct(commentIconX));
   setMulti(m, ["comment_count_light.x", "post_card_light.comment_count_light.x"], pct(commentTextX));
   setMulti(m, ["comment_count_dark.x", "post_card_dark.comment_count_dark.x"], pct(commentTextX));
 
-  // share positioning (only anchor-right when share is long)
+  // share anchor + X
   if (shareLong) {
     setMulti(m, ["share_light.x_anchor", "post_card_light.share_light.x_anchor"], "100%");
     setMulti(m, ["share_dark.x_anchor", "post_card_dark.share_dark.x_anchor"], "100%");
   } else {
     setMulti(m, ["share_light.x_anchor", "post_card_light.share_light.x_anchor"], "0%");
-    setMulti(m, ["share_dark.x_anchor", "post_card_dark.share_light.x_anchor"], "0%");
+    setMulti(m, ["share_dark.x_anchor", "post_card_dark.share_dark.x_anchor"], "0%");
   }
 
   setMulti(m, ["share_light.x", "post_card_light.share_light.x"], pct(shareTextX));
-  setMulti(m, ["share_dark.x", "post_card_dark.share_light.x"], pct(shareTextX));
+  setMulti(m, ["share_dark.x", "post_card_dark.share_dark.x"], pct(shareTextX));
   setMulti(m, ["icon_share.x", "post_card_light.icon_share.x", "post_card_dark.icon_share.x"], pct(shareIconX));
 
   // sources
@@ -318,45 +380,23 @@ function buildModifications(body) {
     m["Video.fit"] = "cover";
   }
 
-  // ✅ TTS audio sources
-  m["post_voice.source"] = postText;
-  m["script_voice.source"] = safeStr(body.script, "");
+  // ✅ NEW: ElevenLabs -> MP3 -> Supabase -> Creatomate Audio sources
+  const postVoiceId = mapUiVoiceToElevenId(body.postVoice);
+  const scriptVoiceId = mapUiVoiceToElevenId(body.scriptVoice);
 
-  // ✅ NEW: make the card end when title narration ends (duration-based)
-    // ✅ NEW: make the card end when title narration ends (duration-based)
-  function estimateSpeechSeconds(text) {
-    const words = String(text || "").trim().split(/\s+/).filter(Boolean).length;
+  const postAudio = await elevenlabsTtsToMp3Buffer(postText, postVoiceId);
+  const scriptAudio = await elevenlabsTtsToMp3Buffer(safeStr(body.script, ""), scriptVoiceId);
 
-    // TTS usually reads closer to ~2.7–3.1 words/sec for short titles.
-    // Using 2.9 reduces the "linger" / dead air.
-    const WPS = 2.9;
+  const stamp = Date.now();
+  const postAudioUrl = await uploadMp3ToSupabasePublic(postAudio, `reddit/${stamp}-post.mp3`);
+  const scriptAudioUrl = await uploadMp3ToSupabasePublic(scriptAudio, `reddit/${stamp}-script.mp3`);
 
-    return Math.max(0.55, words / WPS);
-  }
-
-  const postSecsRaw = estimateSpeechSeconds(postText);
-
-  // Small trim so the card doesn't linger after the voice finishes
-  const CARD_EARLY_CUT = 0.50;  // make card disappear a bit earlier
-  const SCRIPT_GAP = 0.05;      // tiny gap between title -> script
-
-  const cardSecs = Math.max(0.35, postSecsRaw - CARD_EARLY_CUT);
-  const scriptStart = Math.max(0, postSecsRaw + SCRIPT_GAP);
-
-  // Force the cards to only exist during the title voice window
-  m["post_card_light.time"] = 0;
-  m["post_card_light.duration"] = cardSecs;
-
-  m["post_card_dark.time"] = 0;
-  m["post_card_dark.duration"] = cardSecs;
-
-  // Ensure voices are sequential (script starts right after title)
-  m["post_voice.time"] = 0;
-  m["script_voice.time"] = scriptStart;
-
+  m["post_voice.source"] = postAudioUrl;
+  m["script_voice.source"] = scriptAudioUrl;
 
   return m;
 }
+
 
 
 
