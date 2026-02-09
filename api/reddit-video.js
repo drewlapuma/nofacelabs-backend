@@ -157,11 +157,11 @@ async function elevenlabsTtsToMp3Buffer(text, voiceId) {
 async function uploadMp3ToSupabasePublic(mp3Buffer, filePath) {
   const supabaseUrl = process.env.SUPABASE_URL;
   const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  const bucket = process.env.SUPABASE_VOICE_BUCKET;
+  const bucket = process.env.VOICE_BUCKET;
 
   if (!supabaseUrl) throw new Error("Missing SUPABASE_URL");
   if (!serviceKey) throw new Error("Missing SUPABASE_SERVICE_ROLE_KEY");
-  if (!bucket) throw new Error("Missing SUPABASE_VOICE_BUCKET");
+  if (!bucket) throw new Error("Missing VOICE_BUCKET");
 
   // Storage upload endpoint (upsert=true so reruns overwrite)
   const uploadUrl = `${supabaseUrl}/storage/v1/object/${bucket}/${filePath}?upsert=true`;
