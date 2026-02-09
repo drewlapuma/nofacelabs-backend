@@ -323,24 +323,37 @@ function buildModifications(body) {
   m["script_voice.source"] = safeStr(body.script, "");
 
   // ✅ NEW: make the card end when title narration ends (duration-based)
+    // ✅ NEW: make the card end when title narration ends (duration-based)
   function estimateSpeechSeconds(text) {
     const words = String(text || "").trim().split(/\s+/).filter(Boolean).length;
-    const WPS = 2.35; // tweak if needed
-    return Math.max(0.75, words / WPS);
+
+    // TTS usually reads closer to ~2.7–3.1 words/sec for short titles.
+    // Using 2.9 reduces the "linger" / dead air.
+    const WPS = 2.9;
+
+    return Math.max(0.55, words / WPS);
   }
 
-  const postSecs = estimateSpeechSeconds(postText);
+  const postSecsRaw = estimateSpeechSeconds(postText);
 
-  // Force the cards to only exist during the title voice
+  // Small trim so the card doesn't linger after the voice finishes
+  const CARD_EARLY_CUT = 0.20;  // make card disappear a bit earlier
+  const SCRIPT_GAP = 0.05;      // tiny gap between title -> script
+
+  const cardSecs = Math.max(0.35, postSecsRaw - CARD_EARLY_CUT);
+  const scriptStart = Math.max(0, postSecsRaw + SCRIPT_GAP);
+
+  // Force the cards to only exist during the title voice window
   m["post_card_light.time"] = 0;
-  m["post_card_light.duration"] = postSecs;
+  m["post_card_light.duration"] = cardSecs;
 
   m["post_card_dark.time"] = 0;
-  m["post_card_dark.duration"] = postSecs;
+  m["post_card_dark.duration"] = cardSecs;
 
-  // Ensure voices are sequential (script starts after title)
+  // Ensure voices are sequential (script starts right after title)
   m["post_voice.time"] = 0;
-  m["script_voice.time"] = postSecs + 0.05;
+  m["script_voice.time"] = scriptStart;
+
 
   return m;
 }
