@@ -5,6 +5,12 @@ const https = require("https");
 const CREATOMATE_API_KEY = process.env.CREATOMATE_API_KEY;
 const TEMPLATE_ID = process.env.CREATOMATE_TEMPLATE_ID_REDDIT;
 
+// ✅ ElevenLabs + Supabase Storage
+const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const VOICE_BUCKET = process.env.VOICE_BUCKET || "voiceovers";
+
 const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || "*")
   .split(",")
   .map((s) => s.trim())
@@ -31,7 +37,6 @@ function json(res, status, body) {
 }
 
 async function readBody(req) {
-  // Works reliably on Vercel Node serverless
   if (req.body && typeof req.body === "object") return req.body;
 
   let data = "";
@@ -113,31 +118,36 @@ function ensurePublicHttpUrl(url, label) {
 
 /**
  * Writes the same value to multiple modification paths.
- * This helps because sometimes Creatomate returns nested keys like:
- *  - post_card_light.icon_share.x
- * even if we originally set icon_share.x
  */
 function setMulti(m, paths, value) {
   for (const p of paths) m[p] = value;
 }
 
-async function elevenlabsTtsToMp3Buffer(text, voiceId) {
-  const apiKey = process.env.ELEVENLABS_API_KEY;
-  if (!apiKey) throw new Error("Missing ELEVENLABS_API_KEY");
+/* ----------------- ElevenLabs + Supabase helpers ----------------- */
 
-  // ElevenLabs TTS (mp3)
+function randId(len = 10) {
+  const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
+  let out = "";
+  for (let i = 0; i < len; i++) out += chars[Math.floor(Math.random() * chars.length)];
+  return out;
+}
+
+async function elevenlabsTtsToMp3Buffer(text, voiceId) {
+  if (!ELEVENLABS_API_KEY) throw new Error("Missing ELEVENLABS_API_KEY");
+  if (!voiceId) throw new Error("Missing ElevenLabs voiceId");
+
   const url = `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}`;
 
   const resp = await fetch(url, {
     method: "POST",
     headers: {
-      "xi-api-key": apiKey,
+      "xi-api-key": ELEVENLABS_API_KEY,
       "Content-Type": "application/json",
       Accept: "audio/mpeg",
     },
     body: JSON.stringify({
       text: String(text || ""),
-      model_id: "eleven_monolingual_v1", // you can change later
+      model_id: "eleven_monolingual_v1",
       voice_settings: {
         stability: 0.5,
         similarity_boost: 0.75,
@@ -155,49 +165,59 @@ async function elevenlabsTtsToMp3Buffer(text, voiceId) {
 }
 
 async function uploadMp3ToSupabasePublic(mp3Buffer, filePath) {
-  const supabaseUrl = process.env.SUPABASE_URL;
-  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  const bucket = process.env.VOICE_BUCKET;
+  if (!SUPABASE_URL) throw new Error("Missing SUPABASE_URL");
+  if (!SUPABASE_SERVICE_ROLE_KEY) throw new Error("Missing SUPABASE_SERVICE_ROLE_KEY");
+  if (!VOICE_BUCKET) throw new Error("Missing VOICE_BUCKET");
 
-  if (!supabaseUrl) throw new Error("Missing SUPABASE_URL");
-  if (!serviceKey) throw new Error("Missing SUPABASE_SERVICE_ROLE_KEY");
-  if (!bucket) throw new Error("Missing VOICE_BUCKET");
+  // ✅ Use PUT (recommended) + upsert header
+  const base = new URL(SUPABASE_URL);
+  const hostname = base.hostname;
 
-  // Storage upload endpoint (upsert=true so reruns overwrite)
-  const uploadUrl = `${supabaseUrl}/storage/v1/object/${bucket}/${filePath}?upsert=true`;
+  const putPath = `/storage/v1/object/${encodeURIComponent(VOICE_BUCKET)}/${filePath}`;
 
-  const resp = await fetch(uploadUrl, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${serviceKey}`,
-      apikey: serviceKey,
-      "Content-Type": "audio/mpeg",
-    },
-    body: mp3Buffer,
+  const res = await new Promise((resolve, reject) => {
+    const req = https.request(
+      {
+        hostname,
+        path: putPath,
+        method: "PUT",
+        headers: {
+          Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+          apikey: SUPABASE_SERVICE_ROLE_KEY,
+          "Content-Type": "audio/mpeg",
+          "Content-Length": mp3Buffer.length,
+          "x-upsert": "true",
+        },
+      },
+      (r) => {
+        let out = "";
+        r.on("data", (c) => (out += c));
+        r.on("end", () => resolve({ status: r.statusCode, text: out }));
+      }
+    );
+    req.on("error", reject);
+    req.write(mp3Buffer);
+    req.end();
   });
 
-  if (!resp.ok) {
-    const t = await resp.text().catch(() => "");
-    throw new Error(`Supabase upload failed (${resp.status}): ${t || "unknown error"}`);
+  if (res.status < 200 || res.status >= 300) {
+    throw new Error(`Supabase upload failed (${res.status}): ${res.text || "unknown error"}`);
   }
 
-  // Public URL (bucket must be public)
-  return `${supabaseUrl}/storage/v1/object/public/${bucket}/${filePath}`;
+  // ✅ Public URL (bucket must be public)
+  return `${SUPABASE_URL}/storage/v1/object/public/${VOICE_BUCKET}/${filePath}`;
 }
 
-// helper: map your dropdown values to real ElevenLabs voice IDs
-function mapUiVoiceToElevenId(v) {
-  const s = String(v || "").trim().toLowerCase();
-
-  // ✅ REPLACE these with your real ElevenLabs voice IDs
-  const MAP = {
-    default: "YOUR_ELEVEN_DEFAULT_VOICE_ID",
-    voice1: "YOUR_ELEVEN_VOICE_1_ID",
-    voice2: "YOUR_ELEVEN_VOICE_2_ID",
-  };
-
-  return MAP[s] || MAP.default;
+// ✅ Your UI now sends REAL ElevenLabs IDs in the <option value="...">,
+// so we just accept them. If empty/"default", return "" (means "use template voice").
+function normalizeElevenVoiceId(v) {
+  const s = String(v || "").trim();
+  if (!s) return "";
+  if (s.toLowerCase() === "default") return "";
+  return s; // expected to be actual ElevenLabs voice_id
 }
+
+/* ----------------- build modifications ----------------- */
 
 async function buildModifications(body) {
   const mode = normalizeMode(body.mode);
@@ -339,7 +359,7 @@ async function buildModifications(body) {
 
   // footer Y
   setMulti(m, ["like_count_light.y", "post_card_light.like_count_light.y"], pct(likeY));
-  setMulti(m, ["like_count_dark.y", "post_card_dark.like_count_dark.y"], pct(likeY));
+  setMulti(m, ["like_count_dark.y", "post_card_dark.like_count_dark.text"], pct(likeY));
 
   setMulti(m, ["comment_count_light.y", "post_card_light.comment_count_light.y"], pct(commentY));
   setMulti(m, ["comment_count_dark.y", "post_card_dark.comment_count_dark.y"], pct(commentY));
@@ -380,30 +400,40 @@ async function buildModifications(body) {
     m["Video.fit"] = "cover";
   }
 
-  // ✅ NEW: ElevenLabs -> MP3 -> Supabase -> Creatomate Audio sources
-  const postVoiceId = mapUiVoiceToElevenId(body.postVoice);
-  const scriptVoiceId = mapUiVoiceToElevenId(body.scriptVoice);
+  // ✅ ElevenLabs -> MP3 -> Supabase -> Creatomate audio layer sources
+  // If postVoice/scriptVoice are empty or "default", we fall back to template TTS (text).
+  const postVoiceId = normalizeElevenVoiceId(body.postVoice);
+  const scriptVoiceId = normalizeElevenVoiceId(body.scriptVoice);
+  const scriptText = safeStr(body.script, "");
 
-  const postAudio = await elevenlabsTtsToMp3Buffer(postText, postVoiceId);
-  const scriptAudio = await elevenlabsTtsToMp3Buffer(safeStr(body.script, ""), scriptVoiceId);
+  // Post voice
+  if (postVoiceId) {
+    const postMp3 = await elevenlabsTtsToMp3Buffer(postText, postVoiceId);
+    const postPath = `reddit/${Date.now()}_${randId()}_post.mp3`;
+    const postUrl = await uploadMp3ToSupabasePublic(postMp3, postPath);
+    m["post_voice.source"] = postUrl;
+  } else {
+    m["post_voice.source"] = postText; // template TTS fallback
+  }
 
-  const stamp = Date.now();
-  const postAudioUrl = await uploadMp3ToSupabasePublic(postAudio, `reddit/${stamp}-post.mp3`);
-  const scriptAudioUrl = await uploadMp3ToSupabasePublic(scriptAudio, `reddit/${stamp}-script.mp3`);
-
-  m["post_voice.source"] = postAudioUrl;
-  m["script_voice.source"] = scriptAudioUrl;
+  // Script voice
+  if (scriptText) {
+    if (scriptVoiceId) {
+      const scriptMp3 = await elevenlabsTtsToMp3Buffer(scriptText, scriptVoiceId);
+      const scriptPath = `reddit/${Date.now()}_${randId()}_script.mp3`;
+      const scriptUrl = await uploadMp3ToSupabasePublic(scriptMp3, scriptPath);
+      m["script_voice.source"] = scriptUrl;
+    } else {
+      m["script_voice.source"] = scriptText; // template TTS fallback
+    }
+  }
 
   return m;
 }
 
-
-
-
 module.exports = async function handler(req, res) {
   setCors(req, res);
 
-  // ✅ FIX: preflight must return 200 WITH CORS headers
   if (req.method === "OPTIONS") {
     res.statusCode = 200;
     res.end();
@@ -442,7 +472,8 @@ module.exports = async function handler(req, res) {
       return json(res, 400, { ok: false, error: "Missing backgroundVideoUrl (use library for now)" });
     }
 
-    const modifications = buildModifications(body);
+    // ✅ buildModifications is async now
+    const modifications = await buildModifications(body);
 
     const startResp = await creatomateRequest("/v1/renders", "POST", {
       template_id: TEMPLATE_ID,
