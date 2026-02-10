@@ -1,10 +1,8 @@
 (function () {
-  if (window.__nf_reddit_preview_v12_voicepicker__) return;
-  window.__nf_reddit_preview_v12_voicepicker__ = true;
+  if (window.__nf_reddit_preview_v13_full__) return;
+  window.__nf_reddit_preview_v13_full__ = true;
 
   const API_BASE = "https://nofacelabs-backend.vercel.app";
-
-  // ✅ Uses your existing signed upload endpoint:
   const SIGNED_UPLOAD_ENDPOINT = API_BASE + "/api/user-video-upload-url";
 
   const DEMO_GAMEPLAY_URL =
@@ -26,6 +24,43 @@
     "https://pub-893d3b83680c4b839093dfb1ace5ac0a.r2.dev/flair10.png"
   ];
 
+  // ----------------------------
+  // ✅ VOICES (with descriptions)
+  // ----------------------------
+  const VOICES = [
+    { name: "Bella",   id: "hpp4J3VqNfWAUOO0d1Us", desc: "Warm, friendly female voice (great for upbeat reads)." },
+    { name: "Roger",   id: "CwhRBWXzGAHq8TQ4Fs17", desc: "Confident male narration with clear delivery." },
+    { name: "Sarah",   id: "EXAVITQu4vr4xnSDxMaL", desc: "Natural female storyteller with clean tone." },
+    { name: "Laura",   id: "FGY2WhTYpPnrIDTdsKH5", desc: "Smooth female voice with calm pacing." },
+    { name: "Charlie", id: "IKne3meq5aSn9XLyUdCD", desc: "Energetic male voice with playful vibe." },
+    { name: "George",  id: "JBFqnCBsd6RMkjVDRZzb", desc: "Deep male voice, steady and dramatic." },
+    { name: "Callum",  id: "N2lVS1w4EtoT3dr4eOWO", desc: "Neutral male voice, versatile for any script." },
+    { name: "River",   id: "SAz9YHcvj6GT2YYXdXww", desc: "Fast, engaging voice for short-form hooks." },
+    { name: "Harry",   id: "SOYHLrjzK2X1ezoPC6cr", desc: "Crisp narrator tone with strong clarity." },
+    { name: "Liam",    id: "TX3LPaxmHKxFdv7VOQHJ", desc: "Relaxed male voice with casual delivery." },
+    { name: "Alice",   id: "Xb7hH8MSUJpSbSDYk0k2", desc: "Bright, friendly female voice." },
+    { name: "Matilda", id: "XrExE9yKIg1WjnnlVkGX", desc: "Soft female voice for emotional storytelling." },
+    { name: "Will",    id: "bIHbv24MWmeRgasZH58o", desc: "Punchy male voice with strong emphasis." },
+    { name: "Jessica", id: "cgSgspJ2msm6clMCkdW9", desc: "Upbeat modern female voice." },
+    { name: "Eric",    id: "cjVigY5qzO86Huf0OWal", desc: "Confident narration with steady rhythm." },
+    { name: "Chris",   id: "iP95p4xoKVk53GoZ742B", desc: "Friendly conversational male voice." },
+    { name: "Brian",   id: "nPczCjzI2devNBz1zQrb", desc: "Deeper male voice for dramatic reads." },
+    { name: "Daniel",  id: "onwK4e9ZLuTAKqWW03F9", desc: "Clear male voice, simple and direct." },
+    { name: "Lily",    id: "pFZP5JQG7iQjIQuC4Bku", desc: "Light, expressive female voice." },
+    { name: "Adam",    id: "pNInz6obpgDQGcFmaJgB", desc: "Neutral male voice, clean delivery." },
+    { name: "Bill",    id: "pqHfZKP75CvOlQylNhV4", desc: "Older male voice, classic storyteller feel." },
+    { name: "Alex",    id: "yl2ZDV1MzN4HbQJbMihG", desc: "Modern neutral voice (great all-purpose)." },
+    { name: "Mark",    id: "UgBBYS2sOqTuMpoF3BR0", desc: "Strong voice that hits punchlines well." },
+    { name: "Brittney",id: "kPzsL2i3teMYv0FxEYQ6", desc: "High-energy female voice for hooks." },
+    { name: "True",    id: "tZssYepgGaQmegsMEXjK", desc: "Smooth confident voice with quick pacing." },
+    { name: "Charles", id: "S9GPGBaMND8XWwwzxQXp", desc: "Formal narrator tone, very clear." },
+    { name: "Clancy",  id: "FLpz0UhC9a7CIfUSBo6S", desc: "Distinct character voice with personality." },
+    { name: "Dan",     id: "Ioq2c1GJee5RyqeoBIH3", desc: "Casual male voice with natural pauses." },
+  ];
+
+  // If you host preview MP3s, set this. Otherwise it uses GET /api/voice-preview.
+  const PREVIEW_BASE = "";
+
   function boot(){
     // ---------- DOM ----------
     const msgEl = document.getElementById("rvMsg");
@@ -38,21 +73,23 @@
     const modeHidden = document.getElementById("rvMode");
     const postTitleEl = document.getElementById("rvPostTitle");
     const scriptEl = document.getElementById("rvScript");
-    const postVoiceEl = document.getElementById("rvPostVoice");      // hidden input now
-    const scriptVoiceEl = document.getElementById("rvScriptVoice");  // hidden input now
 
-    // ✅ Voice picker UI
-    const postVoiceBtn = document.getElementById("rvPostVoiceBtn");
-    const scriptVoiceBtn = document.getElementById("rvScriptVoiceBtn");
+    const postVoiceEl = document.getElementById("rvPostVoice");
+    const scriptVoiceEl = document.getElementById("rvScriptVoice");
     const postVoiceLabel = document.getElementById("rvPostVoiceLabel");
     const scriptVoiceLabel = document.getElementById("rvScriptVoiceLabel");
 
+    // ✅ ONE voices button
+    const voicesBtn = document.getElementById("rvVoicesBtn");
+
+    // ✅ Voice modal
     const voiceModal = document.getElementById("rvVoiceModal");
     const voiceClose = document.getElementById("rvVoiceClose");
     const voiceTitle = document.getElementById("rvVoiceTitle");
     const voiceSearch = document.getElementById("rvVoiceSearch");
     const voiceClear = document.getElementById("rvVoiceClear");
     const voiceGrid = document.getElementById("rvVoiceGrid");
+    const voiceTabs = document.getElementById("rvVoiceTabs");
 
     const likesEl = document.getElementById("rvLikes");
     const commentsEl = document.getElementById("rvComments");
@@ -147,7 +184,7 @@
       return videoEl.parentElement;
     }
 
-    // ---------- ✅ upload helpers (uses your signed upload url endpoint) ----------
+    // ---------- ✅ upload helpers ----------
     async function getSignedUploadUrl(file){
       const payload = {
         fileName: file.name,
@@ -173,7 +210,7 @@
         throw new Error("Signed upload response missing signedUrl/bucket/path.");
       }
 
-      return j; // { bucket, path, signedUrl, contentType }
+      return j; // { bucket, path, signedUrl }
     }
 
     async function putFileToSignedUrl(signedUrl, file){
@@ -281,6 +318,100 @@
         .nf-rvIconHeart{ stroke: currentColor; stroke-width: 6; fill: none; stroke-linejoin: round; }
 
         .nf-rvOverlayHideText{ color: transparent !important; }
+      `;
+      document.head.appendChild(s);
+    })();
+
+    // ---------- ✅ Voice picker CSS (hover outline + desc + tabs + grid) ----------
+    (function injectVoiceCss(){
+      const id = "nfVoicePickerCssV3";
+      if (document.getElementById(id)) return;
+      const s = document.createElement("style");
+      s.id = id;
+      s.textContent = `
+        .nf-voiceTabs{
+          display:flex;
+          gap:8px;
+          margin: 2px 0 12px;
+        }
+        .nf-voiceTab{
+          border:1px solid rgba(255,255,255,.14);
+          background: rgba(255,255,255,.06);
+          color: rgba(255,255,255,.85);
+          border-radius: 999px;
+          padding: 7px 12px;
+          font-size: 12px;
+          font-weight: 900;
+          cursor: pointer;
+          line-height: 1;
+        }
+        .nf-voiceTab.active{
+          border-color: rgba(90,193,255,.45);
+          background: rgba(90,193,255,.18);
+          color: rgba(90,193,255,1);
+        }
+
+        .nf-voiceHint{
+          margin: 0 0 10px;
+          font-size: 11px;
+          color: rgba(255,255,255,.70);
+        }
+
+        .nf-voiceGrid{
+          display:grid;
+          grid-template-columns: repeat(3, 1fr);
+          gap:10px;
+        }
+        @media (max-width: 900px){ .nf-voiceGrid{ grid-template-columns: repeat(2, 1fr);} }
+        @media (max-width: 620px){ .nf-voiceGrid{ grid-template-columns: 1fr;} }
+
+        .nf-voiceCard{
+          border:1px solid rgba(255,255,255,.12);
+          background: rgba(255,255,255,.05);
+          border-radius:14px;
+          padding:12px;
+          display:flex;
+          justify-content:space-between;
+          gap:12px;
+          transition:border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease;
+        }
+        .nf-voiceCard:hover{
+          border-color: rgba(90,193,255,.45);
+          box-shadow: 0 0 0 1px rgba(90,193,255,.18) inset;
+          transform: translateY(-1px);
+        }
+        .nf-voiceSelected{
+          border-color: rgba(90,193,255,.65) !important;
+          box-shadow: 0 0 0 1px rgba(90,193,255,.22) inset;
+        }
+        .nf-voiceName{ font-weight:950; font-size:13px; margin-bottom:4px; }
+        .nf-voiceDesc{
+          font-size:11px;
+          color: rgba(255,255,255,.60);
+          line-height:1.25;
+          white-space: normal;
+          word-break: break-word;
+        }
+        .nf-voiceBtns{ display:flex; flex-direction:column; gap:8px; align-items:flex-end; }
+        .nf-voiceBtnMini{
+          border:1px solid rgba(255,255,255,.16);
+          background: rgba(255,255,255,.08);
+          color: rgba(255,255,255,.92);
+          border-radius:10px;
+          padding:6px 10px;
+          font-size:12px;
+          font-weight:900;
+          cursor:pointer;
+          white-space:nowrap;
+          min-width: 116px;
+          text-align:center;
+        }
+        .nf-voiceBtnMini:disabled{ opacity:.72; cursor:not-allowed; }
+        .nf-voiceBtnUse{
+          border-color: rgba(90,193,255,.35);
+          background: rgba(90,193,255,.16);
+          color: rgba(90,193,255,1);
+        }
       `;
       document.head.appendChild(s);
     })();
@@ -522,7 +653,7 @@
     // Upload PFP button click
     if (pfpUploadBtn && pfpFileEl) pfpUploadBtn.addEventListener("click", ()=> pfpFileEl.click());
 
-    // ✅ PFP upload (preview blob immediately, then upload & replace with public https URL)
+    // ✅ PFP upload
     if (pfpFileEl) {
       pfpFileEl.addEventListener("change", async ()=>{
         const file = pfpFileEl.files?.[0];
@@ -567,7 +698,7 @@
       updateCard();
     });
 
-    // ✅ Background upload (preview blob immediately, then upload & set bgLibraryUrl to public https)
+    // ✅ Background upload
     if (bgFileEl) {
       bgFileEl.addEventListener("change", async ()=>{
         const file = bgFileEl.files?.[0];
@@ -643,655 +774,247 @@
     }
     [usernameEl, postTitleEl, postTextEl, likesEl, commentsEl, shareTextEl, modeHidden].forEach(bindRealtime);
 
-// ----------------------------
-// ✅ VOICE PICKER (UPDATED + REAL PREVIEW VIA /api/voice-preview GET)
-// - Hover outline on cards (CSS injected)
-// - Replaces ID with voice description
-// - "Previewing..." button state while fetching/playing
-// ----------------------------
-const VOICES = [
-  { name: "Bella",   id: "hpp4J3VqNfWAUOO0d1Us", desc: "Warm, friendly female voice (great for upbeat reads)." },
-  { name: "Roger",   id: "CwhRBWXzGAHq8TQ4Fs17", desc: "Confident male narration with clear delivery." },
-  { name: "Sarah",   id: "EXAVITQu4vr4xnSDxMaL", desc: "Natural female storyteller with clean tone." },
-  { name: "Laura",   id: "FGY2WhTYpPnrIDTdsKH5", desc: "Smooth female voice with calm pacing." },
-  { name: "Charlie", id: "IKne3meq5aSn9XLyUdCD", desc: "Energetic male voice with playful vibe." },
-  { name: "George",  id: "JBFqnCBsd6RMkjVDRZzb", desc: "Deep male voice, steady and dramatic." },
-  { name: "Callum",  id: "N2lVS1w4EtoT3dr4eOWO", desc: "Neutral male voice, versatile for any script." },
-  { name: "River",   id: "SAz9YHcvj6GT2YYXdXww", desc: "Fast, engaging voice for short-form hooks." },
-  { name: "Harry",   id: "SOYHLrjzK2X1ezoPC6cr", desc: "Crisp narrator tone with strong clarity." },
-  { name: "Liam",    id: "TX3LPaxmHKxFdv7VOQHJ", desc: "Relaxed male voice with casual delivery." },
-  { name: "Alice",   id: "Xb7hH8MSUJpSbSDYk0k2", desc: "Bright, friendly female voice." },
-  { name: "Matilda", id: "XrExE9yKIg1WjnnlVkGX", desc: "Soft female voice for emotional storytelling." },
-  { name: "Will",    id: "bIHbv24MWmeRgasZH58o", desc: "Punchy male voice with strong emphasis." },
-  { name: "Jessica", id: "cgSgspJ2msm6clMCkdW9", desc: "Upbeat modern female voice." },
-  { name: "Eric",    id: "cjVigY5qzO86Huf0OWal", desc: "Confident narration with steady rhythm." },
-  { name: "Chris",   id: "iP95p4xoKVk53GoZ742B", desc: "Friendly conversational male voice." },
-  { name: "Brian",   id: "nPczCjzI2devNBz1zQrb", desc: "Deeper male voice for dramatic reads." },
-  { name: "Daniel",  id: "onwK4e9ZLuTAKqWW03F9", desc: "Clear male voice, simple and direct." },
-  { name: "Lily",    id: "pFZP5JQG7iQjIQuC4Bku", desc: "Light, expressive female voice." },
-  { name: "Adam",    id: "pNInz6obpgDQGcFmaJgB", desc: "Neutral male voice, clean delivery." },
-  { name: "Bill",    id: "pqHfZKP75CvOlQylNhV4", desc: "Older male voice, classic storyteller feel." },
-  { name: "Alex",    id: "yl2ZDV1MzN4HbQJbMihG", desc: "Modern neutral voice (great all-purpose)." },
-  { name: "Mark",    id: "UgBBYS2sOqTuMpoF3BR0", desc: "Strong voice that hits punchlines well." },
-  { name: "Brittney",id: "kPzsL2i3teMYv0FxEYQ6", desc: "High-energy female voice for hooks." },
-  { name: "True",    id: "tZssYepgGaQmegsMEXjK", desc: "Smooth confident voice with quick pacing." },
-  { name: "Charles", id: "S9GPGBaMND8XWwwzxQXp", desc: "Formal narrator tone, very clear." },
-  { name: "Clancy",  id: "FLpz0UhC9a7CIfUSBo6S", desc: "Distinct character voice with personality." },
-  { name: "Dan",     id: "Ioq2c1GJee5RyqeoBIH3", desc: "Casual male voice with natural pauses." },
-];
+    // ==========================================================
+    // ✅ VOICE PICKER (ONE BUTTON + TABS + PREVIEWING...)
+    // ==========================================================
+    let voiceTarget = "post"; // "post" | "script"
+    let previewAudio = null;
+    let previewObjectUrl = "";
+    let previewAbort = null;
+    let previewingVoiceId = "";
 
-// ✅ Optional: if you host preview MP3s in Supabase, put the base folder URL here.
-// If PREVIEW_BASE is set, it will use that first. Otherwise it uses /api/voice-preview (GET).
-const PREVIEW_BASE = "";
-
-let voiceTarget = "post"; // "post" or "script"
-
-// audio preview state
-let previewAudio = null;
-let previewObjectUrl = "";
-let previewAbort = null;
-
-// ✅ UI state for "Previewing..."
-let previewingVoiceId = "";
-let previewingPhase = ""; // "fetching" | "playing" | ""
-
-function injectVoiceCss(){
-  const id = "nfVoicePickerCssV1";
-  if (document.getElementById(id)) return;
-  const s = document.createElement("style");
-  s.id = id;
-  s.textContent = `
-    /* ✅ Hover outline on voice cards */
-    .nf-voiceCard{
-      border:1px solid rgba(255,255,255,.12);
-      transition:border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease;
-    }
-    .nf-voiceCard:hover{
-      border-color: rgba(90,193,255,.45);
-      box-shadow: 0 0 0 1px rgba(90,193,255,.18) inset;
+    function stopPreview(){
+      if (previewAbort) {
+        try { previewAbort.abort(); } catch {}
+        previewAbort = null;
+      }
+      if (previewAudio) {
+        try { previewAudio.pause(); } catch {}
+        previewAudio = null;
+      }
+      if (previewObjectUrl) {
+        try { URL.revokeObjectURL(previewObjectUrl); } catch {}
+        previewObjectUrl = "";
+      }
+      previewingVoiceId = "";
     }
 
-    /* ✅ Description line style (replaces ID) */
-    .nf-voiceDesc{
-      margin-top:4px;
-      font-size:11px;
-      color: rgba(255,255,255,.60);
-      line-height:1.25;
-      white-space: normal;
-      word-break: break-word;
-    }
-  `;
-  document.head.appendChild(s);
-}
-injectVoiceCss();
-
-function stopPreview(){
-  if (previewAbort) {
-    try { previewAbort.abort(); } catch {}
-    previewAbort = null;
-  }
-  if (previewAudio) {
-    try { previewAudio.pause(); } catch {}
-    previewAudio = null;
-  }
-  if (previewObjectUrl) {
-    try { URL.revokeObjectURL(previewObjectUrl); } catch {}
-    previewObjectUrl = "";
-  }
-  try { speechSynthesis.cancel(); } catch {}
-
-  // ✅ clear UI state
-  previewingVoiceId = "";
-  previewingPhase = "";
-}
-
-function findVoiceById(id){
-  const s = String(id || "").trim();
-  if (!s || s === "default") return null;
-  return VOICES.find(v => v.id === s) || null;
-}
-
-function getSelectedVoiceId(target){
-  const el = target === "script" ? scriptVoiceEl : postVoiceEl;
-  return String(el?.value || "default").trim();
-}
-
-function setSelectedVoice(target, voice){
-  const el = target === "script" ? scriptVoiceEl : postVoiceEl;
-  const labelEl = target === "script" ? scriptVoiceLabel : postVoiceLabel;
-
-  if (el) el.value = voice?.id || "default";
-  if (labelEl) labelEl.textContent = voice?.name || "Default";
-
-  // keep grid UI in sync
-  renderVoiceGrid(String(voiceSearch?.value || "").trim());
-}
-
-// ----------------------------
-// ✅ VOICE PICKER (ONE BUTTON + TABS + REAL PREVIEW + "Previewing...")
-// ----------------------------
-const VOICES = [
-  { name: "Bella",   id: "hpp4J3VqNfWAUOO0d1Us", desc: "Warm, friendly female voice (great for upbeat reads)." },
-  { name: "Roger",   id: "CwhRBWXzGAHq8TQ4Fs17", desc: "Confident male narration with clear delivery." },
-  { name: "Sarah",   id: "EXAVITQu4vr4xnSDxMaL", desc: "Natural female storyteller with clean tone." },
-  { name: "Laura",   id: "FGY2WhTYpPnrIDTdsKH5", desc: "Smooth female voice with calm pacing." },
-  { name: "Charlie", id: "IKne3meq5aSn9XLyUdCD", desc: "Energetic male voice with playful vibe." },
-  { name: "George",  id: "JBFqnCBsd6RMkjVDRZzb", desc: "Deep male voice, steady and dramatic." },
-  { name: "Callum",  id: "N2lVS1w4EtoT3dr4eOWO", desc: "Neutral male voice, versatile for any script." },
-  { name: "River",   id: "SAz9YHcvj6GT2YYXdXww", desc: "Fast, engaging voice for short-form hooks." },
-  { name: "Harry",   id: "SOYHLrjzK2X1ezoPC6cr", desc: "Crisp narrator tone with strong clarity." },
-  { name: "Liam",    id: "TX3LPaxmHKxFdv7VOQHJ", desc: "Relaxed male voice with casual delivery." },
-  { name: "Alice",   id: "Xb7hH8MSUJpSbSDYk0k2", desc: "Bright, friendly female voice." },
-  { name: "Matilda", id: "XrExE9yKIg1WjnnlVkGX", desc: "Soft female voice for emotional storytelling." },
-  { name: "Will",    id: "bIHbv24MWmeRgasZH58o", desc: "Punchy male voice with strong emphasis." },
-  { name: "Jessica", id: "cgSgspJ2msm6clMCkdW9", desc: "Upbeat modern female voice." },
-  { name: "Eric",    id: "cjVigY5qzO86Huf0OWal", desc: "Confident narration with steady rhythm." },
-  { name: "Chris",   id: "iP95p4xoKVk53GoZ742B", desc: "Friendly conversational male voice." },
-  { name: "Brian",   id: "nPczCjzI2devNBz1zQrb", desc: "Deeper male voice for dramatic reads." },
-  { name: "Daniel",  id: "onwK4e9ZLuTAKqWW03F9", desc: "Clear male voice, simple and direct." },
-  { name: "Lily",    id: "pFZP5JQG7iQjIQuC4Bku", desc: "Light, expressive female voice." },
-  { name: "Adam",    id: "pNInz6obpgDQGcFmaJgB", desc: "Neutral male voice, clean delivery." },
-  { name: "Bill",    id: "pqHfZKP75CvOlQylNhV4", desc: "Older male voice, classic storyteller feel." },
-  { name: "Alex",    id: "yl2ZDV1MzN4HbQJbMihG", desc: "Modern neutral voice (great all-purpose)." },
-  { name: "Mark",    id: "UgBBYS2sOqTuMpoF3BR0", desc: "Strong voice that hits punchlines well." },
-  { name: "Brittney",id: "kPzsL2i3teMYv0FxEYQ6", desc: "High-energy female voice for hooks." },
-  { name: "True",    id: "tZssYepgGaQmegsMEXjK", desc: "Smooth confident voice with quick pacing." },
-  { name: "Charles", id: "S9GPGBaMND8XWwwzxQXp", desc: "Formal narrator tone, very clear." },
-  { name: "Clancy",  id: "FLpz0UhC9a7CIfUSBo6S", desc: "Distinct character voice with personality." },
-  { name: "Dan",     id: "Ioq2c1GJee5RyqeoBIH3", desc: "Casual male voice with natural pauses." },
-];
-
-// If PREVIEW_BASE is set, it uses hosted MP3s first. Otherwise it uses GET /api/voice-preview.
-const PREVIEW_BASE = "";
-
-// ✅ One button now:
-const voicesBtn = document.getElementById("rvVoicesBtn");
-
-// UI target tab
-let voiceTarget = "post"; // "post" | "script"
-
-// audio preview state
-let previewAudio = null;
-let previewObjectUrl = "";
-let previewAbort = null;
-
-// "Previewing..." state
-let previewingVoiceId = "";
-
-// Inject CSS for hover outline + tabs + desc
-(function injectVoiceCss(){
-  const id = "nfVoicePickerCssTabsV1";
-  if (document.getElementById(id)) return;
-  const s = document.createElement("style");
-  s.id = id;
-  s.textContent = `
-    .nf-voiceCard{
-      border:1px solid rgba(255,255,255,.12);
-      transition:border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease;
-    }
-    .nf-voiceCard:hover{
-      border-color: rgba(90,193,255,.45);
-      box-shadow: 0 0 0 1px rgba(90,193,255,.18) inset;
-    }
-    .nf-voiceDesc{
-      margin-top:4px;
-      font-size:11px;
-      color: rgba(255,255,255,.60);
-      line-height:1.25;
-      white-space: normal;
-      word-break: break-word;
+    function findVoiceById(id){
+      const s = String(id || "").trim();
+      if (!s || s === "default") return null;
+      return VOICES.find(v => v.id === s) || null;
     }
 
-    /* ✅ Tabs inside modal header */
-    .nf-voiceTabs{
-      display:flex;
-      gap:8px;
-      margin-top:10px;
-    }
-    .nf-voiceTab{
-      border:1px solid rgba(255,255,255,.14);
-      background: rgba(255,255,255,.06);
-      color: rgba(255,255,255,.85);
-      border-radius: 999px;
-      padding: 7px 12px;
-      font-size: 12px;
-      font-weight: 900;
-      cursor: pointer;
-      line-height: 1;
-    }
-    .nf-voiceTab.active{
-      border-color: rgba(90,193,255,.45);
-      background: rgba(90,193,255,.18);
-      color: rgba(90,193,255,1);
-    }
-  `;
-  document.head.appendChild(s);
-})();
-
-function stopPreview(){
-  if (previewAbort) {
-    try { previewAbort.abort(); } catch {}
-    previewAbort = null;
-  }
-  if (previewAudio) {
-    try { previewAudio.pause(); } catch {}
-    previewAudio = null;
-  }
-  if (previewObjectUrl) {
-    try { URL.revokeObjectURL(previewObjectUrl); } catch {}
-    previewObjectUrl = "";
-  }
-  previewingVoiceId = "";
-  try { speechSynthesis.cancel(); } catch {}
-}
-
-function findVoiceById(id){
-  const s = String(id || "").trim();
-  if (!s || s === "default") return null;
-  return VOICES.find(v => v.id === s) || null;
-}
-
-function getSelectedVoiceId(target){
-  const el = target === "script" ? scriptVoiceEl : postVoiceEl;
-  return String(el?.value || "default").trim();
-}
-
-function setSelectedVoice(target, voice){
-  const el = target === "script" ? scriptVoiceEl : postVoiceEl;
-  const labelEl = target === "script" ? scriptVoiceLabel : postVoiceLabel;
-
-  if (el) el.value = voice?.id || "default";
-  if (labelEl) labelEl.textContent = voice?.name || "Default";
-
-  renderVoiceGrid(String(voiceSearch?.value || "").trim());
-}
-
-// ----------------------------
-// ✅ VOICE PICKER (ONE BUTTON + TABS + REAL PREVIEW + "Previewing...")
-// ----------------------------
-const VOICES = [
-  { name: "Bella",   id: "hpp4J3VqNfWAUOO0d1Us", desc: "Warm, friendly female voice." },
-  { name: "Roger",   id: "CwhRBWXzGAHq8TQ4Fs17", desc: "Confident male narration." },
-  { name: "Sarah",   id: "EXAVITQu4vr4xnSDxMaL", desc: "Natural female storyteller." },
-  { name: "Laura",   id: "FGY2WhTYpPnrIDTdsKH5", desc: "Smooth, calm female voice." },
-  { name: "Charlie", id: "IKne3meq5aSn9XLyUdCD", desc: "Energetic male voice." },
-  { name: "George",  id: "JBFqnCBsd6RMkjVDRZzb", desc: "Deep, steady male voice." },
-  { name: "Callum",  id: "N2lVS1w4EtoT3dr4eOWO", desc: "Neutral male, versatile." },
-  { name: "River",   id: "SAz9YHcvj6GT2YYXdXww", desc: "Fast, engaging delivery." },
-  { name: "Harry",   id: "SOYHLrjzK2X1ezoPC6cr", desc: "Crisp narrator tone." },
-  { name: "Liam",    id: "TX3LPaxmHKxFdv7VOQHJ", desc: "Relaxed casual male voice." },
-  { name: "Alice",   id: "Xb7hH8MSUJpSbSDYk0k2", desc: "Bright friendly female voice." },
-  { name: "Matilda", id: "XrExE9yKIg1WjnnlVkGX", desc: "Soft emotional storytelling." },
-  { name: "Will",    id: "bIHbv24MWmeRgasZH58o", desc: "Punchy male emphasis." },
-  { name: "Jessica", id: "cgSgspJ2msm6clMCkdW9", desc: "Upbeat modern female voice." },
-  { name: "Eric",    id: "cjVigY5qzO86Huf0OWal", desc: "Confident steady rhythm." },
-  { name: "Chris",   id: "iP95p4xoKVk53GoZ742B", desc: "Friendly conversational male." },
-  { name: "Brian",   id: "nPczCjzI2devNBz1zQrb", desc: "Deeper dramatic male voice." },
-  { name: "Daniel",  id: "onwK4e9ZLuTAKqWW03F9", desc: "Clear direct male voice." },
-  { name: "Lily",    id: "pFZP5JQG7iQjIQuC4Bku", desc: "Light expressive female voice." },
-  { name: "Adam",    id: "pNInz6obpgDQGcFmaJgB", desc: "Neutral male, clean delivery." },
-  { name: "Bill",    id: "pqHfZKP75CvOlQylNhV4", desc: "Classic older storyteller vibe." },
-  { name: "Alex",    id: "yl2ZDV1MzN4HbQJbMihG", desc: "Modern neutral all-purpose." },
-  { name: "Mark",    id: "UgBBYS2sOqTuMpoF3BR0", desc: "Strong punchline delivery." },
-  { name: "Brittney",id: "kPzsL2i3teMYv0FxEYQ6", desc: "High-energy female hooks." },
-  { name: "True",    id: "tZssYepgGaQmegsMEXjK", desc: "Smooth confident pacing." },
-  { name: "Charles", id: "S9GPGBaMND8XWwwzxQXp", desc: "Formal narrator, very clear." },
-  { name: "Clancy",  id: "FLpz0UhC9a7CIfUSBo6S", desc: "Distinct character voice." },
-  { name: "Dan",     id: "Ioq2c1GJee5RyqeoBIH3", desc: "Casual natural pauses." },
-];
-
-// If PREVIEW_BASE is set, it uses hosted MP3s first. Otherwise it uses GET /api/voice-preview.
-const PREVIEW_BASE = "";
-
-// ✅ DOM (your ids)
-const voiceModal   = document.getElementById("rvVoiceModal");
-const voiceTitle   = document.getElementById("rvVoiceTitle");
-const voiceClose   = document.getElementById("rvVoiceClose");
-const voiceSearch  = document.getElementById("rvVoiceSearch");
-const voiceClear   = document.getElementById("rvVoiceClear");
-const voiceGrid    = document.getElementById("rvVoiceGrid");
-const voiceTabs    = document.getElementById("rvVoiceTabs");
-
-const voicesBtn        = document.getElementById("rvVoicesBtn");
-const postVoiceEl      = document.getElementById("rvPostVoice");
-const scriptVoiceEl    = document.getElementById("rvScriptVoice");
-const postVoiceLabel   = document.getElementById("rvPostVoiceLabel");
-const scriptVoiceLabel = document.getElementById("rvScriptVoiceLabel");
-
-// tab state
-let voiceTarget = "post"; // "post" | "script"
-
-// audio preview state
-let previewAudio = null;
-let previewObjectUrl = "";
-let previewAbort = null;
-
-// "Previewing..." state
-let previewingVoiceId = "";
-
-// Inject CSS (hover outline + tabs + desc)
-(function injectVoiceCss(){
-  const id = "nfVoicePickerCssTabsV2";
-  if (document.getElementById(id)) return;
-  const s = document.createElement("style");
-  s.id = id;
-  s.textContent = `
-    .nf-voiceGrid{ display:grid; grid-template-columns: repeat(3, 1fr); gap:10px; }
-    @media (max-width: 900px){ .nf-voiceGrid{ grid-template-columns: repeat(2, 1fr);} }
-    @media (max-width: 620px){ .nf-voiceGrid{ grid-template-columns: 1fr;} }
-
-    .nf-voiceCard{
-      border:1px solid rgba(255,255,255,.12);
-      background: rgba(255,255,255,.05);
-      border-radius:14px;
-      padding:12px;
-      display:flex;
-      justify-content:space-between;
-      gap:12px;
-      transition:border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease;
-    }
-    .nf-voiceCard:hover{
-      border-color: rgba(90,193,255,.45);
-      box-shadow: 0 0 0 1px rgba(90,193,255,.18) inset;
-      transform: translateY(-1px);
-    }
-    .nf-voiceSelected{
-      border-color: rgba(90,193,255,.65) !important;
-      box-shadow: 0 0 0 1px rgba(90,193,255,.22) inset;
-    }
-    .nf-voiceName{ font-weight:950; font-size:13px; margin-bottom:4px; }
-    .nf-voiceDesc{
-      font-size:11px;
-      color: rgba(255,255,255,.60);
-      line-height:1.25;
-      max-width: 520px;
-      white-space: normal;
-      word-break: break-word;
-    }
-    .nf-voiceBtns{ display:flex; flex-direction:column; gap:8px; align-items:flex-end; }
-    .nf-voiceBtnMini{
-      border:1px solid rgba(255,255,255,.16);
-      background: rgba(255,255,255,.08);
-      color: rgba(255,255,255,.92);
-      border-radius:10px;
-      padding:6px 10px;
-      font-size:12px;
-      font-weight:900;
-      cursor:pointer;
-      white-space:nowrap;
-      min-width: 116px;
-      text-align:center;
-    }
-    .nf-voiceBtnMini:disabled{
-      opacity:.72;
-      cursor:not-allowed;
-    }
-    .nf-voiceBtnUse{
-      border-color: rgba(90,193,255,.35);
-      background: rgba(90,193,255,.16);
-      color: rgba(90,193,255,1);
+    function getSelectedVoiceId(target){
+      const el = target === "script" ? scriptVoiceEl : postVoiceEl;
+      return String(el?.value || "default").trim();
     }
 
-    /* Tabs */
-    .nf-voiceTabs{
-      display:flex;
-      gap:8px;
-      margin: 2px 0 12px;
-    }
-    .nf-voiceTab{
-      border:1px solid rgba(255,255,255,.14);
-      background: rgba(255,255,255,.06);
-      color: rgba(255,255,255,.85);
-      border-radius: 999px;
-      padding: 7px 12px;
-      font-size: 12px;
-      font-weight: 900;
-      cursor: pointer;
-      line-height: 1;
-    }
-    .nf-voiceTab.active{
-      border-color: rgba(90,193,255,.45);
-      background: rgba(90,193,255,.18);
-      color: rgba(90,193,255,1);
+    function setSelectedVoice(target, voice){
+      const el = target === "script" ? scriptVoiceEl : postVoiceEl;
+      const labelEl = target === "script" ? scriptVoiceLabel : postVoiceLabel;
+
+      if (el) el.value = voice?.id || "default";
+      if (labelEl) labelEl.textContent = voice?.name || "Default";
+
+      renderVoiceGrid(String(voiceSearch?.value || "").trim());
     }
 
-    .nf-voiceHint{
-      margin: 0 0 10px;
-      font-size: 11px;
-      color: rgba(255,255,255,.70);
+    function setActiveTab(tab){
+      voiceTarget = (tab === "script") ? "script" : "post";
+      stopPreview();
+      renderVoiceGrid(String(voiceSearch?.value || "").trim());
+
+      if (voiceTitle) voiceTitle.textContent = (voiceTarget === "post" ? "Choose Post Voice" : "Choose Script Voice");
+
+      const postBtn = voiceTabs?.querySelector('[data-tab="post"]');
+      const scrBtn  = voiceTabs?.querySelector('[data-tab="script"]');
+      if (postBtn) postBtn.classList.toggle("active", voiceTarget === "post");
+      if (scrBtn)  scrBtn.classList.toggle("active", voiceTarget === "script");
     }
-  `;
-  document.head.appendChild(s);
-})();
 
-function stopPreview(){
-  if (previewAbort) {
-    try { previewAbort.abort(); } catch {}
-    previewAbort = null;
-  }
-  if (previewAudio) {
-    try { previewAudio.pause(); } catch {}
-    previewAudio = null;
-  }
-  if (previewObjectUrl) {
-    try { URL.revokeObjectURL(previewObjectUrl); } catch {}
-    previewObjectUrl = "";
-  }
-  previewingVoiceId = "";
-}
+    async function previewVoice(voice){
+      stopPreview();
 
-function findVoiceById(id){
-  const s = String(id || "").trim();
-  if (!s || s === "default") return null;
-  return VOICES.find(v => v.id === s) || null;
-}
+      const sampleText =
+        voiceTarget === "post"
+          ? (String(readAnyText(postTitleEl)).trim() || "This is a preview of the selected voice.")
+          : (String(readAnyText(scriptEl)).trim() || "This is a preview of the selected voice.");
 
-function getSelectedVoiceId(target){
-  const el = target === "script" ? scriptVoiceEl : postVoiceEl;
-  return String(el?.value || "default").trim();
-}
+      const text = String(sampleText).slice(0, 240);
+      const voiceId = String(voice?.id || "").trim();
+      if (!voiceId) return alert("Missing voice id");
 
-function setSelectedVoice(target, voice){
-  const el = target === "script" ? scriptVoiceEl : postVoiceEl;
-  const labelEl = target === "script" ? scriptVoiceLabel : postVoiceLabel;
+      previewingVoiceId = voiceId;
+      renderVoiceGrid(String(voiceSearch?.value || "").trim());
 
-  if (el) el.value = voice?.id || "default";
-  if (labelEl) labelEl.textContent = voice?.name || "Default";
-  renderVoiceGrid(String(voiceSearch?.value || "").trim());
-}
+      // 1) hosted mp3 (optional)
+      const hostedUrl = PREVIEW_BASE
+        ? (PREVIEW_BASE.replace(/\/$/, "") + "/" + encodeURIComponent(voiceId) + ".mp3")
+        : "";
 
-function setActiveTab(tab){
-  voiceTarget = (tab === "script") ? "script" : "post";
-  stopPreview();
-  renderVoiceGrid(String(voiceSearch?.value || "").trim());
+      if (hostedUrl) {
+        previewAudio = new Audio(hostedUrl);
+        previewAudio.onended = () => { stopPreview(); renderVoiceGrid(String(voiceSearch?.value || "").trim()); };
+        previewAudio.onerror = () => {
+          stopPreview(); renderVoiceGrid(String(voiceSearch?.value || "").trim());
+          alert("Preview failed (check PREVIEW_BASE mp3 exists).");
+        };
+        previewAudio.play().catch(()=>{
+          stopPreview(); renderVoiceGrid(String(voiceSearch?.value || "").trim());
+          alert("Preview couldn't play (autoplay blocked?)");
+        });
+        return;
+      }
 
-  if (voiceTitle) voiceTitle.textContent = (voiceTarget === "post" ? "Choose Post Voice" : "Choose Script Voice");
+      // 2) backend GET /api/voice-preview?voiceId=...&text=...
+      const url =
+        API_BASE +
+        "/api/voice-preview" +
+        "?voiceId=" + encodeURIComponent(voiceId) +
+        "&text=" + encodeURIComponent(text);
 
-  const postBtn = voiceTabs?.querySelector('[data-tab="post"]');
-  const scrBtn  = voiceTabs?.querySelector('[data-tab="script"]');
-  if (postBtn) postBtn.classList.toggle("active", voiceTarget === "post");
-  if (scrBtn)  scrBtn.classList.toggle("active", voiceTarget === "script");
-}
+      previewAbort = new AbortController();
 
-async function previewVoice(voice){
-  stopPreview();
+      let res;
+      try {
+        res = await fetch(url, { method: "GET", signal: previewAbort.signal });
+      } catch (e) {
+        if (String(e?.name) === "AbortError") return;
+        stopPreview();
+        renderVoiceGrid(String(voiceSearch?.value || "").trim());
+        alert("Preview request failed: " + (e?.message || e));
+        return;
+      } finally {
+        previewAbort = null;
+      }
 
-  const sampleText =
-    voiceTarget === "post"
-      ? (String(readAnyText(postTitleEl)).trim() || "This is a preview of the selected voice.")
-      : (String(readAnyText(scriptEl)).trim() || "This is a preview of the selected voice.");
+      if (!res.ok) {
+        const t = await res.text().catch(()=> "");
+        stopPreview();
+        renderVoiceGrid(String(voiceSearch?.value || "").trim());
+        alert("Preview failed: " + (t || ("HTTP " + res.status)));
+        return;
+      }
 
-  const text = String(sampleText).slice(0, 240);
-  const voiceId = String(voice?.id || "").trim();
-  if (!voiceId) return alert("Missing voice id");
+      const blob = await res.blob();
+      previewObjectUrl = URL.createObjectURL(blob);
 
-  previewingVoiceId = voiceId;
-  renderVoiceGrid(String(voiceSearch?.value || "").trim());
+      previewAudio = new Audio(previewObjectUrl);
+      previewAudio.onended = () => { stopPreview(); renderVoiceGrid(String(voiceSearch?.value || "").trim()); };
+      previewAudio.onerror = () => { stopPreview(); renderVoiceGrid(String(voiceSearch?.value || "").trim()); };
 
-  const hostedUrl = PREVIEW_BASE
-    ? (PREVIEW_BASE.replace(/\/$/, "") + "/" + encodeURIComponent(voiceId) + ".mp3")
-    : "";
+      previewAudio.play().catch(()=>{
+        stopPreview();
+        renderVoiceGrid(String(voiceSearch?.value || "").trim());
+        alert("Preview couldn't play (autoplay blocked?)");
+      });
+    }
 
-  if (hostedUrl) {
-    previewAudio = new Audio(hostedUrl);
-    previewAudio.onended = () => { stopPreview(); renderVoiceGrid(String(voiceSearch?.value || "").trim()); };
-    previewAudio.onerror = () => {
-      stopPreview(); renderVoiceGrid(String(voiceSearch?.value || "").trim());
-      alert("Preview failed (check PREVIEW_BASE mp3 exists).");
-    };
-    previewAudio.play().catch(()=>{
-      stopPreview(); renderVoiceGrid(String(voiceSearch?.value || "").trim());
-      alert("Preview couldn't play (autoplay blocked?)");
+    function renderVoiceGrid(q){
+      if (!voiceGrid) return;
+
+      const query = String(q || "").toLowerCase().trim();
+      const selectedId = getSelectedVoiceId(voiceTarget);
+
+      const filtered = VOICES.filter(v => {
+        if (!query) return true;
+        return (
+          v.name.toLowerCase().includes(query) ||
+          String(v.desc || "").toLowerCase().includes(query) ||
+          v.id.toLowerCase().includes(query)
+        );
+      });
+
+      voiceGrid.classList.add("nf-voiceGrid");
+
+      voiceGrid.innerHTML = filtered.map(v => {
+        const selected = (selectedId === v.id);
+        const isPreviewing = (previewingVoiceId === v.id);
+
+        return `
+          <div class="nf-voiceCard ${selected ? "nf-voiceSelected" : ""}">
+            <div style="min-width:0;">
+              <div class="nf-voiceName" title="${v.name}">${v.name}</div>
+              <div class="nf-voiceDesc" title="${String(v.desc || "")}">${String(v.desc || "—")}</div>
+            </div>
+
+            <div class="nf-voiceBtns">
+              <button class="nf-voiceBtnMini" type="button" data-act="preview" data-id="${v.id}" ${isPreviewing ? "disabled" : ""}>
+                ${isPreviewing ? "Previewing..." : "Preview"}
+              </button>
+              <button class="nf-voiceBtnMini nf-voiceBtnUse" type="button" data-act="use" data-id="${v.id}">
+                ${selected ? "Selected" : "Use voice"}
+              </button>
+            </div>
+          </div>
+        `;
+      }).join("");
+    }
+
+    function openVoiceModal(){
+      if (voiceSearch) voiceSearch.value = "";
+      if (voiceModal) voiceModal.classList.add("open");
+      setActiveTab(voiceTarget);
+      renderVoiceGrid("");
+    }
+
+    function closeVoiceModal(){
+      if (voiceModal) voiceModal.classList.remove("open");
+      stopPreview();
+      renderVoiceGrid(String(voiceSearch?.value || "").trim());
+    }
+
+    // One button opens modal
+    if (voicesBtn) voicesBtn.addEventListener("click", openVoiceModal);
+
+    // Tabs
+    if (voiceTabs) {
+      voiceTabs.addEventListener("click", (e)=>{
+        const b = e.target.closest("button[data-tab]");
+        if (!b) return;
+        setActiveTab(b.dataset.tab);
+      });
+    }
+
+    // Close wiring
+    if (voiceClose) voiceClose.addEventListener("click", closeVoiceModal);
+    if (voiceModal) voiceModal.addEventListener("click", (e)=>{
+      if (e.target === voiceModal) closeVoiceModal();
     });
-    return;
-  }
 
-  const url =
-    API_BASE +
-    "/api/voice-preview" +
-    "?voiceId=" + encodeURIComponent(voiceId) +
-    "&text=" + encodeURIComponent(text);
+    // Search / Clear
+    if (voiceClear) voiceClear.addEventListener("click", ()=>{
+      if (voiceSearch) voiceSearch.value = "";
+      renderVoiceGrid("");
+    });
+    if (voiceSearch) voiceSearch.addEventListener("input", ()=> renderVoiceGrid(voiceSearch.value));
 
-  previewAbort = new AbortController();
+    // Grid click actions
+    if (voiceGrid) voiceGrid.addEventListener("click", (e)=>{
+      const btn = e.target.closest("button[data-act]");
+      if (!btn) return;
 
-  let res;
-  try {
-    res = await fetch(url, { method: "GET", signal: previewAbort.signal });
-  } catch (e) {
-    if (String(e?.name) === "AbortError") return;
-    stopPreview();
-    renderVoiceGrid(String(voiceSearch?.value || "").trim());
-    alert("Preview request failed: " + (e?.message || e));
-    return;
-  } finally {
-    previewAbort = null;
-  }
+      const act = btn.dataset.act;
+      const id = btn.dataset.id;
+      const voice = VOICES.find(v => v.id === id);
+      if (!voice) return;
 
-  if (!res.ok) {
-    const t = await res.text().catch(()=> "");
-    stopPreview();
-    renderVoiceGrid(String(voiceSearch?.value || "").trim());
-    alert("Preview failed: " + (t || ("HTTP " + res.status)));
-    return;
-  }
+      if (act === "preview") previewVoice(voice);
+      if (act === "use") setSelectedVoice(voiceTarget, voice);
+    });
 
-  const blob = await res.blob();
-  previewObjectUrl = URL.createObjectURL(blob);
+    // Init labels
+    (function initVoiceLabels(){
+      const pv = findVoiceById(postVoiceEl?.value);
+      const sv = findVoiceById(scriptVoiceEl?.value);
+      if (postVoiceLabel) postVoiceLabel.textContent = pv?.name || "Default";
+      if (scriptVoiceLabel) scriptVoiceLabel.textContent = sv?.name || "Default";
+    })();
 
-  previewAudio = new Audio(previewObjectUrl);
-  previewAudio.onended = () => { stopPreview(); renderVoiceGrid(String(voiceSearch?.value || "").trim()); };
-  previewAudio.onerror = () => { stopPreview(); renderVoiceGrid(String(voiceSearch?.value || "").trim()); };
-
-  previewAudio.play().catch(()=>{
-    stopPreview();
-    renderVoiceGrid(String(voiceSearch?.value || "").trim());
-    alert("Preview couldn't play (autoplay blocked?)");
-  });
-}
-
-function renderVoiceGrid(q){
-  if (!voiceGrid) return;
-
-  const query = String(q || "").toLowerCase().trim();
-  const selectedId = getSelectedVoiceId(voiceTarget);
-
-  const filtered = VOICES.filter(v => {
-    if (!query) return true;
-    return (
-      v.name.toLowerCase().includes(query) ||
-      String(v.desc || "").toLowerCase().includes(query) ||
-      v.id.toLowerCase().includes(query)
-    );
-  });
-
-  voiceGrid.classList.add("nf-voiceGrid");
-
-  voiceGrid.innerHTML = filtered.map(v => {
-    const selected = (selectedId === v.id);
-    const isPreviewing = (previewingVoiceId === v.id);
-
-    return `
-      <div class="nf-voiceCard ${selected ? "nf-voiceSelected" : ""}">
-        <div style="min-width:0;">
-          <div class="nf-voiceName" title="${v.name}">${v.name}</div>
-          <div class="nf-voiceDesc" title="${String(v.desc || "")}">${String(v.desc || "—")}</div>
-        </div>
-
-        <div class="nf-voiceBtns">
-          <button class="nf-voiceBtnMini" type="button" data-act="preview" data-id="${v.id}" ${isPreviewing ? "disabled" : ""}>
-            ${isPreviewing ? "Previewing..." : "Preview"}
-          </button>
-          <button class="nf-voiceBtnMini nf-voiceBtnUse" type="button" data-act="use" data-id="${v.id}">
-            ${selected ? "Selected" : "Use voice"}
-          </button>
-        </div>
-      </div>
-    `;
-  }).join("");
-}
-
-function openVoiceModal(){
-  if (voiceSearch) voiceSearch.value = "";
-  renderVoiceGrid("");
-  if (voiceModal) voiceModal.classList.add("open");
-  setActiveTab(voiceTarget);
-}
-
-function closeVoiceModal(){
-  if (voiceModal) voiceModal.classList.remove("open");
-  stopPreview();
-  renderVoiceGrid(String(voiceSearch?.value || "").trim());
-}
-
-// ✅ One button opens modal
-if (voicesBtn) voicesBtn.addEventListener("click", openVoiceModal);
-
-// Tabs
-if (voiceTabs) {
-  voiceTabs.addEventListener("click", (e)=>{
-    const b = e.target.closest("button[data-tab]");
-    if (!b) return;
-    setActiveTab(b.dataset.tab);
-  });
-}
-
-// Close wiring
-if (voiceClose) voiceClose.addEventListener("click", closeVoiceModal);
-if (voiceModal) voiceModal.addEventListener("click", (e)=>{
-  if (e.target === voiceModal) closeVoiceModal();
-});
-
-// Search / Clear
-if (voiceClear) voiceClear.addEventListener("click", ()=>{
-  if (voiceSearch) voiceSearch.value = "";
-  renderVoiceGrid("");
-});
-if (voiceSearch) voiceSearch.addEventListener("input", ()=> renderVoiceGrid(voiceSearch.value));
-
-// Grid click actions
-if (voiceGrid) voiceGrid.addEventListener("click", (e)=>{
-  const btn = e.target.closest("button[data-act]");
-  if (!btn) return;
-
-  const act = btn.dataset.act;
-  const id = btn.dataset.id;
-  const voice = VOICES.find(v => v.id === id);
-  if (!voice) return;
-
-  if (act === "preview") previewVoice(voice);
-  if (act === "use") setSelectedVoice(voiceTarget, voice);
-});
-
-// Init labels
-(function initVoiceLabels(){
-  const pv = findVoiceById(postVoiceEl?.value);
-  const sv = findVoiceById(scriptVoiceEl?.value);
-  if (postVoiceLabel) postVoiceLabel.textContent = pv?.name || "Default";
-  if (scriptVoiceLabel) scriptVoiceLabel.textContent = sv?.name || "Default";
-})();
-
-
-
+    // ==========================================================
+    // ✅ Render polling + payload + generate
+    // ==========================================================
     async function pollReddit(renderId){
       for (;;) {
         await new Promise(r => setTimeout(r, 2500));
@@ -1315,8 +1038,8 @@ if (voiceGrid) voiceGrid.addEventListener("click", (e)=>{
         likes: String(readAnyText(likesEl) || "0").trim(),
         comments: String(readAnyText(commentsEl) || "0").trim(),
         shareText: String(readAnyText(shareTextEl) || "share").trim(),
-        postVoice: postVoiceEl?.value || "default",       // ✅ now real ElevenLabs voice id
-        scriptVoice: scriptVoiceEl?.value || "default",   // ✅ now real ElevenLabs voice id
+        postVoice: postVoiceEl?.value || "default",
+        scriptVoice: scriptVoiceEl?.value || "default",
         script: String(readAnyText(scriptEl)).trim(),
         tone: String(readAnyText(toneHidden)).trim(),
         length: String(readAnyText(lenHidden)).trim(),
