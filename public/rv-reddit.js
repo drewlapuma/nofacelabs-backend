@@ -59,7 +59,7 @@
   ];
 
   // If you host preview MP3s, set this. Otherwise it uses GET /api/voice-preview.
-  const PREVIEW_BASE = "";
+  const PREVIEW_BASE = "https://pub-178d4bb2cbf54f3f92bc03819410134c.r2.dev";
 
   function boot(){
     // ---------- DOM ----------
