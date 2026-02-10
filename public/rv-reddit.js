@@ -322,117 +322,121 @@
       document.head.appendChild(s);
     })();
 
-    // ---------- ✅ Voice picker CSS (hover outline + desc + tabs + grid) ----------
+    // ---------- ✅ Voice picker CSS (UPDATED: buttons side-by-side + centered text) ----------
     (function injectVoiceCss(){
-  // bump ID so it overrides any previous injected styles
-  const id = "nfVoicePickerCssV4";
-  if (document.getElementById(id)) return;
-  const s = document.createElement("style");
-  s.id = id;
-  s.textContent = `
-    .nf-voiceTabs{
-      display:flex;
-      gap:8px;
-      margin: 2px 0 12px;
-    }
-    .nf-voiceTab{
-      border:1px solid rgba(255,255,255,.14);
-      background: rgba(255,255,255,.06);
-      color: rgba(255,255,255,.85);
-      border-radius: 999px;
-      padding: 7px 12px;
-      font-size: 12px;
-      font-weight: 900;
-      cursor: pointer;
-      line-height: 1;
-    }
-    .nf-voiceTab.active{
-      border-color: rgba(90,193,255,.45);
-      background: rgba(90,193,255,.18);
-      color: rgba(90,193,255,1);
-    }
+      const id = "nfVoicePickerCssV4";
+      if (document.getElementById(id)) return;
+      const s = document.createElement("style");
+      s.id = id;
+      s.textContent = `
+        .nf-voiceTabs{
+          display:flex;
+          gap:8px;
+          margin: 2px 0 12px;
+        }
+        .nf-voiceTab{
+          border:1px solid rgba(255,255,255,.14);
+          background: rgba(255,255,255,.06);
+          color: rgba(255,255,255,.85);
+          border-radius: 999px;
+          padding: 7px 12px;
+          font-size: 12px;
+          font-weight: 900;
+          cursor: pointer;
+          line-height: 1;
+        }
+        .nf-voiceTab.active{
+          border-color: rgba(90,193,255,.45);
+          background: rgba(90,193,255,.18);
+          color: rgba(90,193,255,1);
+        }
 
-    .nf-voiceHint{
-      margin: 0 0 10px;
-      font-size: 11px;
-      color: rgba(255,255,255,.70);
-    }
+        .nf-voiceHint{
+          margin: 0 0 10px;
+          font-size: 11px;
+          color: rgba(255,255,255,.70);
+        }
 
-    .nf-voiceGrid{
-      display:grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap:10px;
-    }
-    @media (max-width: 900px){ .nf-voiceGrid{ grid-template-columns: repeat(2, 1fr);} }
-    @media (max-width: 620px){ .nf-voiceGrid{ grid-template-columns: 1fr;} }
+        .nf-voiceGrid{
+          display:grid;
+          grid-template-columns: repeat(3, 1fr);
+          gap:14px;
+        }
+        @media (max-width: 900px){ .nf-voiceGrid{ grid-template-columns: repeat(2, 1fr);} }
+        @media (max-width: 620px){ .nf-voiceGrid{ grid-template-columns: 1fr;} }
 
-    /* ✅ make card layout like photo #1:
-       text on top, buttons row below */
-    .nf-voiceCard{
-      border:1px solid rgba(255,255,255,.12);
-      background: rgba(255,255,255,.05);
-      border-radius:14px;
-      padding:12px;
-      display:flex;
-      flex-direction:column;     /* ✅ key */
-      justify-content:space-between;
-      gap:10px;
-      min-height: 120px;
-      transition:border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease;
-    }
-    .nf-voiceCard:hover{
-      border-color: rgba(90,193,255,.45);
-      box-shadow: 0 0 0 1px rgba(90,193,255,.18) inset;
-      transform: translateY(-1px);
-    }
-    .nf-voiceSelected{
-      border-color: rgba(90,193,255,.65) !important;
-      box-shadow: 0 0 0 1px rgba(90,193,255,.22) inset;
-    }
+        /* Card becomes a column, buttons sit at bottom */
+        .nf-voiceCard{
+          border:1px solid rgba(255,255,255,.12);
+          background: rgba(255,255,255,.05);
+          border-radius:18px;
+          padding:18px;
+          display:flex;
+          flex-direction:column;
+          gap:14px;
+          min-height: 148px;
+          transition:border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease;
+        }
+        .nf-voiceCard:hover{
+          border-color: rgba(90,193,255,.45);
+          box-shadow: 0 0 0 1px rgba(90,193,255,.18) inset;
+          transform: translateY(-1px);
+        }
+        .nf-voiceSelected{
+          border-color: rgba(90,193,255,.65) !important;
+          box-shadow: 0 0 0 1px rgba(90,193,255,.22) inset;
+        }
 
-    .nf-voiceName{ font-weight:950; font-size:13px; margin-bottom:4px; }
-    .nf-voiceDesc{
-      font-size:11px;
-      color: rgba(255,255,255,.60);
-      line-height:1.25;
-      white-space: normal;
-      word-break: break-word;
-    }
+        .nf-voiceName{ font-weight:950; font-size:16px; margin-bottom:6px; }
+        .nf-voiceDesc{
+          font-size:13px;
+          color: rgba(255,255,255,.68);
+          line-height:1.35;
+          white-space: normal;
+          word-break: break-word;
+        }
 
-    /* ✅ buttons side-by-side */
-    .nf-voiceBtns{
-      display:flex;
-      flex-direction:row;        /* ✅ key */
-      gap:10px;
-      align-items:stretch;
-      justify-content:space-between;
-      width:100%;
-      margin-top: 4px;
-    }
-    .nf-voiceBtnMini{
-      flex: 1 1 0%;              /* ✅ makes them equal width */
-      border:1px solid rgba(255,255,255,.16);
-      background: rgba(255,255,255,.08);
-      color: rgba(255,255,255,.92);
-      border-radius:10px;
-      padding:8px 10px;
-      font-size:12px;
-      font-weight:900;
-      cursor:pointer;
-      white-space:nowrap;
-      min-width: 0;              /* ✅ allow shrink */
-      text-align:center;
-    }
-    .nf-voiceBtnMini:disabled{ opacity:.72; cursor:not-allowed; }
-    .nf-voiceBtnUse{
-      border-color: rgba(90,193,255,.35);
-      background: rgba(90,193,255,.16);
-      color: rgba(90,193,255,1);
-    }
-  `;
-  document.head.appendChild(s);
-})();
+        /* ✅ Buttons row: side-by-side */
+        .nf-voiceBtnsRow{
+          margin-top:auto;
+          display:flex;
+          gap:14px;
+        }
 
+        /* ✅ Perfect centered button text */
+        .nf-voiceBtnMini{
+          flex:1 1 0;
+          border:1px solid rgba(255,255,255,.16);
+          background: rgba(255,255,255,.08);
+          color: rgba(255,255,255,.92);
+          border-radius: 18px;
+          height: 44px;
+          padding: 0 14px;
+          font-size: 14px;
+          font-weight: 900;
+
+          display:flex;
+          align-items:center;
+          justify-content:center;
+
+          line-height: 1;
+          cursor:pointer;
+          white-space:nowrap;
+          text-align:center;
+        }
+        .nf-voiceBtnMini:disabled{ opacity:.72; cursor:not-allowed; }
+
+        .nf-voiceBtnUse{
+          border-color: rgba(90,193,255,.35);
+          background: rgba(90,193,255,.16);
+          color: rgba(90,193,255,1);
+        }
+
+        /* optional: hide old floating labels if you keep them in HTML */
+        #rvPostVoiceLabel, #rvScriptVoiceLabel{ display:none !important; }
+      `;
+      document.head.appendChild(s);
+    })();
 
     // ---------- icons ----------
     const PATH_LIKE = `M 50 100 L 7.5578 50.9275 C 2.6844 45.2929 0 37.8006 0 29.833 C 0 21.8641 2.6844 14.3731 7.5578 8.7384 C 12.4311 3.1038 18.91 0 25.8022 0 C 32.6944 0 39.1733 3.1038 44.0467 8.7384 L 50 15.6218 L 55.9533 8.7384 C 60.8267 3.1038 67.3067 0 74.1978 0 C 81.09 0 87.5689 3.1038 92.4422 8.7384 C 97.3167 14.3731 100 21.8641 100 29.833 C 100 37.8019 97.3167 45.2929 92.4422 50.9275 L 50 100 Z M 25.8022 5.1387 C 20.0978 5.1387 14.7344 7.7081 10.7 12.3715 C 6.6656 17.0349 4.4444 23.2374 4.4444 29.833 C 4.4444 36.4286 6.6667 42.6298 10.7 47.2945 L 50 92.7338 L 89.3 47.2945 C 93.3344 42.6298 95.5556 36.4286 95.5556 29.833 C 95.5556 23.2374 93.3344 17.0362 89.3 12.3715 C 85.2656 7.7081 79.9033 5.1387 74.1978 5.1387 C 68.4933 5.1387 63.13 7.7081 59.0956 12.3715 L 50 22.8893 L 40.9033 12.3715 C 36.87 7.7081 31.5067 5.1387 25.8022 5.1387 Z`;
@@ -929,6 +933,7 @@
       });
     }
 
+    // ✅ UPDATED markup: buttons row under text
     function renderVoiceGrid(q){
       if (!voiceGrid) return;
 
@@ -957,7 +962,7 @@
               <div class="nf-voiceDesc" title="${String(v.desc || "")}">${String(v.desc || "—")}</div>
             </div>
 
-            <div class="nf-voiceBtns">
+            <div class="nf-voiceBtnsRow">
               <button class="nf-voiceBtnMini" type="button" data-act="preview" data-id="${v.id}" ${isPreviewing ? "disabled" : ""}>
                 ${isPreviewing ? "Previewing..." : "Preview"}
               </button>
@@ -1022,7 +1027,7 @@
       if (act === "use") setSelectedVoice(voiceTarget, voice);
     });
 
-    // Init labels
+    // Init labels (safe even if hidden)
     (function initVoiceLabels(){
       const pv = findVoiceById(postVoiceEl?.value);
       const sv = findVoiceById(scriptVoiceEl?.value);
