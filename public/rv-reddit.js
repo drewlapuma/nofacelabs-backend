@@ -28,7 +28,7 @@
   // ✅ VOICES (with descriptions)
   // ----------------------------
   const VOICES = [
-    { name: "Bella",   id: "hpp4J3VqNfWAUOO0d1Us", desc: "Warm, friendly female voice (great for upbeat reads)." },
+    { name: "Bella",   id: "hpp4J3VqNfWAUOO0d1Us", desc: "Warm, friendly female voice." },
     { name: "Roger",   id: "CwhRBWXzGAHq8TQ4Fs17", desc: "Confident male narration with clear delivery." },
     { name: "Sarah",   id: "EXAVITQu4vr4xnSDxMaL", desc: "Natural female storyteller with clean tone." },
     { name: "Laura",   id: "FGY2WhTYpPnrIDTdsKH5", desc: "Smooth female voice with calm pacing." },
