@@ -21,47 +21,47 @@
     "https://pub-893d3b83680c4b839093dfb1ace5ac0a.r2.dev/flair7.png",
     "https://pub-893d3b83680c4b839093dfb1ace5ac0a.r2.dev/flair8.png",
     "https://pub-893d3b83680c4b839093dfb1ace5ac0a.r2.dev/flair9.png",
-    "https://pub-893d3b83680c4b839093dfb1ace5ac0a.r2.dev/flair10.png"
+    "https://pub-893d3b83680c4b839093dfb1ace5ac0a.r2.dev/flair10.png",
   ];
 
   // ----------------------------
   // ✅ VOICES (with descriptions)
   // ----------------------------
   const VOICES = [
-    { name: "Bella",   id: "hpp4J3VqNfWAUOO0d1Us", desc: "Warm, friendly female voice." },
-    { name: "Roger",   id: "CwhRBWXzGAHq8TQ4Fs17", desc: "Confident male narration with clear delivery." },
-    { name: "Sarah",   id: "EXAVITQu4vr4xnSDxMaL", desc: "Natural female storyteller with clean tone." },
-    { name: "Laura",   id: "FGY2WhTYpPnrIDTdsKH5", desc: "Smooth female voice with calm pacing." },
+    { name: "Bella", id: "hpp4J3VqNfWAUOO0d1Us", desc: "Warm, friendly female voice." },
+    { name: "Roger", id: "CwhRBWXzGAHq8TQ4Fs17", desc: "Confident male narration with clear delivery." },
+    { name: "Sarah", id: "EXAVITQu4vr4xnSDxMaL", desc: "Natural female storyteller with clean tone." },
+    { name: "Laura", id: "FGY2WhTYpPnrIDTdsKH5", desc: "Smooth female voice with calm pacing." },
     { name: "Charlie", id: "IKne3meq5aSn9XLyUdCD", desc: "Energetic male voice with playful vibe." },
-    { name: "George",  id: "JBFqnCBsd6RMkjVDRZzb", desc: "Deep male voice, steady and dramatic." },
-    { name: "Callum",  id: "N2lVS1w4EtoT3dr4eOWO", desc: "Neutral male voice, versatile for any script." },
-    { name: "River",   id: "SAz9YHcvj6GT2YYXdXww", desc: "Fast, engaging voice for short-form hooks." },
-    { name: "Harry",   id: "SOYHLrjzK2X1ezoPC6cr", desc: "Crisp narrator tone with strong clarity." },
-    { name: "Liam",    id: "TX3LPaxmHKxFdv7VOQHJ", desc: "Relaxed male voice with casual delivery." },
-    { name: "Alice",   id: "Xb7hH8MSUJpSbSDYk0k2", desc: "Bright, friendly female voice." },
+    { name: "George", id: "JBFqnCBsd6RMkjVDRZzb", desc: "Deep male voice, steady and dramatic." },
+    { name: "Callum", id: "N2lVS1w4EtoT3dr4eOWO", desc: "Neutral male voice, versatile for any script." },
+    { name: "River", id: "SAz9YHcvj6GT2YYXdXww", desc: "Fast, engaging voice for short-form hooks." },
+    { name: "Harry", id: "SOYHLrjzK2X1ezoPC6cr", desc: "Crisp narrator tone with strong clarity." },
+    { name: "Liam", id: "TX3LPaxmHKxFdv7VOQHJ", desc: "Relaxed male voice with casual delivery." },
+    { name: "Alice", id: "Xb7hH8MSUJpSbSDYk0k2", desc: "Bright, friendly female voice." },
     { name: "Matilda", id: "XrExE9yKIg1WjnnlVkGX", desc: "Soft female voice for emotional storytelling." },
-    { name: "Will",    id: "bIHbv24MWmeRgasZH58o", desc: "Punchy male voice with strong emphasis." },
+    { name: "Will", id: "bIHbv24MWmeRgasZH58o", desc: "Punchy male voice with strong emphasis." },
     { name: "Jessica", id: "cgSgspJ2msm6clMCkdW9", desc: "Upbeat modern female voice." },
-    { name: "Eric",    id: "cjVigY5qzO86Huf0OWal", desc: "Confident narration with steady rhythm." },
-    { name: "Chris",   id: "iP95p4xoKVk53GoZ742B", desc: "Friendly conversational male voice." },
-    { name: "Brian",   id: "nPczCjzI2devNBz1zQrb", desc: "Deeper male voice for dramatic reads." },
-    { name: "Daniel",  id: "onwK4e9ZLuTAKqWW03F9", desc: "Clear male voice, simple and direct." },
-    { name: "Lily",    id: "pFZP5JQG7iQjIQuC4Bku", desc: "Light, expressive female voice." },
-    { name: "Adam",    id: "pNInz6obpgDQGcFmaJgB", desc: "Neutral male voice, clean delivery." },
-    { name: "Bill",    id: "pqHfZKP75CvOlQylNhV4", desc: "Older male voice, classic storyteller feel." },
-    { name: "Alex",    id: "yl2ZDV1MzN4HbQJbMihG", desc: "Modern neutral voice (great all-purpose)." },
-    { name: "Mark",    id: "UgBBYS2sOqTuMpoF3BR0", desc: "Strong voice that hits punchlines well." },
-    { name: "Brittney",id: "kPzsL2i3teMYv0FxEYQ6", desc: "High-energy female voice for hooks." },
-    { name: "True",    id: "tZssYepgGaQmegsMEXjK", desc: "Smooth confident voice with quick pacing." },
+    { name: "Eric", id: "cjVigY5qzO86Huf0OWal", desc: "Confident narration with steady rhythm." },
+    { name: "Chris", id: "iP95p4xoKVk53GoZ742B", desc: "Friendly conversational male voice." },
+    { name: "Brian", id: "nPczCjzI2devNBz1zQrb", desc: "Deeper male voice for dramatic reads." },
+    { name: "Daniel", id: "onwK4e9ZLuTAKqWW03F9", desc: "Clear male voice, simple and direct." },
+    { name: "Lily", id: "pFZP5JQG7iQjIQuC4Bku", desc: "Light, expressive female voice." },
+    { name: "Adam", id: "pNInz6obpgDQGcFmaJgB", desc: "Neutral male voice, clean delivery." },
+    { name: "Bill", id: "pqHfZKP75CvOlQylNhV4", desc: "Older male voice, classic storyteller feel." },
+    { name: "Alex", id: "yl2ZDV1MzN4HbQJbMihG", desc: "Modern neutral voice (great all-purpose)." },
+    { name: "Mark", id: "UgBBYS2sOqTuMpoF3BR0", desc: "Strong voice that hits punchlines well." },
+    { name: "Brittney", id: "kPzsL2i3teMYv0FxEYQ6", desc: "High-energy female voice for hooks." },
+    { name: "True", id: "tZssYepgGaQmegsMEXjK", desc: "Smooth confident voice with quick pacing." },
     { name: "Charles", id: "S9GPGBaMND8XWwwzxQXp", desc: "Formal narrator tone, very clear." },
-    { name: "Clancy",  id: "FLpz0UhC9a7CIfUSBo6S", desc: "Distinct character voice with personality." },
-    { name: "Dan",     id: "Ioq2c1GJee5RyqeoBIH3", desc: "Casual male voice with natural pauses." },
+    { name: "Clancy", id: "FLpz0UhC9a7CIfUSBo6S", desc: "Distinct character voice with personality." },
+    { name: "Dan", id: "Ioq2c1GJee5RyqeoBIH3", desc: "Casual male voice with natural pauses." },
   ];
 
-  // If you host preview MP3s, set this. Otherwise it uses GET /api/voice-preview.
+  // ✅ Pre-hosted MP3s (voiceId.mp3)
   const PREVIEW_BASE = "https://pub-178d4bb2cbf54f3f92bc03819410134c.r2.dev";
 
-  function boot(){
+  function boot() {
     // ---------- DOM ----------
     const msgEl = document.getElementById("rvMsg");
     const statusEl = document.getElementById("rvStatus");
@@ -131,30 +131,38 @@
     let bgLibraryUrl = "";
     let bgLibraryName = "";
 
-    let wrap=null, demoVid=null, card=null;
-    let lastRenderDl="", lastRenderName="reddit-video";
+    let wrap = null,
+      demoVid = null,
+      card = null;
+    let lastRenderDl = "",
+      lastRenderName = "reddit-video";
 
     const REF_W = 1080;
     const REF_CARD_W = REF_W * 0.75; // 810
 
-    function setMsg(t){ if (msgEl) msgEl.textContent = t || "—"; }
-    function setStatus(t){ if (statusEl) statusEl.textContent = t || "—"; setMsg(t); }
-    function setProgress(pct){
+    function setMsg(t) {
+      if (msgEl) msgEl.textContent = t || "—";
+    }
+    function setStatus(t) {
+      if (statusEl) statusEl.textContent = t || "—";
+      setMsg(t);
+    }
+    function setProgress(pct) {
       const v = Math.max(0, Math.min(100, Number(pct) || 0));
       if (barEl) barEl.style.width = v + "%";
     }
 
-    function safeFilename(title){
+    function safeFilename(title) {
       const safe = String(title || "reddit_video")
         .toLowerCase()
         .replace(/[^a-z0-9]+/g, "_")
         .replace(/^_+|_+$/g, "");
       return (safe || "reddit_video") + ".mp4";
     }
-    function downloadProxyUrl(videoUrl, filename){
+    function downloadProxyUrl(videoUrl, filename) {
       return `${API_BASE}/api/download?url=${encodeURIComponent(videoUrl)}&filename=${encodeURIComponent(filename)}`;
     }
-    function setDownloadEnabled(enabled){
+    function setDownloadEnabled(enabled) {
       if (!dlBtn) return;
       dlBtn.disabled = !enabled;
       dlBtn.style.opacity = enabled ? "1" : ".65";
@@ -162,13 +170,13 @@
     }
     setDownloadEnabled(false);
 
-    function readAnyText(el){
+    function readAnyText(el) {
       if (!el) return "";
       if (typeof el.value === "string") return el.value;
       return el.textContent || "";
     }
 
-    function findPreviewHost(){
+    function findPreviewHost() {
       if (!videoEl) return null;
       let el = videoEl.parentElement;
       for (let i = 0; i < 7 && el; i++) {
@@ -185,25 +193,29 @@
     }
 
     // ---------- ✅ upload helpers ----------
-    async function getSignedUploadUrl(file){
+    async function getSignedUploadUrl(file) {
       const payload = {
         fileName: file.name,
         fileSize: file.size,
-        contentType: file.type || "application/octet-stream"
+        contentType: file.type || "application/octet-stream",
       };
 
       const res = await fetch(SIGNED_UPLOAD_ENDPOINT, {
         method: "POST",
-        headers: { "Content-Type":"application/json" },
-        body: JSON.stringify(payload)
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
       });
 
       const raw = await res.text();
       let j = {};
-      try { j = JSON.parse(raw); } catch { j = { raw }; }
+      try {
+        j = JSON.parse(raw);
+      } catch {
+        j = { raw };
+      }
 
       if (!res.ok || j?.error) {
-        throw new Error(j?.error || j?.message || j?.raw || ("Signed upload failed (HTTP " + res.status + ")"));
+        throw new Error(j?.error || j?.message || j?.raw || "Signed upload failed (HTTP " + res.status + ")");
       }
 
       if (!j?.signedUrl || !j?.bucket || !j?.path) {
@@ -213,25 +225,25 @@
       return j; // { bucket, path, signedUrl }
     }
 
-    async function putFileToSignedUrl(signedUrl, file){
+    async function putFileToSignedUrl(signedUrl, file) {
       const res = await fetch(signedUrl, {
         method: "PUT",
         headers: { "Content-Type": file.type || "application/octet-stream" },
-        body: file
+        body: file,
       });
 
       if (!res.ok) {
-        const t = await res.text().catch(()=> "");
+        const t = await res.text().catch(() => "");
         throw new Error("Upload PUT failed (HTTP " + res.status + ") " + (t || ""));
       }
     }
 
-    function publicUrlFromSigned(bucket, path, signedUrl){
+    function publicUrlFromSigned(bucket, path, signedUrl) {
       const base = String(signedUrl).split("/storage/v1/")[0];
       return `${base}/storage/v1/object/public/${bucket}/${path}`;
     }
 
-    async function uploadAndGetPublicUrl(file){
+    async function uploadAndGetPublicUrl(file) {
       const signed = await getSignedUploadUrl(file);
       await putFileToSignedUrl(signed.signedUrl, file);
       const url = publicUrlFromSigned(signed.bucket, signed.path, signed.signedUrl);
@@ -239,7 +251,7 @@
     }
 
     // ---------- inject CSS for preview ----------
-    (function injectCss(){
+    (function injectCss() {
       const id = "nfRvCssV11";
       if (document.getElementById(id)) return;
       const s = document.createElement("style");
@@ -323,7 +335,7 @@
     })();
 
     // ---------- ✅ Voice picker CSS (UPDATED: buttons side-by-side + centered text) ----------
-    (function injectVoiceCss(){
+    (function injectVoiceCss() {
       const id = "nfVoicePickerCssV4";
       if (document.getElementById(id)) return;
       const s = document.createElement("style");
@@ -351,12 +363,6 @@
           color: rgba(90,193,255,1);
         }
 
-        .nf-voiceHint{
-          margin: 0 0 10px;
-          font-size: 11px;
-          color: rgba(255,255,255,.70);
-        }
-
         .nf-voiceGrid{
           display:grid;
           grid-template-columns: repeat(3, 1fr);
@@ -365,7 +371,6 @@
         @media (max-width: 900px){ .nf-voiceGrid{ grid-template-columns: repeat(2, 1fr);} }
         @media (max-width: 620px){ .nf-voiceGrid{ grid-template-columns: 1fr;} }
 
-        /* Card becomes a column, buttons sit at bottom */
         .nf-voiceCard{
           border:1px solid rgba(255,255,255,.12);
           background: rgba(255,255,255,.05);
@@ -396,14 +401,12 @@
           word-break: break-word;
         }
 
-        /* ✅ Buttons row: side-by-side */
         .nf-voiceBtnsRow{
           margin-top:auto;
           display:flex;
           gap:14px;
         }
 
-        /* ✅ Perfect centered button text */
         .nf-voiceBtnMini{
           flex:1 1 0;
           border:1px solid rgba(255,255,255,.16);
@@ -432,7 +435,7 @@
           color: rgba(90,193,255,1);
         }
 
-        /* optional: hide old floating labels if you keep them in HTML */
+        /* ✅ removes the floating text labels without you editing HTML */
         #rvPostVoiceLabel, #rvScriptVoiceLabel{ display:none !important; }
       `;
       document.head.appendChild(s);
@@ -443,7 +446,7 @@
     const PATH_COMMENT = `M 94.2357 72.6204 C 97.8532 65.5833 99.7431 57.786 99.7491 49.8735 C 99.7491 22.3751 77.3736 0 49.8745 0 C 22.3755 0 0 22.3751 0 49.8735 C 0 77.372 22.3755 99.7471 49.8745 99.7471 C 57.7729 99.7471 65.5986 97.8473 72.6264 94.2383 L 94.1178 99.611 C 95.662 100 97.2969 99.5469 98.4206 98.4186 C 99.5473 97.2921 100 95.6569 99.6131 94.1114 L 94.2357 72.6204 Z M 85.018 73.1191 L 88.9807 88.9789 L 73.1206 85.0117 C 71.9994 84.7349 70.8149 84.8937 69.8062 85.456 C 63.7193 88.8753 56.8561 90.6738 49.8745 90.6792 C 27.3721 90.6792 9.0681 72.371 9.0681 49.8735 C 9.0681 27.376 27.3721 9.0679 49.8745 9.0679 C 72.377 9.0679 90.681 27.376 90.681 49.8735 C 90.6748 56.8528 88.8779 63.7138 85.4623 69.8003 C 84.8939 70.8086 84.7348 71.9968 85.018 73.1191 Z`;
     const PATH_SHARE = `M 33.55 28.6214 L 45 17.1329 L 45 65.035 C 45 67.7918 47.2404 70.03 50 70.03 C 52.7596 70.03 55 67.7918 55 65.035 L 55 17.1329 L 66.45 28.6214 C 67.3888 29.5671 68.6668 30.099 70 30.099 C 71.3332 30.099 72.6112 29.5671 73.55 28.6214 C 74.4966 27.6835 75.029 26.4068 75.029 25.075 C 75.029 23.7431 74.4966 22.4664 73.55 21.5285 L 53.55 1.5485 C 53.55 1.5485 52.5138 0.7373 51.9 0.4996 C 50.6827 0 49.3173 0 48.1 0.4996 C 47.4862 0.7373 46.45 1.5485 46.45 1.5485 L 26.45 21.5285 C 24.4907 23.4859 24.4907 26.6641 26.45 28.6214 C 28.4093 30.5788 31.5907 30.5788 33.55 28.6214 Z M 95 50.05 C 92.2404 50.05 90 52.2882 90 55.045 L 90 85.015 C 90 87.7718 87.7596 90.01 85 90.01 L 15 90.01 C 12.2404 90.01 10 87.7718 10 85.015 L 10 55.045 C 10 52.2882 7.7596 50.05 5 50.05 C 2.2404 50.05 0 52.2882 0 55.045 L 0 85.015 C 0 93.2854 6.7213 100 15 100 L 85 100 C 93.2787 100 100 93.2854 100 85.015 L 100 55.045 C 100 52.2882 97.7596 50.05 95 50.05 Z`;
 
-    function ensureNodes(){
+    function ensureNodes() {
       const host = findPreviewHost();
       if (!host) return;
 
@@ -520,19 +523,19 @@
       resizeCard();
     }
 
-    function resizeCard(){
+    function resizeCard() {
       const host = findPreviewHost();
       if (!host || !card) return;
 
       const frameW = host.clientWidth || 1;
       const frameH = host.clientHeight || 1;
 
-      const cardW = Math.round(frameW * 0.80);
+      const cardW = Math.round(frameW * 0.8);
       const minH = Math.round(frameH * 0.215);
       const maxH = Math.round(frameH * 0.62);
 
       const scaleW = cardW / REF_CARD_W;
-      let scale = scaleW * 0.90;
+      let scale = scaleW * 0.9;
       scale = Math.max(0.45, Math.min(1.25, scale));
 
       card.style.setProperty("--cardW", cardW + "px");
@@ -541,47 +544,50 @@
       card.style.setProperty("--scale", String(scale));
     }
 
-    let __t=null;
-    window.addEventListener("resize", ()=>{
+    let __t = null;
+    window.addEventListener("resize", () => {
       clearTimeout(__t);
-      __t = setTimeout(()=>{ resizeCard(); updateCard(); }, 120);
+      __t = setTimeout(() => {
+        resizeCard();
+        updateCard();
+      }, 120);
     });
 
-    function setFlairs(){
+    function setFlairs() {
       const el = document.getElementById("nfRvFlairsV11");
       if (!el) return;
-      el.innerHTML = (FLAIRS || []).map(u => `<img src="${u}" alt="">`).join("");
+      el.innerHTML = (FLAIRS || []).map((u) => `<img src="${u}" alt="">`).join("");
     }
 
-    function getBodyText(){
+    function getBodyText() {
       const title = String(readAnyText(postTitleEl)).trim();
-      const post  = String(readAnyText(postTextEl)).trim();
-      return (post || title || "—");
+      const post = String(readAnyText(postTextEl)).trim();
+      return post || title || "—";
     }
 
-    function getPostTextForPayload(){
+    function getPostTextForPayload() {
       const title = String(readAnyText(postTitleEl)).trim();
-      const post  = String(readAnyText(postTextEl)).trim();
-      return (post || title || "");
+      const post = String(readAnyText(postTextEl)).trim();
+      return post || title || "";
     }
 
-    function getPfpUrl(){
+    function getPfpUrl() {
       const fromInput = String(readAnyText(pfpUrlEl)).trim();
       return fromInput || localPfpObjectUrl || DEFAULT_PFP_URL;
     }
 
-    function updateCard(){
+    function updateCard() {
       ensureNodes();
       resizeCard();
 
       const mode = String(modeHidden?.value || "light").toLowerCase() === "dark" ? "dark" : "light";
-      card.classList.remove("light","dark");
+      card.classList.remove("light", "dark");
       card.classList.add(mode);
 
-      const username = (String(readAnyText(usernameEl)).trim() || "Nofacelabs.ai");
-      const likes = (String(readAnyText(likesEl)).trim() || "99+");
-      const comments = (String(readAnyText(commentsEl)).trim() || "99+");
-      const share = (String(readAnyText(shareTextEl)).trim() || "share");
+      const username = String(readAnyText(usernameEl)).trim() || "Nofacelabs.ai";
+      const likes = String(readAnyText(likesEl)).trim() || "99+";
+      const comments = String(readAnyText(commentsEl)).trim() || "99+";
+      const share = String(readAnyText(shareTextEl)).trim() || "share";
 
       const bodyText = getBodyText();
       const pfpUrl = getPfpUrl();
@@ -601,28 +607,32 @@
       if (p && p.src !== pfpUrl) p.src = pfpUrl;
 
       setFlairs();
-      requestAnimationFrame(()=> resizeCard());
+      requestAnimationFrame(() => resizeCard());
     }
 
-    function showDemo(){
+    function showDemo() {
       ensureNodes();
       if (wrap) wrap.style.display = "block";
       if (demoVid && demoVid.src !== demoBgUrl) {
         demoVid.src = demoBgUrl;
         demoVid.load?.();
-        demoVid.play?.().catch(()=>{});
+        demoVid.play?.().catch(() => {});
       }
       updateCard();
 
       if (videoEl) {
         videoEl.classList.add("nf-hide");
         videoEl.style.display = "none";
-        try { videoEl.pause?.(); } catch {}
+        try {
+          videoEl.pause?.();
+        } catch {}
       }
     }
-    function hideDemo(){ if (wrap) wrap.style.display = "none"; }
+    function hideDemo() {
+      if (wrap) wrap.style.display = "none";
+    }
 
-    function showRender(url){
+    function showRender(url) {
       hideDemo();
       if (overlayEl) overlayEl.classList.add("nf-hide");
       if (videoEl) {
@@ -630,31 +640,31 @@
         videoEl.load?.();
         videoEl.classList.remove("nf-hide");
         videoEl.style.display = "block";
-        videoEl.play?.().catch(()=>{});
+        videoEl.play?.().catch(() => {});
       }
     }
 
-    function setupSeg(segEl, trackEl, hiddenEl, dataKey){
+    function setupSeg(segEl, trackEl, hiddenEl, dataKey) {
       if (!segEl) return;
       const btns = Array.from(segEl.querySelectorAll(".nf-segBtn"));
       if (!btns.length) return;
 
-      function setActiveByIndex(idx){
-        btns.forEach(b => b.classList.remove("active"));
+      function setActiveByIndex(idx) {
+        btns.forEach((b) => b.classList.remove("active"));
         btns[idx].classList.add("active");
         if (trackEl) trackEl.style.transform = `translateX(${idx * 100}%)`;
       }
 
       if (hiddenEl) {
         const v = String(hiddenEl.value || "").toLowerCase();
-        const idx = btns.findIndex(b => String(b.dataset[dataKey] || "").toLowerCase() === v);
+        const idx = btns.findIndex((b) => String(b.dataset[dataKey] || "").toLowerCase() === v);
         if (idx >= 0) setActiveByIndex(idx);
-        else setActiveByIndex(Math.max(0, btns.findIndex(b => b.classList.contains("active"))));
+        else setActiveByIndex(Math.max(0, btns.findIndex((b) => b.classList.contains("active"))));
       } else {
-        setActiveByIndex(Math.max(0, btns.findIndex(b => b.classList.contains("active"))));
+        setActiveByIndex(Math.max(0, btns.findIndex((b) => b.classList.contains("active"))));
       }
 
-      segEl.addEventListener("click", (e)=>{
+      segEl.addEventListener("click", (e) => {
         const btn = e.target.closest(".nf-segBtn");
         if (!btn) return;
         const idx = btns.indexOf(btn);
@@ -670,18 +680,22 @@
 
     setupSeg(modeSeg, modeTrack, modeHidden, "mode");
     setupSeg(toneSeg, toneTrack, toneHidden, "tone");
-    setupSeg(lenSeg,  lenTrack,  lenHidden,  "len");
+    setupSeg(lenSeg, lenTrack, lenHidden, "len");
 
     // Upload PFP button click
-    if (pfpUploadBtn && pfpFileEl) pfpUploadBtn.addEventListener("click", ()=> pfpFileEl.click());
+    if (pfpUploadBtn && pfpFileEl) pfpUploadBtn.addEventListener("click", () => pfpFileEl.click());
 
     // ✅ PFP upload
     if (pfpFileEl) {
-      pfpFileEl.addEventListener("change", async ()=>{
+      pfpFileEl.addEventListener("change", async () => {
         const file = pfpFileEl.files?.[0];
         if (!file) return;
 
-        if (localPfpObjectUrl) { try { URL.revokeObjectURL(localPfpObjectUrl); } catch {} }
+        if (localPfpObjectUrl) {
+          try {
+            URL.revokeObjectURL(localPfpObjectUrl);
+          } catch {}
+        }
         localPfpObjectUrl = URL.createObjectURL(file);
         updateCard();
         setStatus("Uploading profile picture…");
@@ -690,7 +704,9 @@
           const up = await uploadAndGetPublicUrl(file);
           if (pfpUrlEl) pfpUrlEl.value = up.url;
 
-          try { URL.revokeObjectURL(localPfpObjectUrl); } catch {}
+          try {
+            URL.revokeObjectURL(localPfpObjectUrl);
+          } catch {}
           localPfpObjectUrl = "";
 
           setStatus("Profile picture uploaded ✓");
@@ -705,14 +721,14 @@
     }
 
     // modal event bridge
-    function fire(name, detail){
+    function fire(name, detail) {
       window.dispatchEvent(new CustomEvent(name, { detail: detail || {} }));
     }
-    if (openPfpLibBtn) openPfpLibBtn.addEventListener("click", ()=> fire("nf:rv:openPfpLibrary"));
-    if (openBgLibBtn)  openBgLibBtn.addEventListener("click", ()=> fire("nf:rv:openBgLibrary"));
-    if (templatesBtn)  templatesBtn.addEventListener("click", ()=> fire("nf:rv:openTemplates"));
+    if (openPfpLibBtn) openPfpLibBtn.addEventListener("click", () => fire("nf:rv:openPfpLibrary"));
+    if (openBgLibBtn) openBgLibBtn.addEventListener("click", () => fire("nf:rv:openBgLibrary"));
+    if (templatesBtn) templatesBtn.addEventListener("click", () => fire("nf:rv:openTemplates"));
 
-    window.addEventListener("nf:rv:setPfp", (e)=>{
+    window.addEventListener("nf:rv:setPfp", (e) => {
       const url = String(e?.detail?.url || "").trim();
       if (!url) return;
       if (pfpUrlEl) pfpUrlEl.value = url;
@@ -722,11 +738,15 @@
 
     // ✅ Background upload
     if (bgFileEl) {
-      bgFileEl.addEventListener("change", async ()=>{
+      bgFileEl.addEventListener("change", async () => {
         const file = bgFileEl.files?.[0];
         if (!file) return;
 
-        if (localBgObjectUrl) { try { URL.revokeObjectURL(localBgObjectUrl); } catch {} }
+        if (localBgObjectUrl) {
+          try {
+            URL.revokeObjectURL(localBgObjectUrl);
+          } catch {}
+        }
         localBgObjectUrl = URL.createObjectURL(file);
         demoBgUrl = localBgObjectUrl;
 
@@ -770,7 +790,7 @@
     }
 
     // ✅ Library background sets render-safe URL
-    window.addEventListener("nf:rv:setBackground", (e)=>{
+    window.addEventListener("nf:rv:setBackground", (e) => {
       const url = String(e?.detail?.url || "").trim();
       const name = String(e?.detail?.name || "").trim();
       if (!url) return;
@@ -788,7 +808,7 @@
     });
 
     // realtime updates
-    function bindRealtime(el){
+    function bindRealtime(el) {
       if (!el) return;
       el.addEventListener("input", updateCard);
       el.addEventListener("change", updateCard);
@@ -797,150 +817,158 @@
     [usernameEl, postTitleEl, postTextEl, likesEl, commentsEl, shareTextEl, modeHidden].forEach(bindRealtime);
 
     // ==========================================================
-    // ✅ VOICE PICKER (ONE BUTTON + TABS + PREVIEWING...)
+    // ✅ VOICE PICKER (ONE BUTTON + TABS + INSTANT PREHOSTED PREVIEW)
     // ==========================================================
     let voiceTarget = "post"; // "post" | "script"
     let previewAudio = null;
-    let previewObjectUrl = "";
-    let previewAbort = null;
     let previewingVoiceId = "";
 
-    function stopPreview(){
-      if (previewAbort) {
-        try { previewAbort.abort(); } catch {}
-        previewAbort = null;
-      }
+    // ✅ cache audio elements so playback starts immediately
+    const PREVIEW_AUDIO_CACHE = new Map(); // voiceId -> HTMLAudioElement
+
+    function previewUrlFor(voiceId) {
+      return PREVIEW_BASE
+        ? PREVIEW_BASE.replace(/\/$/, "") + "/" + encodeURIComponent(voiceId) + ".mp3"
+        : "";
+    }
+
+    function preloadPreview(voiceId) {
+      if (!PREVIEW_BASE) return;
+      if (!voiceId) return;
+      if (PREVIEW_AUDIO_CACHE.has(voiceId)) return;
+
+      const url = previewUrlFor(voiceId);
+      if (!url) return;
+
+      const a = new Audio();
+      a.src = url;
+      a.preload = "auto";
+      a.load();
+      PREVIEW_AUDIO_CACHE.set(voiceId, a);
+    }
+
+    function warmPreviews() {
+      if (!PREVIEW_BASE) return;
+
+      // preload a small set so it feels instant without nuking bandwidth
+      VOICES.slice(0, 10).forEach((v) => preloadPreview(v.id));
+
+      // also preload currently selected voices
+      const curPost = String(postVoiceEl?.value || "").trim();
+      const curScr = String(scriptVoiceEl?.value || "").trim();
+      if (curPost && curPost !== "default") preloadPreview(curPost);
+      if (curScr && curScr !== "default") preloadPreview(curScr);
+    }
+
+    // ✅ unlock audio on first interaction (needed on iOS/Safari sometimes)
+    (function installAudioUnlock() {
+      const handler = () => {
+        try {
+          const a = new Audio();
+          a.muted = true;
+          a.play().catch(() => {});
+        } catch {}
+        document.removeEventListener("pointerdown", handler, true);
+        document.removeEventListener("touchstart", handler, true);
+        document.removeEventListener("click", handler, true);
+      };
+      document.addEventListener("pointerdown", handler, true);
+      document.addEventListener("touchstart", handler, true);
+      document.addEventListener("click", handler, true);
+    })();
+
+    function stopPreview() {
       if (previewAudio) {
-        try { previewAudio.pause(); } catch {}
-        previewAudio = null;
-      }
-      if (previewObjectUrl) {
-        try { URL.revokeObjectURL(previewObjectUrl); } catch {}
-        previewObjectUrl = "";
+        try {
+          previewAudio.pause();
+          previewAudio.currentTime = 0;
+        } catch {}
       }
       previewingVoiceId = "";
+      previewAudio = null;
     }
 
-    function findVoiceById(id){
+    function findVoiceById(id) {
       const s = String(id || "").trim();
       if (!s || s === "default") return null;
-      return VOICES.find(v => v.id === s) || null;
+      return VOICES.find((v) => v.id === s) || null;
     }
 
-    function getSelectedVoiceId(target){
+    function getSelectedVoiceId(target) {
       const el = target === "script" ? scriptVoiceEl : postVoiceEl;
       return String(el?.value || "default").trim();
     }
 
-    function setSelectedVoice(target, voice){
+    function setSelectedVoice(target, voice) {
       const el = target === "script" ? scriptVoiceEl : postVoiceEl;
       const labelEl = target === "script" ? scriptVoiceLabel : postVoiceLabel;
 
       if (el) el.value = voice?.id || "default";
       if (labelEl) labelEl.textContent = voice?.name || "Default";
 
+      // preload the chosen voice so preview is instant next time
+      if (voice?.id) preloadPreview(voice.id);
+
       renderVoiceGrid(String(voiceSearch?.value || "").trim());
     }
 
-    function setActiveTab(tab){
-      voiceTarget = (tab === "script") ? "script" : "post";
+    function setActiveTab(tab) {
+      voiceTarget = tab === "script" ? "script" : "post";
       stopPreview();
       renderVoiceGrid(String(voiceSearch?.value || "").trim());
 
-      if (voiceTitle) voiceTitle.textContent = (voiceTarget === "post" ? "Choose Post Voice" : "Choose Script Voice");
+      if (voiceTitle) voiceTitle.textContent = voiceTarget === "post" ? "Choose Post Voice" : "Choose Script Voice";
 
       const postBtn = voiceTabs?.querySelector('[data-tab="post"]');
-      const scrBtn  = voiceTabs?.querySelector('[data-tab="script"]');
+      const scrBtn = voiceTabs?.querySelector('[data-tab="script"]');
       if (postBtn) postBtn.classList.toggle("active", voiceTarget === "post");
-      if (scrBtn)  scrBtn.classList.toggle("active", voiceTarget === "script");
+      if (scrBtn) scrBtn.classList.toggle("active", voiceTarget === "script");
     }
 
-    async function previewVoice(voice){
+    async function previewVoice(voice) {
       stopPreview();
 
-      const sampleText =
-        voiceTarget === "post"
-          ? (String(readAnyText(postTitleEl)).trim() || "This is a preview of the selected voice.")
-          : (String(readAnyText(scriptEl)).trim() || "This is a preview of the selected voice.");
-
-      const text = String(sampleText).slice(0, 240);
       const voiceId = String(voice?.id || "").trim();
       if (!voiceId) return alert("Missing voice id");
 
       previewingVoiceId = voiceId;
       renderVoiceGrid(String(voiceSearch?.value || "").trim());
 
-      // 1) hosted mp3 (optional)
-      const hostedUrl = PREVIEW_BASE
-        ? (PREVIEW_BASE.replace(/\/$/, "") + "/" + encodeURIComponent(voiceId) + ".mp3")
-        : "";
-
-      if (hostedUrl) {
-        previewAudio = new Audio(hostedUrl);
-        previewAudio.onended = () => { stopPreview(); renderVoiceGrid(String(voiceSearch?.value || "").trim()); };
-        previewAudio.onerror = () => {
-          stopPreview(); renderVoiceGrid(String(voiceSearch?.value || "").trim());
-          alert("Preview failed (check PREVIEW_BASE mp3 exists).");
-        };
-        previewAudio.play().catch(()=>{
-          stopPreview(); renderVoiceGrid(String(voiceSearch?.value || "").trim());
-          alert("Preview couldn't play (autoplay blocked?)");
-        });
+      // ✅ Use cached audio (instant)
+      preloadPreview(voiceId);
+      const a = PREVIEW_AUDIO_CACHE.get(voiceId);
+      if (!a) {
+        previewingVoiceId = "";
+        renderVoiceGrid(String(voiceSearch?.value || "").trim());
+        alert("Preview missing. Make sure your bucket has: " + voiceId + ".mp3");
         return;
       }
 
-      // 2) backend GET /api/voice-preview?voiceId=...&text=...
-      const url =
-        API_BASE +
-        "/api/voice-preview" +
-        "?voiceId=" + encodeURIComponent(voiceId) +
-        "&text=" + encodeURIComponent(text);
-
-      previewAbort = new AbortController();
-
-      let res;
+      previewAudio = a;
       try {
-        res = await fetch(url, { method: "GET", signal: previewAbort.signal });
-      } catch (e) {
-        if (String(e?.name) === "AbortError") return;
+        previewAudio.currentTime = 0;
+      } catch {}
+
+      previewAudio.onended = () => {
         stopPreview();
         renderVoiceGrid(String(voiceSearch?.value || "").trim());
-        alert("Preview request failed: " + (e?.message || e));
-        return;
-      } finally {
-        previewAbort = null;
-      }
+      };
 
-      if (!res.ok) {
-        const t = await res.text().catch(()=> "");
+      previewAudio.play().catch(() => {
         stopPreview();
         renderVoiceGrid(String(voiceSearch?.value || "").trim());
-        alert("Preview failed: " + (t || ("HTTP " + res.status)));
-        return;
-      }
-
-      const blob = await res.blob();
-      previewObjectUrl = URL.createObjectURL(blob);
-
-      previewAudio = new Audio(previewObjectUrl);
-      previewAudio.onended = () => { stopPreview(); renderVoiceGrid(String(voiceSearch?.value || "").trim()); };
-      previewAudio.onerror = () => { stopPreview(); renderVoiceGrid(String(voiceSearch?.value || "").trim()); };
-
-      previewAudio.play().catch(()=>{
-        stopPreview();
-        renderVoiceGrid(String(voiceSearch?.value || "").trim());
-        alert("Preview couldn't play (autoplay blocked?)");
+        alert("Audio is blocked. Tap/click once on the page, then try Preview again.");
       });
     }
 
     // ✅ UPDATED markup: buttons row under text
-    function renderVoiceGrid(q){
+    function renderVoiceGrid(q) {
       if (!voiceGrid) return;
 
       const query = String(q || "").toLowerCase().trim();
       const selectedId = getSelectedVoiceId(voiceTarget);
 
-      const filtered = VOICES.filter(v => {
+      const filtered = VOICES.filter((v) => {
         if (!query) return true;
         return (
           v.name.toLowerCase().includes(query) ||
@@ -951,11 +979,12 @@
 
       voiceGrid.classList.add("nf-voiceGrid");
 
-      voiceGrid.innerHTML = filtered.map(v => {
-        const selected = (selectedId === v.id);
-        const isPreviewing = (previewingVoiceId === v.id);
+      voiceGrid.innerHTML = filtered
+        .map((v) => {
+          const selected = selectedId === v.id;
+          const isPreviewing = previewingVoiceId === v.id;
 
-        return `
+          return `
           <div class="nf-voiceCard ${selected ? "nf-voiceSelected" : ""}">
             <div style="min-width:0;">
               <div class="nf-voiceName" title="${v.name}">${v.name}</div>
@@ -972,17 +1001,19 @@
             </div>
           </div>
         `;
-      }).join("");
+        })
+        .join("");
     }
 
-    function openVoiceModal(){
+    function openVoiceModal() {
       if (voiceSearch) voiceSearch.value = "";
       if (voiceModal) voiceModal.classList.add("open");
       setActiveTab(voiceTarget);
       renderVoiceGrid("");
+      warmPreviews(); // ✅ preload when modal opens
     }
 
-    function closeVoiceModal(){
+    function closeVoiceModal() {
       if (voiceModal) voiceModal.classList.remove("open");
       stopPreview();
       renderVoiceGrid(String(voiceSearch?.value || "").trim());
@@ -993,7 +1024,7 @@
 
     // Tabs
     if (voiceTabs) {
-      voiceTabs.addEventListener("click", (e)=>{
+      voiceTabs.addEventListener("click", (e) => {
         const b = e.target.closest("button[data-tab]");
         if (!b) return;
         setActiveTab(b.dataset.tab);
@@ -1002,33 +1033,36 @@
 
     // Close wiring
     if (voiceClose) voiceClose.addEventListener("click", closeVoiceModal);
-    if (voiceModal) voiceModal.addEventListener("click", (e)=>{
-      if (e.target === voiceModal) closeVoiceModal();
-    });
+    if (voiceModal)
+      voiceModal.addEventListener("click", (e) => {
+        if (e.target === voiceModal) closeVoiceModal();
+      });
 
     // Search / Clear
-    if (voiceClear) voiceClear.addEventListener("click", ()=>{
-      if (voiceSearch) voiceSearch.value = "";
-      renderVoiceGrid("");
-    });
-    if (voiceSearch) voiceSearch.addEventListener("input", ()=> renderVoiceGrid(voiceSearch.value));
+    if (voiceClear)
+      voiceClear.addEventListener("click", () => {
+        if (voiceSearch) voiceSearch.value = "";
+        renderVoiceGrid("");
+      });
+    if (voiceSearch) voiceSearch.addEventListener("input", () => renderVoiceGrid(voiceSearch.value));
 
     // Grid click actions
-    if (voiceGrid) voiceGrid.addEventListener("click", (e)=>{
-      const btn = e.target.closest("button[data-act]");
-      if (!btn) return;
+    if (voiceGrid)
+      voiceGrid.addEventListener("click", (e) => {
+        const btn = e.target.closest("button[data-act]");
+        if (!btn) return;
 
-      const act = btn.dataset.act;
-      const id = btn.dataset.id;
-      const voice = VOICES.find(v => v.id === id);
-      if (!voice) return;
+        const act = btn.dataset.act;
+        const id = btn.dataset.id;
+        const voice = VOICES.find((v) => v.id === id);
+        if (!voice) return;
 
-      if (act === "preview") previewVoice(voice);
-      if (act === "use") setSelectedVoice(voiceTarget, voice);
-    });
+        if (act === "preview") previewVoice(voice);
+        if (act === "use") setSelectedVoice(voiceTarget, voice);
+      });
 
     // Init labels (safe even if hidden)
-    (function initVoiceLabels(){
+    (function initVoiceLabels() {
       const pv = findVoiceById(postVoiceEl?.value);
       const sv = findVoiceById(scriptVoiceEl?.value);
       if (postVoiceLabel) postVoiceLabel.textContent = pv?.name || "Default";
@@ -1038,20 +1072,20 @@
     // ==========================================================
     // ✅ Render polling + payload + generate
     // ==========================================================
-    async function pollReddit(renderId){
+    async function pollReddit(renderId) {
       for (;;) {
-        await new Promise(r => setTimeout(r, 2500));
+        await new Promise((r) => setTimeout(r, 2500));
         const res = await fetch(API_BASE + "/api/reddit-video?id=" + encodeURIComponent(renderId));
-        const j = await res.json().catch(()=> ({}));
+        const j = await res.json().catch(() => ({}));
         const st = String(j?.status || "").toLowerCase();
         if ((st.includes("succeed") || st === "completed") && j?.url) return j.url;
         if (st.includes("fail")) throw new Error(j?.error || "Render failed");
-        const cur = Number((barEl?.style?.width || "55%").replace("%","")) || 55;
+        const cur = Number((barEl?.style?.width || "55%").replace("%", "")) || 55;
         setProgress(Math.min(92, cur + 4));
       }
     }
 
-    function buildPayload(){
+    function buildPayload() {
       return {
         username: String(readAnyText(usernameEl)).trim(),
         mode: modeHidden?.value || "light",
@@ -1067,12 +1101,12 @@
         tone: String(readAnyText(toneHidden)).trim(),
         length: String(readAnyText(lenHidden)).trim(),
         backgroundVideoUrl: bgLibraryUrl,
-        backgroundVideoName: bgLibraryName
+        backgroundVideoName: bgLibraryName,
       };
     }
 
     if (genBtn) {
-      genBtn.addEventListener("click", async ()=>{
+      genBtn.addEventListener("click", async () => {
         try {
           if (!bgLibraryUrl || !String(bgLibraryUrl).startsWith("http")) {
             throw new Error("Missing backgroundVideoUrl (use library or upload a file first)");
@@ -1096,18 +1130,22 @@
           console.log("[rv] payload =>", payload);
 
           const res = await fetch(API_BASE + "/api/reddit-video", {
-            method:"POST",
-            headers:{ "Content-Type":"application/json" },
-            body: JSON.stringify(payload)
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
           });
 
           const raw = await res.text();
           let j = {};
-          try { j = JSON.parse(raw); } catch { j = { raw }; }
+          try {
+            j = JSON.parse(raw);
+          } catch {
+            j = { raw };
+          }
 
           if (!res.ok || j?.ok === false) {
             console.error("[rv] backend error =>", j);
-            throw new Error(j?.error || j?.message || j?.raw || ("HTTP " + res.status));
+            throw new Error(j?.error || j?.message || j?.raw || "HTTP " + res.status);
           }
 
           if (!j?.renderId) throw new Error("Missing renderId from backend.");
@@ -1126,7 +1164,6 @@
           lastRenderName = name;
           lastRenderDl = downloadProxyUrl(url, safeFilename(lastRenderName));
           setDownloadEnabled(true);
-
         } catch (e) {
           console.error("[rv] generate failed =>", e);
           setProgress(0);
@@ -1138,7 +1175,7 @@
     }
 
     if (dlBtn) {
-      dlBtn.addEventListener("click", ()=>{
+      dlBtn.addEventListener("click", () => {
         if (!lastRenderDl) return;
         const a = document.createElement("a");
         a.href = lastRenderDl;
@@ -1152,6 +1189,9 @@
     // start
     showDemo();
     updateCard();
+
+    // ✅ preload right away too (helps if modal isn't opened yet)
+    warmPreviews();
   }
 
   if (document.readyState === "loading") {
