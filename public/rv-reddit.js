@@ -50,7 +50,7 @@
     { name: "Adam", id: "pNInz6obpgDQGcFmaJgB", desc: "Neutral male voice, clean delivery." },
     { name: "Bill", id: "pqHfZKP75CvOlQylNhV4", desc: "Older male voice, classic storyteller feel." },
     { name: "Alex", id: "yl2ZDV1MzN4HbQJbMihG", desc: "Modern neutral voice (great all-purpose)." },
-    { name: "Mark", id: "UgBBYS2sOqTuMpoF3BR0", desc: "Strong voice that hits punchlines well." },
+    { name: "Mark", id: "3jR9BuQAOPMWUjWpi0ll", desc: "Strong voice that hits punchlines well." },
     { name: "Brittney", id: "kPzsL2i3teMYv0FxEYQ6", desc: "High-energy female voice for hooks." },
     { name: "True", id: "tZssYepgGaQmegsMEXjK", desc: "Smooth confident voice with quick pacing." },
     { name: "Charles", id: "S9GPGBaMND8XWwwzxQXp", desc: "Formal narrator tone, very clear." },
