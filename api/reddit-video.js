@@ -1,4 +1,4 @@
-// api/reddit-video.js (CommonJS, Node 18+)
+ // api/reddit-video.js (CommonJS, Node 18+)
 
 const https = require("https");
 
@@ -10,6 +10,11 @@ const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const VOICE_BUCKET = process.env.VOICE_BUCKET || "voiceovers";
+
+// ✅ Used when UI sends "default" / empty
+// Set this in Vercel env to whatever voice you want as your default.
+const DEFAULT_ELEVEN_VOICE_ID =
+  process.env.DEFAULT_ELEVEN_VOICE_ID || "EXAVITQu4vr4xnSDxMaL"; // fallback: Sarah
 
 const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || "*")
   .split(",")
@@ -169,7 +174,6 @@ async function uploadMp3ToSupabasePublic(mp3Buffer, filePath) {
   if (!SUPABASE_SERVICE_ROLE_KEY) throw new Error("Missing SUPABASE_SERVICE_ROLE_KEY");
   if (!VOICE_BUCKET) throw new Error("Missing VOICE_BUCKET");
 
-  // ✅ Use PUT (recommended) + upsert header
   const base = new URL(SUPABASE_URL);
   const hostname = base.hostname;
 
@@ -204,17 +208,17 @@ async function uploadMp3ToSupabasePublic(mp3Buffer, filePath) {
     throw new Error(`Supabase upload failed (${res.status}): ${res.text || "unknown error"}`);
   }
 
-  // ✅ Public URL (bucket must be public)
+  // bucket must be public
   return `${SUPABASE_URL}/storage/v1/object/public/${VOICE_BUCKET}/${filePath}`;
 }
 
-// ✅ Your UI now sends REAL ElevenLabs IDs in the <option value="...">,
-// so we just accept them. If empty/"default", return "" (means "use template voice").
+// UI sends real ElevenLabs voice IDs in option value.
+// If empty/"default", return "".
 function normalizeElevenVoiceId(v) {
   const s = String(v || "").trim();
   if (!s) return "";
   if (s.toLowerCase() === "default") return "";
-  return s; // expected to be actual ElevenLabs voice_id
+  return s;
 }
 
 /* ----------------- build modifications ----------------- */
@@ -359,7 +363,8 @@ async function buildModifications(body) {
 
   // footer Y
   setMulti(m, ["like_count_light.y", "post_card_light.like_count_light.y"], pct(likeY));
-  setMulti(m, ["like_count_dark.y", "post_card_dark.like_count_dark.text"], pct(likeY));
+  // ✅ FIXED BUG: dark.y was incorrectly pointing to .text
+  setMulti(m, ["like_count_dark.y", "post_card_dark.like_count_dark.y"], pct(likeY));
 
   setMulti(m, ["comment_count_light.y", "post_card_light.comment_count_light.y"], pct(commentY));
   setMulti(m, ["comment_count_dark.y", "post_card_dark.comment_count_dark.y"], pct(commentY));
@@ -400,32 +405,32 @@ async function buildModifications(body) {
     m["Video.fit"] = "cover";
   }
 
-  // ✅ ElevenLabs -> MP3 -> Supabase -> Creatomate audio layer sources
-  // If postVoice/scriptVoice are empty or "default", we fall back to template TTS (text).
-  const postVoiceId = normalizeElevenVoiceId(body.postVoice);
-  const scriptVoiceId = normalizeElevenVoiceId(body.scriptVoice);
+  /**
+   * ✅ IMPORTANT:
+   * Your Creatomate template audio layers (post_voice, script_voice) MUST be "Audio (URL)" layers,
+   * NOT TTS/ElevenLabs provider layers. Provider should be None/URL/Upload.
+   *
+   * Then .source should be a public URL to an mp3 file.
+   */
+
+  const postVoiceId = normalizeElevenVoiceId(body.postVoice) || DEFAULT_ELEVEN_VOICE_ID;
+  const scriptVoiceId = normalizeElevenVoiceId(body.scriptVoice) || DEFAULT_ELEVEN_VOICE_ID;
   const scriptText = safeStr(body.script, "");
 
-  // Post voice
-  if (postVoiceId) {
+  // Post voice (ALWAYS generate mp3)
+  {
     const postMp3 = await elevenlabsTtsToMp3Buffer(postText, postVoiceId);
     const postPath = `reddit/${Date.now()}_${randId()}_post.mp3`;
     const postUrl = await uploadMp3ToSupabasePublic(postMp3, postPath);
     m["post_voice.source"] = postUrl;
-  } else {
-    m["post_voice.source"] = postText; // template TTS fallback
   }
 
-  // Script voice
+  // Script voice (only if script exists)
   if (scriptText) {
-    if (scriptVoiceId) {
-      const scriptMp3 = await elevenlabsTtsToMp3Buffer(scriptText, scriptVoiceId);
-      const scriptPath = `reddit/${Date.now()}_${randId()}_script.mp3`;
-      const scriptUrl = await uploadMp3ToSupabasePublic(scriptMp3, scriptPath);
-      m["script_voice.source"] = scriptUrl;
-    } else {
-      m["script_voice.source"] = scriptText; // template TTS fallback
-    }
+    const scriptMp3 = await elevenlabsTtsToMp3Buffer(scriptText, scriptVoiceId);
+    const scriptPath = `reddit/${Date.now()}_${randId()}_script.mp3`;
+    const scriptUrl = await uploadMp3ToSupabasePublic(scriptMp3, scriptPath);
+    m["script_voice.source"] = scriptUrl;
   }
 
   return m;
@@ -472,7 +477,6 @@ module.exports = async function handler(req, res) {
       return json(res, 400, { ok: false, error: "Missing backgroundVideoUrl (use library for now)" });
     }
 
-    // ✅ buildModifications is async now
     const modifications = await buildModifications(body);
 
     const startResp = await creatomateRequest("/v1/renders", "POST", {
