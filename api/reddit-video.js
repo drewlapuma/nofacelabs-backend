@@ -433,44 +433,45 @@ async function buildModifications(body) {
   // - script_voice starts right after title (smaller gap)
   // - card disappears slightly earlier (fudge)
   // ==========================================================
-  function estimateSpeechSeconds(text) {
-    const words = String(text || "")
-      .trim()
-      .split(/\s+/)
-      .filter(Boolean).length;
+  // ✅ NEW timing: cut card earlier + start script early to eat ElevenLabs trailing silence
+function estimateSpeechSeconds(text) {
+  const words = String(text || "")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean).length;
 
-    // Short titles usually read ~2.7–3.1 wps; 2.9 reduces “linger”
-    const WPS = 2.9;
-    return Math.max(0.55, words / WPS);
-  }
-
-  const postSecsRaw = estimateSpeechSeconds(postText);
-
-  const CARD_EARLY_CUT = 1.1; // make card disappear a bit earlier
-  const SCRIPT_GAP = 0.0; // tiny gap between title -> script
-  
-  const SCRIPT_OVERLAP = 0.85; // start script this many seconds early (tune 0.4–1.1)
-  const scriptStart = Math.max(0, postSecsRaw - SCRIPT_OVERLAP);
-  
-  const cardSecs = Math.max(0.35, postSecsRaw - CARD_EARLY_CUT);
-  const scriptStart = Math.max(0, postSecsRaw + SCRIPT_GAP);
-
-  // cards only exist during title voice window
-  m["post_card_light.time"] = 0;
-  m["post_card_light.duration"] = cardSecs;
-
-  m["post_voice.time"] = 0;
-  m["script_voice.time"] = scriptStart;
-
-  m["post_card_dark.time"] = 0;
-  m["post_card_dark.duration"] = cardSecs;
-
-  // ensure voices are sequential
-  m["post_voice.time"] = 0;
-  if (scriptText) m["script_voice.time"] = scriptStart;
-
-  return m;
+  // keep your WPS (unchanged)
+  const WPS = 2.9;
+  return Math.max(0.55, words / WPS);
 }
+
+const postSecsRaw = estimateSpeechSeconds(postText);
+
+// ✅ how much earlier the card disappears (visual)
+const CARD_EARLY_CUT = 1.1;
+
+// ✅ how early the script starts to remove the perceived “dead air” (audio)
+const SCRIPT_OVERLAP = 0.85;
+
+// derived
+const cardSecs = Math.max(0.35, postSecsRaw - CARD_EARLY_CUT);
+const scriptStart = Math.max(0, postSecsRaw - SCRIPT_OVERLAP);
+
+// cards only exist during title voice window (shortened)
+m["post_card_light.time"] = 0;
+m["post_card_light.duration"] = cardSecs;
+
+m["post_card_dark.time"] = 0;
+m["post_card_dark.duration"] = cardSecs;
+
+// audio timing
+m["post_voice.time"] = 0;
+
+// only set script timing if script exists
+if (scriptText) {
+  m["script_voice.time"] = scriptStart;
+}
+
 
 module.exports = async function handler(req, res) {
   setCors(req, res);
