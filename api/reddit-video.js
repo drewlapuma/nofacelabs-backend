@@ -1,4 +1,4 @@
- // api/reddit-video.js (CommonJS, Node 18+)
+// api/reddit-video.js (CommonJS, Node 18+)
 
 const https = require("https");
 
@@ -12,7 +12,6 @@ const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const VOICE_BUCKET = process.env.VOICE_BUCKET || "voiceovers";
 
 // ✅ Used when UI sends "default" / empty
-// Set this in Vercel env to whatever voice you want as your default.
 const DEFAULT_ELEVEN_VOICE_ID =
   process.env.DEFAULT_ELEVEN_VOICE_ID || "EXAVITQu4vr4xnSDxMaL"; // fallback: Sarah
 
@@ -208,7 +207,6 @@ async function uploadMp3ToSupabasePublic(mp3Buffer, filePath) {
     throw new Error(`Supabase upload failed (${res.status}): ${res.text || "unknown error"}`);
   }
 
-  // bucket must be public
   return `${SUPABASE_URL}/storage/v1/object/public/${VOICE_BUCKET}/${filePath}`;
 }
 
@@ -363,7 +361,6 @@ async function buildModifications(body) {
 
   // footer Y
   setMulti(m, ["like_count_light.y", "post_card_light.like_count_light.y"], pct(likeY));
-  // ✅ FIXED BUG: dark.y was incorrectly pointing to .text
   setMulti(m, ["like_count_dark.y", "post_card_dark.like_count_dark.y"], pct(likeY));
 
   setMulti(m, ["comment_count_light.y", "post_card_light.comment_count_light.y"], pct(commentY));
@@ -408,9 +405,7 @@ async function buildModifications(body) {
   /**
    * ✅ IMPORTANT:
    * Your Creatomate template audio layers (post_voice, script_voice) MUST be "Audio (URL)" layers,
-   * NOT TTS/ElevenLabs provider layers. Provider should be None/URL/Upload.
-   *
-   * Then .source should be a public URL to an mp3 file.
+   * NOT TTS/ElevenLabs provider layers.
    */
 
   const postVoiceId = normalizeElevenVoiceId(body.postVoice) || DEFAULT_ELEVEN_VOICE_ID;
@@ -432,6 +427,41 @@ async function buildModifications(body) {
     const scriptUrl = await uploadMp3ToSupabasePublic(scriptMp3, scriptPath);
     m["script_voice.source"] = scriptUrl;
   }
+
+  // ==========================================================
+  // ✅ NEW: timing tweaks (DROP-IN CHANGE YOU REQUESTED)
+  // - script_voice starts right after title (smaller gap)
+  // - card disappears slightly earlier (fudge)
+  // ==========================================================
+  function estimateSpeechSeconds(text) {
+    const words = String(text || "")
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean).length;
+
+    // Short titles usually read ~2.7–3.1 wps; 2.9 reduces “linger”
+    const WPS = 2.9;
+    return Math.max(0.55, words / WPS);
+  }
+
+  const postSecsRaw = estimateSpeechSeconds(postText);
+
+  const CARD_EARLY_CUT = 0.2; // make card disappear a bit earlier
+  const SCRIPT_GAP = 0.05; // tiny gap between title -> script
+
+  const cardSecs = Math.max(0.35, postSecsRaw - CARD_EARLY_CUT);
+  const scriptStart = Math.max(0, postSecsRaw + SCRIPT_GAP);
+
+  // cards only exist during title voice window
+  m["post_card_light.time"] = 0;
+  m["post_card_light.duration"] = cardSecs;
+
+  m["post_card_dark.time"] = 0;
+  m["post_card_dark.duration"] = cardSecs;
+
+  // ensure voices are sequential
+  m["post_voice.time"] = 0;
+  if (scriptText) m["script_voice.time"] = scriptStart;
 
   return m;
 }
