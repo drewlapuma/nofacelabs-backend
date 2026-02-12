@@ -448,13 +448,19 @@ async function buildModifications(body) {
 
   const CARD_EARLY_CUT = 1.1; // make card disappear a bit earlier
   const SCRIPT_GAP = 0.0; // tiny gap between title -> script
-
+  
+  const SCRIPT_OVERLAP = 0.85; // start script this many seconds early (tune 0.4–1.1)
+  const scriptStart = Math.max(0, postSecsRaw - SCRIPT_OVERLAP);
+  
   const cardSecs = Math.max(0.35, postSecsRaw - CARD_EARLY_CUT);
   const scriptStart = Math.max(0, postSecsRaw + SCRIPT_GAP);
 
   // cards only exist during title voice window
   m["post_card_light.time"] = 0;
   m["post_card_light.duration"] = cardSecs;
+
+  m["post_voice.time"] = 0;
+  m["script_voice.time"] = scriptStart;
 
   m["post_card_dark.time"] = 0;
   m["post_card_dark.duration"] = cardSecs;
