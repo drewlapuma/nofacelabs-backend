@@ -428,49 +428,47 @@ async function buildModifications(body) {
     m["script_voice.source"] = scriptUrl;
   }
 
+    // ==========================================================
+  // ✅ NEW: timing tweaks (DROP-IN CHANGE)
+  // - card disappears earlier
+  // - script voice starts EARLIER (overlap) to remove dead air
   // ==========================================================
-  // ✅ NEW: timing tweaks (DROP-IN CHANGE YOU REQUESTED)
-  // - script_voice starts right after title (smaller gap)
-  // - card disappears slightly earlier (fudge)
-  // ==========================================================
-  // ✅ NEW timing: cut card earlier + start script early to eat ElevenLabs trailing silence
-function estimateSpeechSeconds(text) {
-  const words = String(text || "")
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean).length;
+  function estimateSpeechSeconds(text) {
+    const words = String(text || "")
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean).length;
 
-  // keep your WPS (unchanged)
-  const WPS = 2.9;
-  return Math.max(0.55, words / WPS);
-}
+    // keep your WPS unchanged
+    const WPS = 2.9;
+    return Math.max(0.55, words / WPS);
+  }
 
-const postSecsRaw = estimateSpeechSeconds(postText);
+  const postSecsRaw = estimateSpeechSeconds(postText);
 
-// ✅ how much earlier the card disappears (visual)
-const CARD_EARLY_CUT = 1.1;
+  // Visual: end card earlier
+  const CARD_EARLY_CUT = 1.1;
 
-// ✅ how early the script starts to remove the perceived “dead air” (audio)
-const SCRIPT_OVERLAP = 0.85;
+  // Audio: start script before title ends (overlap)
+  // This fights trailing silence baked into the title mp3 (very common with ElevenLabs)
+  const SCRIPT_OVERLAP = 0.85;
 
-// derived
-const cardSecs = Math.max(0.35, postSecsRaw - CARD_EARLY_CUT);
-const scriptStart = Math.max(0, postSecsRaw - SCRIPT_OVERLAP);
+  const cardSecs = Math.max(0.35, postSecsRaw - CARD_EARLY_CUT);
+  const scriptStart = Math.max(0, postSecsRaw - SCRIPT_OVERLAP);
 
-// cards only exist during title voice window (shortened)
-m["post_card_light.time"] = 0;
-m["post_card_light.duration"] = cardSecs;
+  // cards only exist during title window (shortened)
+  m["post_card_light.time"] = 0;
+  m["post_card_light.duration"] = cardSecs;
+  m["post_card_dark.time"] = 0;
+  m["post_card_dark.duration"] = cardSecs;
 
-m["post_card_dark.time"] = 0;
-m["post_card_dark.duration"] = cardSecs;
+  // audio timing
+  m["post_voice.time"] = 0;
+  if (scriptText) m["script_voice.time"] = scriptStart;
 
-// audio timing
-m["post_voice.time"] = 0;
+  return m;
+} // ✅ IMPORTANT: closes buildModifications
 
-// only set script timing if script exists
-if (scriptText) {
-  m["script_voice.time"] = scriptStart;
-}
 
 
 module.exports = async function handler(req, res) {
@@ -480,7 +478,7 @@ module.exports = async function handler(req, res) {
     res.statusCode = 200;
     res.end();
     return;
-  };
+  }
 
   try {
     if (!TEMPLATE_ID) {
