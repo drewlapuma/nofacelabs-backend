@@ -56,7 +56,7 @@
     { name: "Charles", id: "S9GPGBaMND8XWwwzxQXp", desc: "Formal narrator tone, very clear." },
     { name: "Clancy", id: "FLpz0UhC9a7CIfUSBo6S", desc: "Distinct character voice with personality." },
     { name: "Dan", id: "Ioq2c1GJee5RyqeoBIH3", desc: "Casual male voice with natural pauses." },
-    { name: "Natasha", id: "uxKr2vlA4hYgXZR1oPRT", desc: "Clear female voice with confident delivery." },
+    { name: "Natasha", id: "7lcjd4bgTyPW2qqLhV1Q", desc: "Clear female voice with confident delivery." },
     { name: "Rahul",   id: "WtIqwF5CWCkaZSGmvsm1", desc: "Warm male voice with natural conversational tone." },
   ];
 
