@@ -440,7 +440,7 @@ async function buildModifications(body) {
       .filter(Boolean).length;
 
     // Short titles usually read ~2.7–3.1 wps; 2.9 reduces “linger”
-    const WPS = 2.9;
+    const WPS = 3.2;
     return Math.max(0.55, words / WPS);
   }
 
