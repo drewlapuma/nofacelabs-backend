@@ -451,7 +451,7 @@ async function buildModifications(body) {
 
   // Audio: start script before title ends (overlap)
   // This fights trailing silence baked into the title mp3 (very common with ElevenLabs)
-  const SCRIPT_OVERLAP = 0.85;
+  const SCRIPT_OVERLAP = 0.75;
 
   const cardSecs = Math.max(0.35, postSecsRaw - CARD_EARLY_CUT);
   const scriptStart = Math.max(0, postSecsRaw - SCRIPT_OVERLAP);
