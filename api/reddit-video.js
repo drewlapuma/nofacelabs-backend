@@ -480,7 +480,7 @@ module.exports = async function handler(req, res) {
     res.statusCode = 200;
     res.end();
     return;
-  }
+  };
 
   try {
     if (!TEMPLATE_ID) {
