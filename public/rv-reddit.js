@@ -57,7 +57,7 @@
     { name: "Clancy", id: "FLpz0UhC9a7CIfUSBo6S", desc: "Distinct character voice with personality." },
     { name: "Dan", id: "Ioq2c1GJee5RyqeoBIH3", desc: "Casual male voice with natural pauses." },
     { name: "Natasha", id: "7lcjd4bgTyPW2qqLhV1Q", desc: "Clear female voice with confident delivery." },
-    { name: "Rahul",   id: "WtIqwF5CWCkaZSGmvsm1", desc: "Warm male voice with natural conversational tone." },
+    { name: "Rahul", id: "WtIqwF5CWCkaZSGmvsm1", desc: "Warm male voice with natural conversational tone." },
   ];
 
   // ✅ Pre-hosted MP3s (voiceId.mp3)
@@ -136,12 +136,143 @@
     let wrap = null,
       demoVid = null,
       card = null;
+
     let lastRenderDl = "",
       lastRenderName = "reddit-video";
 
     const REF_W = 1080;
     const REF_CARD_W = REF_W * 0.75; // 810
 
+    // ==========================================================
+    // ✅ DISAPPEARING CARD SELF-HEAL LOGIC (ADDED)
+    // - Webflow can replace nodes / unmount preview containers.
+    // - We remount the overlay into the *current* preview host.
+    // - We also watch DOM + size changes + periodic health checks.
+    // ==========================================================
+    let lastHostKey = "";
+    let hostResizeObs = null;
+    let domObserver = null;
+
+    function nodeKey(el) {
+      if (!el) return "";
+      // stable-ish identity across swaps
+      return (
+        (el.id ? "#" + el.id : "") +
+        "|" +
+        (el.className ? "." + String(el.className).trim().split(/\s+/).slice(0, 3).join(".") : "") +
+        "|" +
+        (el.tagName || "")
+      );
+    }
+
+    function isConnected(el) {
+      return !!(el && (el.isConnected || document.documentElement.contains(el)));
+    }
+
+    function findPreviewHost() {
+      if (!videoEl) return null;
+      let el = videoEl.parentElement;
+      for (let i = 0; i < 7 && el; i++) {
+        const cs = getComputedStyle(el);
+        const br = parseFloat(cs.borderTopLeftRadius || "0") || 0;
+        const oh =
+          (cs.overflow || "").includes("hidden") ||
+          (cs.overflowY || "").includes("hidden") ||
+          (cs.overflowX || "").includes("hidden");
+        if ((br >= 10 && oh) || (oh && el.clientHeight > 200)) return el;
+        el = el.parentElement;
+      }
+      return videoEl.parentElement;
+    }
+
+    function attachToHost(host) {
+      if (!host) return;
+
+      // ensure relative host so absolute overlay works
+      const hs = getComputedStyle(host);
+      if (hs.position === "static") host.style.position = "relative";
+
+      // if wrap exists but isn't in THIS host, move it
+      if (wrap && wrap.parentElement !== host) {
+        try {
+          wrap.remove();
+        } catch {}
+        host.appendChild(wrap);
+      }
+
+      // observe size changes to keep card from “shrinking to 0 then never coming back”
+      if (hostResizeObs) {
+        try {
+          hostResizeObs.disconnect();
+        } catch {}
+        hostResizeObs = null;
+      }
+      if (window.ResizeObserver) {
+        hostResizeObs = new ResizeObserver(() => {
+          // defer to next frame so Webflow layout settles
+          requestAnimationFrame(() => {
+            resizeCard();
+            // only update content if nodes exist
+            if (card) updateCard();
+          });
+        });
+        try {
+          hostResizeObs.observe(host);
+        } catch {}
+      }
+    }
+
+    function healIfNeeded() {
+      const host = findPreviewHost();
+      if (!host) return;
+
+      const key = nodeKey(host);
+      const hostChanged = key && key !== lastHostKey;
+
+      // if host changed OR our nodes got detached, rebuild/remount
+      const lostNodes =
+        !isConnected(wrap) ||
+        !isConnected(card) ||
+        !isConnected(demoVid) ||
+        (wrap && wrap.parentElement !== host);
+
+      if (hostChanged || lostNodes) {
+        lastHostKey = key;
+        // force re-ensure + remount
+        ensureNodes(true);
+        // keep in sync
+        resizeCard();
+        updateCard();
+      }
+    }
+
+    function startHealing() {
+      if (domObserver) return;
+
+      // DOM swaps (Webflow interactions / CMS / tabs)
+      domObserver = new MutationObserver(() => {
+        // cheap + safe: just check health
+        healIfNeeded();
+      });
+
+      try {
+        domObserver.observe(document.body, {
+          childList: true,
+          subtree: true,
+          attributes: true,
+        });
+      } catch {}
+
+      // periodic health check (super cheap)
+      setInterval(healIfNeeded, 1200);
+
+      // also check on visibility changes
+      document.addEventListener("visibilitychange", () => {
+        if (!document.hidden) setTimeout(healIfNeeded, 150);
+      });
+    }
+
+    // ---------- status helpers ----------
     function setMsg(t) {
       if (msgEl) msgEl.textContent = t || "—";
     }
@@ -176,22 +307,6 @@
       if (!el) return "";
       if (typeof el.value === "string") return el.value;
       return el.textContent || "";
-    }
-
-    function findPreviewHost() {
-      if (!videoEl) return null;
-      let el = videoEl.parentElement;
-      for (let i = 0; i < 7 && el; i++) {
-        const cs = getComputedStyle(el);
-        const br = parseFloat(cs.borderTopLeftRadius || "0") || 0;
-        const oh =
-          (cs.overflow || "").includes("hidden") ||
-          (cs.overflowY || "").includes("hidden") ||
-          (cs.overflowX || "").includes("hidden");
-        if ((br >= 10 && oh) || (oh && el.clientHeight > 200)) return el;
-        el = el.parentElement;
-      }
-      return videoEl.parentElement;
     }
 
     // ---------- ✅ upload helpers ----------
@@ -336,7 +451,7 @@
       document.head.appendChild(s);
     })();
 
-    // ---------- ✅ Voice picker CSS (UPDATED: buttons side-by-side + centered text) ----------
+    // ---------- ✅ Voice picker CSS ----------
     (function injectVoiceCss() {
       const id = "nfVoicePickerCssV4";
       if (document.getElementById(id)) return;
@@ -437,7 +552,6 @@
           color: rgba(90,193,255,1);
         }
 
-        /* ✅ removes the floating text labels without you editing HTML */
         #rvPostVoiceLabel, #rvScriptVoiceLabel{ display:none !important; }
       `;
       document.head.appendChild(s);
@@ -448,18 +562,28 @@
     const PATH_COMMENT = `M 94.2357 72.6204 C 97.8532 65.5833 99.7431 57.786 99.7491 49.8735 C 99.7491 22.3751 77.3736 0 49.8745 0 C 22.3755 0 0 22.3751 0 49.8735 C 0 77.372 22.3755 99.7471 49.8745 99.7471 C 57.7729 99.7471 65.5986 97.8473 72.6264 94.2383 L 94.1178 99.611 C 95.662 100 97.2969 99.5469 98.4206 98.4186 C 99.5473 97.2921 100 95.6569 99.6131 94.1114 L 94.2357 72.6204 Z M 85.018 73.1191 L 88.9807 88.9789 L 73.1206 85.0117 C 71.9994 84.7349 70.8149 84.8937 69.8062 85.456 C 63.7193 88.8753 56.8561 90.6738 49.8745 90.6792 C 27.3721 90.6792 9.0681 72.371 9.0681 49.8735 C 9.0681 27.376 27.3721 9.0679 49.8745 9.0679 C 72.377 9.0679 90.681 27.376 90.681 49.8735 C 90.6748 56.8528 88.8779 63.7138 85.4623 69.8003 C 84.8939 70.8086 84.7348 71.9968 85.018 73.1191 Z`;
     const PATH_SHARE = `M 33.55 28.6214 L 45 17.1329 L 45 65.035 C 45 67.7918 47.2404 70.03 50 70.03 C 52.7596 70.03 55 67.7918 55 65.035 L 55 17.1329 L 66.45 28.6214 C 67.3888 29.5671 68.6668 30.099 70 30.099 C 71.3332 30.099 72.6112 29.5671 73.55 28.6214 C 74.4966 27.6835 75.029 26.4068 75.029 25.075 C 75.029 23.7431 74.4966 22.4664 73.55 21.5285 L 53.55 1.5485 C 53.55 1.5485 52.5138 0.7373 51.9 0.4996 C 50.6827 0 49.3173 0 48.1 0.4996 C 47.4862 0.7373 46.45 1.5485 46.45 1.5485 L 26.45 21.5285 C 24.4907 23.4859 24.4907 26.6641 26.45 28.6214 C 28.4093 30.5788 31.5907 30.5788 33.55 28.6214 Z M 95 50.05 C 92.2404 50.05 90 52.2882 90 55.045 L 90 85.015 C 90 87.7718 87.7596 90.01 85 90.01 L 15 90.01 C 12.2404 90.01 10 87.7718 10 85.015 L 10 55.045 C 10 52.2882 7.7596 50.05 5 50.05 C 2.2404 50.05 0 52.2882 0 55.045 L 0 85.015 C 0 93.2854 6.7213 100 15 100 L 85 100 C 93.2787 100 100 93.2854 100 85.015 L 100 55.045 C 100 52.2882 97.7596 50.05 95 50.05 Z`;
 
-    function ensureNodes() {
+    function ensureNodes(forceRemount) {
       const host = findPreviewHost();
       if (!host) return;
 
-      const hs = getComputedStyle(host);
-      if (hs.position === "static") host.style.position = "relative";
+      // track host identity + attach observers
+      if (forceRemount || nodeKey(host) !== lastHostKey) {
+        lastHostKey = nodeKey(host);
+        attachToHost(host);
+      }
 
+      // (re)create wrap inside host
       wrap = document.getElementById("nfRvWrapV11");
       if (!wrap) {
         wrap = document.createElement("div");
         wrap.id = "nfRvWrapV11";
         wrap.className = "nf-rvWrap";
+        host.appendChild(wrap);
+      } else if (wrap.parentElement !== host) {
+        // remount if Webflow moved/removed it
+        try {
+          wrap.remove();
+        } catch {}
         host.appendChild(wrap);
       }
 
@@ -474,6 +598,11 @@
         demoVid.preload = "metadata";
         demoVid.muted = true;
         demoVid.controls = true;
+        wrap.appendChild(demoVid);
+      } else if (demoVid.parentElement !== wrap) {
+        try {
+          demoVid.remove();
+        } catch {}
         wrap.appendChild(demoVid);
       }
 
@@ -519,6 +648,11 @@
           </div>
         `;
         wrap.appendChild(card);
+      } else if (card.parentElement !== wrap) {
+        try {
+          card.remove();
+        } catch {}
+        wrap.appendChild(card);
       }
 
       if (overlayEl) overlayEl.classList.add("nf-rvOverlayHideText");
@@ -552,6 +686,7 @@
       __t = setTimeout(() => {
         resizeCard();
         updateCard();
+        healIfNeeded();
       }, 120);
     });
 
@@ -579,7 +714,7 @@
     }
 
     function updateCard() {
-      ensureNodes();
+      ensureNodes(false);
       resizeCard();
 
       const mode = String(modeHidden?.value || "light").toLowerCase() === "dark" ? "dark" : "light";
@@ -613,7 +748,7 @@
     }
 
     function showDemo() {
-      ensureNodes();
+      ensureNodes(false);
       if (wrap) wrap.style.display = "block";
       if (demoVid && demoVid.src !== demoBgUrl) {
         demoVid.src = demoBgUrl;
@@ -677,6 +812,7 @@
 
         setActiveByIndex(idx);
         updateCard();
+        healIfNeeded();
       });
     }
 
@@ -736,6 +872,7 @@
       if (pfpUrlEl) pfpUrlEl.value = url;
       localPfpObjectUrl = "";
       updateCard();
+      healIfNeeded();
     });
 
     // ✅ Background upload
@@ -774,6 +911,7 @@
 
           setStatus("Background uploaded ✓ (ready to render)");
           showDemo();
+          healIfNeeded();
         } catch (e) {
           console.error("[rv] bg upload failed =>", e);
           setStatus("BG upload failed: " + (e?.message || e));
@@ -787,6 +925,7 @@
             bgSelectedName.textContent = (file.name || "Uploaded video") + " (preview only)";
           }
           showDemo();
+          healIfNeeded();
         }
       });
     }
@@ -807,14 +946,24 @@
       }
       showDemo();
       setStatus("Background ready ✓");
+      healIfNeeded();
     });
 
     // realtime updates
     function bindRealtime(el) {
       if (!el) return;
-      el.addEventListener("input", updateCard);
-      el.addEventListener("change", updateCard);
-      el.addEventListener("keyup", updateCard);
+      el.addEventListener("input", () => {
+        updateCard();
+        healIfNeeded();
+      });
+      el.addEventListener("change", () => {
+        updateCard();
+        healIfNeeded();
+      });
+      el.addEventListener("keyup", () => {
+        updateCard();
+        healIfNeeded();
+      });
     }
     [usernameEl, postTitleEl, postTextEl, likesEl, commentsEl, shareTextEl, modeHidden].forEach(bindRealtime);
 
@@ -825,13 +974,10 @@
     let previewAudio = null;
     let previewingVoiceId = "";
 
-    // ✅ cache audio elements so playback starts immediately
     const PREVIEW_AUDIO_CACHE = new Map(); // voiceId -> HTMLAudioElement
 
     function previewUrlFor(voiceId) {
-      return PREVIEW_BASE
-        ? PREVIEW_BASE.replace(/\/$/, "") + "/" + encodeURIComponent(voiceId) + ".mp3"
-        : "";
+      return PREVIEW_BASE ? PREVIEW_BASE.replace(/\/$/, "") + "/" + encodeURIComponent(voiceId) + ".mp3" : "";
     }
 
     function preloadPreview(voiceId) {
@@ -851,18 +997,14 @@
 
     function warmPreviews() {
       if (!PREVIEW_BASE) return;
-
-      // preload a small set so it feels instant without nuking bandwidth
       VOICES.slice(0, 10).forEach((v) => preloadPreview(v.id));
 
-      // also preload currently selected voices
       const curPost = String(postVoiceEl?.value || "").trim();
       const curScr = String(scriptVoiceEl?.value || "").trim();
       if (curPost && curPost !== "default") preloadPreview(curPost);
       if (curScr && curScr !== "default") preloadPreview(curScr);
     }
 
-    // ✅ unlock audio on first interaction (needed on iOS/Safari sometimes)
     (function installAudioUnlock() {
       const handler = () => {
         try {
@@ -908,9 +1050,7 @@
       if (el) el.value = voice?.id || "default";
       if (labelEl) labelEl.textContent = voice?.name || "Default";
 
-      // preload the chosen voice so preview is instant next time
       if (voice?.id) preloadPreview(voice.id);
-
       renderVoiceGrid(String(voiceSearch?.value || "").trim());
     }
 
@@ -936,7 +1076,6 @@
       previewingVoiceId = voiceId;
       renderVoiceGrid(String(voiceSearch?.value || "").trim());
 
-      // ✅ Use cached audio (instant)
       preloadPreview(voiceId);
       const a = PREVIEW_AUDIO_CACHE.get(voiceId);
       if (!a) {
@@ -963,7 +1102,6 @@
       });
     }
 
-    // ✅ UPDATED markup: buttons row under text
     function renderVoiceGrid(q) {
       if (!voiceGrid) return;
 
@@ -980,7 +1118,6 @@
       });
 
       voiceGrid.classList.add("nf-voiceGrid");
-
       voiceGrid.innerHTML = filtered
         .map((v) => {
           const selected = selectedId === v.id;
@@ -1012,7 +1149,8 @@
       if (voiceModal) voiceModal.classList.add("open");
       setActiveTab(voiceTarget);
       renderVoiceGrid("");
-      warmPreviews(); // ✅ preload when modal opens
+      warmPreviews();
+      healIfNeeded();
     }
 
     function closeVoiceModal() {
@@ -1021,10 +1159,8 @@
       renderVoiceGrid(String(voiceSearch?.value || "").trim());
     }
 
-    // One button opens modal
     if (voicesBtn) voicesBtn.addEventListener("click", openVoiceModal);
 
-    // Tabs
     if (voiceTabs) {
       voiceTabs.addEventListener("click", (e) => {
         const b = e.target.closest("button[data-tab]");
@@ -1033,14 +1169,12 @@
       });
     }
 
-    // Close wiring
     if (voiceClose) voiceClose.addEventListener("click", closeVoiceModal);
     if (voiceModal)
       voiceModal.addEventListener("click", (e) => {
         if (e.target === voiceModal) closeVoiceModal();
       });
 
-    // Search / Clear
     if (voiceClear)
       voiceClear.addEventListener("click", () => {
         if (voiceSearch) voiceSearch.value = "";
@@ -1048,7 +1182,6 @@
       });
     if (voiceSearch) voiceSearch.addEventListener("input", () => renderVoiceGrid(voiceSearch.value));
 
-    // Grid click actions
     if (voiceGrid)
       voiceGrid.addEventListener("click", (e) => {
         const btn = e.target.closest("button[data-act]");
@@ -1063,7 +1196,6 @@
         if (act === "use") setSelectedVoice(voiceTarget, voice);
       });
 
-    // Init labels (safe even if hidden)
     (function initVoiceLabels() {
       const pv = findVoiceById(postVoiceEl?.value);
       const sv = findVoiceById(scriptVoiceEl?.value);
@@ -1110,6 +1242,8 @@
     if (genBtn) {
       genBtn.addEventListener("click", async () => {
         try {
+          healIfNeeded();
+
           if (!bgLibraryUrl || !String(bgLibraryUrl).startsWith("http")) {
             throw new Error("Missing backgroundVideoUrl (use library or upload a file first)");
           }
@@ -1166,12 +1300,15 @@
           lastRenderName = name;
           lastRenderDl = downloadProxyUrl(url, safeFilename(lastRenderName));
           setDownloadEnabled(true);
+
+          healIfNeeded();
         } catch (e) {
           console.error("[rv] generate failed =>", e);
           setProgress(0);
           setStatus("Error: " + (e?.message || e));
           alert("Generate failed: " + (e?.message || e));
           showDemo();
+          healIfNeeded();
         }
       });
     }
@@ -1188,12 +1325,19 @@
       });
     }
 
+    // ✅ start healing system (ADDED)
+    startHealing();
+
     // start
     showDemo();
     updateCard();
 
-    // ✅ preload right away too (helps if modal isn't opened yet)
+    // preload right away
     warmPreviews();
+
+    // first heal pass
+    setTimeout(healIfNeeded, 200);
+    setTimeout(healIfNeeded, 900);
   }
 
   if (document.readyState === "loading") {
