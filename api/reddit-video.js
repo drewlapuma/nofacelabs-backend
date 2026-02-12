@@ -446,7 +446,7 @@ async function buildModifications(body) {
 
   const postSecsRaw = estimateSpeechSeconds(postText);
 
-  const CARD_EARLY_CUT = 0.2; // make card disappear a bit earlier
+  const CARD_EARLY_CUT = 0.9; // make card disappear a bit earlier
   const SCRIPT_GAP = 0.05; // tiny gap between title -> script
 
   const cardSecs = Math.max(0.35, postSecsRaw - CARD_EARLY_CUT);
