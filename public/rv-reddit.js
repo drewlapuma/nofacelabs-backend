@@ -4,6 +4,7 @@
 
   const API_BASE = "https://nofacelabs-backend.vercel.app";
   const SIGNED_UPLOAD_ENDPOINT = API_BASE + "/api/user-video-upload-url";
+  const SCRIPT_ENDPOINT = API_BASE + "/api/reddit-script";
 
   const DEMO_GAMEPLAY_URL =
     "https://pub-5be7d792161d46a4baac27fb3dc5ae4c.r2.dev/Minecraftparkour-1.mp4";
@@ -57,7 +58,7 @@
     { name: "Clancy", id: "FLpz0UhC9a7CIfUSBo6S", desc: "Distinct character voice with personality." },
     { name: "Dan", id: "Ioq2c1GJee5RyqeoBIH3", desc: "Casual male voice with natural pauses." },
     { name: "Natasha", id: "7lcjd4bgTyPW2qqLhV1Q", desc: "Clear female voice with confident delivery." },
-    { name: "Rahul",   id: "WtIqwF5CWCkaZSGmvsm1", desc: "Warm male voice with natural conversational tone." },
+    { name: "Rahul", id: "WtIqwF5CWCkaZSGmvsm1", desc: "Warm male voice with natural conversational tone." },
   ];
 
   // ✅ Pre-hosted MP3s (voiceId.mp3)
@@ -110,15 +111,27 @@
     const bgSelectedLine = document.getElementById("rvBgSelectedLine");
     const bgSelectedName = document.getElementById("rvBgSelectedName");
 
-    // segmented
+    // segmented (only mode stays on page now)
     const modeSeg = document.getElementById("rvModeSeg");
     const modeTrack = document.getElementById("rvModeTrack");
-    const toneSeg = document.getElementById("rvToneSeg");
-    const toneTrack = document.getElementById("rvToneTrack");
-    const lenSeg = document.getElementById("rvLenSeg");
-    const lenTrack = document.getElementById("rvLenTrack");
+
+    // hidden tone/len (still used in payload)
     const toneHidden = document.getElementById("rvTone");
     const lenHidden = document.getElementById("rvLen");
+
+    // ✅ Script generator modal (NEW)
+    const genScriptBtn = document.getElementById("rvGenScriptBtn");
+    const scriptModal = document.getElementById("rvScriptModal");
+    const scriptClose = document.getElementById("rvScriptClose");
+    const scriptCancel = document.getElementById("rvScriptCancel");
+    const scriptGenerate = document.getElementById("rvScriptGenerate");
+    const scriptPromptEl = document.getElementById("rvScriptPrompt");
+    const scriptGenMsg = document.getElementById("rvScriptGenMsg");
+
+    const toneSegM = document.getElementById("rvToneSegModal");
+    const toneTrackM = document.getElementById("rvToneTrackModal");
+    const lenSegM = document.getElementById("rvLenSegModal");
+    const lenTrackM = document.getElementById("rvLenTrackModal");
 
     // optional IDs (may not exist)
     const postTextEl = document.getElementById("rvPostText");
@@ -336,7 +349,7 @@
       document.head.appendChild(s);
     })();
 
-    // ---------- ✅ Voice picker CSS (UPDATED: buttons side-by-side + centered text) ----------
+    // ---------- ✅ Voice picker CSS ----------
     (function injectVoiceCss() {
       const id = "nfVoicePickerCssV4";
       if (document.getElementById(id)) return;
@@ -437,7 +450,6 @@
           color: rgba(90,193,255,1);
         }
 
-        /* ✅ removes the floating text labels without you editing HTML */
         #rvPostVoiceLabel, #rvScriptVoiceLabel{ display:none !important; }
       `;
       document.head.appendChild(s);
@@ -680,9 +692,141 @@
       });
     }
 
+    // ✅ Only mode segmented stays on page
     setupSeg(modeSeg, modeTrack, modeHidden, "mode");
-    setupSeg(toneSeg, toneTrack, toneHidden, "tone");
-    setupSeg(lenSeg, lenTrack, lenHidden, "len");
+
+    // ==========================
+    // ✅ SCRIPT GENERATOR MODAL (NEW)
+    // ==========================
+    function setupModalSeg(segEl, trackEl, hiddenEl, dataKey) {
+      if (!segEl) return;
+      const btns = Array.from(segEl.querySelectorAll(".nf-segBtn"));
+      if (!btns.length) return;
+
+      function setActive(idx) {
+        btns.forEach((b) => b.classList.remove("active"));
+        btns[idx].classList.add("active");
+        if (trackEl) trackEl.style.transform = `translateX(${idx * 100}%)`;
+        const val = btns[idx].dataset[dataKey];
+        if (hiddenEl && typeof val !== "undefined") hiddenEl.value = val;
+      }
+
+      const cur = String(hiddenEl?.value || "").toLowerCase();
+      const idx = btns.findIndex((b) => String(b.dataset[dataKey] || "").toLowerCase() === cur);
+      setActive(idx >= 0 ? idx : 0);
+
+      segEl.addEventListener("click", (e) => {
+        const btn = e.target.closest(".nf-segBtn");
+        if (!btn) return;
+        const i = btns.indexOf(btn);
+        if (i >= 0) setActive(i);
+      });
+    }
+
+    setupModalSeg(toneSegM, toneTrackM, toneHidden, "tone");
+    setupModalSeg(lenSegM, lenTrackM, lenHidden, "len");
+
+    function openScriptModal() {
+      if (!scriptModal) return;
+
+      // default prompt = post title if empty
+      const title = String(readAnyText(postTitleEl) || "").trim();
+      if (scriptPromptEl && !String(scriptPromptEl.value || "").trim()) {
+        scriptPromptEl.value = title;
+      }
+
+      if (scriptGenMsg) scriptGenMsg.textContent = "—";
+      scriptModal.classList.add("open");
+
+      // focus (nice UX)
+      setTimeout(() => {
+        try {
+          scriptPromptEl?.focus?.();
+          scriptPromptEl?.setSelectionRange?.(scriptPromptEl.value.length, scriptPromptEl.value.length);
+        } catch {}
+      }, 50);
+    }
+
+    function closeScriptModal() {
+      if (!scriptModal) return;
+      scriptModal.classList.remove("open");
+    }
+
+    if (genScriptBtn) genScriptBtn.addEventListener("click", openScriptModal);
+    if (scriptClose) scriptClose.addEventListener("click", closeScriptModal);
+    if (scriptCancel) scriptCancel.addEventListener("click", closeScriptModal);
+
+    if (scriptModal) {
+      scriptModal.addEventListener("click", (e) => {
+        if (e.target === scriptModal) closeScriptModal();
+      });
+    }
+
+    // enter-to-generate (Ctrl/Cmd+Enter)
+    if (scriptPromptEl) {
+      scriptPromptEl.addEventListener("keydown", (e) => {
+        const isMac = /Mac|iPhone|iPad|iPod/i.test(navigator.platform);
+        const mod = isMac ? e.metaKey : e.ctrlKey;
+        if (mod && e.key === "Enter") {
+          e.preventDefault();
+          scriptGenerate?.click?.();
+        }
+      });
+    }
+
+    async function generateScriptFromPrompt() {
+      const topic = String(readAnyText(scriptPromptEl) || "").trim();
+      const tone = String(readAnyText(toneHidden) || "funny").trim();
+      const seconds = Number(readAnyText(lenHidden) || 45) || 45;
+
+      if (!topic) throw new Error("Please enter a prompt.");
+
+      if (scriptGenMsg) scriptGenMsg.textContent = "Generating…";
+      if (scriptGenerate) scriptGenerate.disabled = true;
+
+      const res = await fetch(SCRIPT_ENDPOINT, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ topic, tone, seconds }),
+      });
+
+      const raw = await res.text();
+      let j = {};
+      try {
+        j = JSON.parse(raw);
+      } catch {
+        j = { raw };
+      }
+
+      if (!res.ok || j?.ok === false) {
+        throw new Error(j?.error || j?.message || j?.raw || "HTTP " + res.status);
+      }
+
+      const out = String(j?.script || "").trim();
+      if (!out) throw new Error("No script returned.");
+
+      if (scriptEl) scriptEl.value = out;
+
+      // keep preview synced if you ever use script text later
+      updateCard();
+
+      if (scriptGenMsg) scriptGenMsg.textContent = "Done ✓";
+      closeScriptModal();
+    }
+
+    if (scriptGenerate) {
+      scriptGenerate.addEventListener("click", async () => {
+        try {
+          await generateScriptFromPrompt();
+        } catch (e) {
+          console.error("[rv] script gen failed =>", e);
+          if (scriptGenMsg) scriptGenMsg.textContent = "Error: " + (e?.message || e);
+          alert("Script generation failed: " + (e?.message || e));
+        } finally {
+          if (scriptGenerate) scriptGenerate.disabled = false;
+        }
+      });
+    }
 
     // Upload PFP button click
     if (pfpUploadBtn && pfpFileEl) pfpUploadBtn.addEventListener("click", () => pfpFileEl.click());
@@ -963,7 +1107,6 @@
       });
     }
 
-    // ✅ UPDATED markup: buttons row under text
     function renderVoiceGrid(q) {
       if (!voiceGrid) return;
 
@@ -1012,7 +1155,7 @@
       if (voiceModal) voiceModal.classList.add("open");
       setActiveTab(voiceTarget);
       renderVoiceGrid("");
-      warmPreviews(); // ✅ preload when modal opens
+      warmPreviews();
     }
 
     function closeVoiceModal() {
@@ -1021,10 +1164,8 @@
       renderVoiceGrid(String(voiceSearch?.value || "").trim());
     }
 
-    // One button opens modal
     if (voicesBtn) voicesBtn.addEventListener("click", openVoiceModal);
 
-    // Tabs
     if (voiceTabs) {
       voiceTabs.addEventListener("click", (e) => {
         const b = e.target.closest("button[data-tab]");
@@ -1033,14 +1174,12 @@
       });
     }
 
-    // Close wiring
     if (voiceClose) voiceClose.addEventListener("click", closeVoiceModal);
     if (voiceModal)
       voiceModal.addEventListener("click", (e) => {
         if (e.target === voiceModal) closeVoiceModal();
       });
 
-    // Search / Clear
     if (voiceClear)
       voiceClear.addEventListener("click", () => {
         if (voiceSearch) voiceSearch.value = "";
@@ -1048,7 +1187,6 @@
       });
     if (voiceSearch) voiceSearch.addEventListener("input", () => renderVoiceGrid(voiceSearch.value));
 
-    // Grid click actions
     if (voiceGrid)
       voiceGrid.addEventListener("click", (e) => {
         const btn = e.target.closest("button[data-act]");
@@ -1063,7 +1201,6 @@
         if (act === "use") setSelectedVoice(voiceTarget, voice);
       });
 
-    // Init labels (safe even if hidden)
     (function initVoiceLabels() {
       const pv = findVoiceById(postVoiceEl?.value);
       const sv = findVoiceById(scriptVoiceEl?.value);
@@ -1192,7 +1329,7 @@
     showDemo();
     updateCard();
 
-    // ✅ preload right away too (helps if modal isn't opened yet)
+    // ✅ preload right away too
     warmPreviews();
   }
 
