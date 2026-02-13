@@ -402,11 +402,6 @@ async function buildModifications(body) {
     m["Video.fit"] = "cover";
   }
 
-  /**
-   * ✅ IMPORTANT:
-   * Your Creatomate template audio layers (post_voice, script_voice) MUST be "Audio (URL)" layers,
-   * NOT TTS/ElevenLabs provider layers.
-   */
   const postVoiceId = normalizeElevenVoiceId(body.postVoice) || DEFAULT_ELEVEN_VOICE_ID;
   const scriptVoiceId = normalizeElevenVoiceId(body.scriptVoice) || DEFAULT_ELEVEN_VOICE_ID;
   const scriptText = safeStr(body.script, "");
@@ -428,28 +423,26 @@ async function buildModifications(body) {
   }
 
   // ==========================================================
-  // ✅ timing tweaks + ✅ trim trailing silence + ✅ hard-stop video
+  // ✅ timing tweaks (SAFE VERSION)
+  // - DO NOT clamp audio durations
+  // - ONLY shorten the background layer so the render ends earlier
   // ==========================================================
   function estimateSpeechSeconds(text) {
     const words = String(text || "")
       .trim()
       .split(/\s+/)
       .filter(Boolean).length;
-
     const WPS = 2.9;
     return Math.max(0.55, words / WPS);
   }
 
   const postSecsRaw = estimateSpeechSeconds(postText);
 
-  // Visual: end card earlier
+  // Visual: end card earlier (your original)
   const CARD_EARLY_CUT = 1.1;
 
-  // Audio: start script before title ends (overlap)
+  // Audio: overlap to reduce dead air between title and script
   const SCRIPT_OVERLAP = 0.75;
-
-  // ✅ Trailing silence trim (tune this: 1.6–2.6 usually)
-  const TRAILING_SILENCE_TRIM = 2.0;
 
   const cardSecs = Math.max(0.35, postSecsRaw - CARD_EARLY_CUT);
   const scriptStart = Math.max(0, postSecsRaw - SCRIPT_OVERLAP);
@@ -460,30 +453,30 @@ async function buildModifications(body) {
   m["post_card_dark.time"] = 0;
   m["post_card_dark.duration"] = cardSecs;
 
-  // audio timing
+  // audio timing (no duration clamping)
   m["post_voice.time"] = 0;
   if (scriptText) m["script_voice.time"] = scriptStart;
 
-  // ✅ NEW: clamp audio durations to cut off ElevenLabs silent tails
-  // (does NOT require knowing mp3 duration)
-  const postDurTrimmed = Math.max(0.4, postSecsRaw - TRAILING_SILENCE_TRIM);
-  m["post_voice.duration"] = postDurTrimmed;
+  // ✅ END TRIM: reduce the total timeline by ~2s
+  // This is the only “silence fix” here (won’t cut audio because we’re not forcing audio durations)
+  const END_TRIM_SECONDS = 1.5; // change this to 1.2 / 1.6 / 2.4 to taste
+  const TAIL_PAD = 0.12;
 
   const scriptSecsRaw = scriptText ? estimateSpeechSeconds(scriptText) : 0;
-  const scriptDurTrimmed = scriptText ? Math.max(0.4, scriptSecsRaw - TRAILING_SILENCE_TRIM) : 0;
-  if (scriptText) m["script_voice.duration"] = scriptDurTrimmed;
+  const estimatedEnd = scriptText
+    ? (scriptStart + scriptSecsRaw + TAIL_PAD)
+    : (postSecsRaw + TAIL_PAD);
 
-  // ✅ hard-stop the background/video timeline to match the *trimmed* audio end
-  const TAIL_PAD = 0.12;
-  const totalTimelineSecs = scriptText
-    ? (scriptStart + scriptDurTrimmed + TAIL_PAD)
-    : (postDurTrimmed + TAIL_PAD);
+  // Don’t let it go below a sane minimum
+  const totalTimelineSecs = Math.max(0.9, estimatedEnd - END_TRIM_SECONDS);
 
+  // Trim the background layer so it doesn't keep the timeline alive
   m["Video.time"] = 0;
   m["Video.duration"] = totalTimelineSecs;
 
   return m;
 }
+
 
 
 module.exports = async function handler(req, res) {
