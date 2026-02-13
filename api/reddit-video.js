@@ -367,7 +367,7 @@ async function buildModifications(body) {
   setMulti(m, ["comment_count_dark.y", "post_card_dark.comment_count_dark.y"], pct(commentY));
 
   setMulti(m, ["share_light.y", "post_card_light.share_light.y"], pct(shareTextY));
-  setMulti(m, ["share_dark.y", "post_card_dark.share_dark.y"], pct(shareTextY));
+  setMulti(m, ["share_dark.y", "post_card_dark.share_light.y"], pct(shareTextY));
 
   setMulti(m, ["icon_like.y", "post_card_light.icon_like.y", "post_card_dark.icon_like.y"], pct(iconLikeY));
   setMulti(m, ["icon_comment.y", "post_card_light.icon_comment.y", "post_card_dark.icon_comment.y"], pct(iconCommentY));
@@ -407,7 +407,6 @@ async function buildModifications(body) {
    * Your Creatomate template audio layers (post_voice, script_voice) MUST be "Audio (URL)" layers,
    * NOT TTS/ElevenLabs provider layers.
    */
-
   const postVoiceId = normalizeElevenVoiceId(body.postVoice) || DEFAULT_ELEVEN_VOICE_ID;
   const scriptVoiceId = normalizeElevenVoiceId(body.scriptVoice) || DEFAULT_ELEVEN_VOICE_ID;
   const scriptText = safeStr(body.script, "");
@@ -429,7 +428,7 @@ async function buildModifications(body) {
   }
 
   // ==========================================================
-  // ✅ timing tweaks
+  // ✅ timing tweaks + ✅ trim trailing silence + ✅ hard-stop video
   // ==========================================================
   function estimateSpeechSeconds(text) {
     const words = String(text || "")
@@ -437,7 +436,6 @@ async function buildModifications(body) {
       .split(/\s+/)
       .filter(Boolean).length;
 
-    // keep your WPS unchanged
     const WPS = 2.9;
     return Math.max(0.55, words / WPS);
   }
@@ -449,6 +447,9 @@ async function buildModifications(body) {
 
   // Audio: start script before title ends (overlap)
   const SCRIPT_OVERLAP = 0.75;
+
+  // ✅ Trailing silence trim (tune this: 1.6–2.6 usually)
+  const TRAILING_SILENCE_TRIM = 2.0;
 
   const cardSecs = Math.max(0.35, postSecsRaw - CARD_EARLY_CUT);
   const scriptStart = Math.max(0, postSecsRaw - SCRIPT_OVERLAP);
@@ -463,30 +464,27 @@ async function buildModifications(body) {
   m["post_voice.time"] = 0;
   if (scriptText) m["script_voice.time"] = scriptStart;
 
-  // ==========================================================
-  // ✅ NEW: hard-stop video length to match SCRIPT VOICE end
-  // This trims the background video so the render ends when the script voice ends.
-  // ==========================================================
-  const TAIL_PAD = 0.12; // tiny padding so you don't cut the last syllable visually
+  // ✅ NEW: clamp audio durations to cut off ElevenLabs silent tails
+  // (does NOT require knowing mp3 duration)
+  const postDurTrimmed = Math.max(0.4, postSecsRaw - TRAILING_SILENCE_TRIM);
+  m["post_voice.duration"] = postDurTrimmed;
+
   const scriptSecsRaw = scriptText ? estimateSpeechSeconds(scriptText) : 0;
+  const scriptDurTrimmed = scriptText ? Math.max(0.4, scriptSecsRaw - TRAILING_SILENCE_TRIM) : 0;
+  if (scriptText) m["script_voice.duration"] = scriptDurTrimmed;
 
-  // End time = (script start) + (script duration) + padding
-  // If no script, fall back to post voice length.
+  // ✅ hard-stop the background/video timeline to match the *trimmed* audio end
+  const TAIL_PAD = 0.12;
   const totalTimelineSecs = scriptText
-    ? (scriptStart + scriptSecsRaw + TAIL_PAD)
-    : (postSecsRaw + TAIL_PAD);
+    ? (scriptStart + scriptDurTrimmed + TAIL_PAD)
+    : (postDurTrimmed + TAIL_PAD);
 
-  // Trim the background layer so it doesn't keep the timeline alive
   m["Video.time"] = 0;
   m["Video.duration"] = totalTimelineSecs;
 
-  // (Optional but recommended) ensure post/script audio don't extend the timeline accidentally
-  // If your audio files have long trailing silence, you can also clamp their duration.
-  // m["post_voice.duration"] = postSecsRaw + 0.2;
-  // if (scriptText) m["script_voice.duration"] = scriptSecsRaw + 0.25;
-
   return m;
-} // ✅ IMPORTANT: closes buildModifications
+}
+
 
 module.exports = async function handler(req, res) {
   setCors(req, res);
