@@ -449,7 +449,7 @@ async function buildModifications(body) {
   const SCRIPT_OVERLAP = 0.75;
 
   // ✅ Trailing silence trim (tune this: 1.6–2.6 usually)
-  const TRAILING_SILENCE_TRIM = 1.6;
+  const TRAILING_SILENCE_TRIM = 2.0;
 
   const cardSecs = Math.max(0.35, postSecsRaw - CARD_EARLY_CUT);
   const scriptStart = Math.max(0, postSecsRaw - SCRIPT_OVERLAP);
