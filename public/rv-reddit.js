@@ -119,14 +119,12 @@
     const toneHidden = document.getElementById("rvTone");
     const lenHidden = document.getElementById("rvLen");
 
-    // ✅ Script generator modal (NEW)
-    const genScriptBtn = document.getElementById("rvGenScriptBtn");
+    // ✅ Script generator modal (UPDATED wiring + main button "Generating...")
+    const genScriptBtn = document.getElementById("rvGenScriptBtn"); // main page button
     const scriptModal = document.getElementById("rvScriptModal");
     const scriptClose = document.getElementById("rvScriptClose");
-    const scriptCancel = document.getElementById("rvScriptCancel");
     const scriptGenerate = document.getElementById("rvScriptGenerate");
     const scriptPromptEl = document.getElementById("rvScriptPrompt");
-    const scriptGenMsg = document.getElementById("rvScriptGenMsg");
 
     const toneSegM = document.getElementById("rvToneSegModal");
     const toneTrackM = document.getElementById("rvToneTrackModal");
@@ -696,7 +694,10 @@
     setupSeg(modeSeg, modeTrack, modeHidden, "mode");
 
     // ==========================
-    // ✅ SCRIPT GENERATOR MODAL (NEW)
+    // ✅ SCRIPT GENERATOR MODAL (UPDATED)
+    // - clicking modal Generate closes modal immediately
+    // - main page button shows "Generating..." + disabled while request runs
+    // - no dependency on cancel button / bottom message element
     // ==========================
     function setupModalSeg(segEl, trackEl, hiddenEl, dataKey) {
       if (!segEl) return;
@@ -735,10 +736,8 @@
         scriptPromptEl.value = title;
       }
 
-      if (scriptGenMsg) scriptGenMsg.textContent = "—";
       scriptModal.classList.add("open");
 
-      // focus (nice UX)
       setTimeout(() => {
         try {
           scriptPromptEl?.focus?.();
@@ -752,9 +751,23 @@
       scriptModal.classList.remove("open");
     }
 
+    function setMainScriptBtnLoading(isLoading) {
+      if (!genScriptBtn) return;
+      if (isLoading) {
+        genScriptBtn.dataset._oldHtml = genScriptBtn.innerHTML;
+        genScriptBtn.disabled = true;
+        genScriptBtn.style.opacity = ".85";
+        genScriptBtn.textContent = "Generating...";
+      } else {
+        genScriptBtn.disabled = false;
+        genScriptBtn.style.opacity = "1";
+        genScriptBtn.innerHTML = genScriptBtn.dataset._oldHtml || "✨ Generate script";
+        delete genScriptBtn.dataset._oldHtml;
+      }
+    }
+
     if (genScriptBtn) genScriptBtn.addEventListener("click", openScriptModal);
     if (scriptClose) scriptClose.addEventListener("click", closeScriptModal);
-    if (scriptCancel) scriptCancel.addEventListener("click", closeScriptModal);
 
     if (scriptModal) {
       scriptModal.addEventListener("click", (e) => {
@@ -781,7 +794,11 @@
 
       if (!topic) throw new Error("Please enter a prompt.");
 
-      if (scriptGenMsg) scriptGenMsg.textContent = "Generating…";
+      // ✅ close modal immediately + set main button loading
+      closeScriptModal();
+      setMainScriptBtnLoading(true);
+
+      // ✅ lock modal button too (in case it still exists in DOM)
       if (scriptGenerate) scriptGenerate.disabled = true;
 
       const res = await fetch(SCRIPT_ENDPOINT, {
@@ -806,12 +823,7 @@
       if (!out) throw new Error("No script returned.");
 
       if (scriptEl) scriptEl.value = out;
-
-      // keep preview synced if you ever use script text later
       updateCard();
-
-      if (scriptGenMsg) scriptGenMsg.textContent = "Done ✓";
-      closeScriptModal();
     }
 
     if (scriptGenerate) {
@@ -820,10 +832,13 @@
           await generateScriptFromPrompt();
         } catch (e) {
           console.error("[rv] script gen failed =>", e);
-          if (scriptGenMsg) scriptGenMsg.textContent = "Error: " + (e?.message || e);
           alert("Script generation failed: " + (e?.message || e));
+
+          // optional: re-open so they can edit quickly
+          openScriptModal();
         } finally {
           if (scriptGenerate) scriptGenerate.disabled = false;
+          setMainScriptBtnLoading(false);
         }
       });
     }
@@ -969,7 +984,6 @@
     let previewAudio = null;
     let previewingVoiceId = "";
 
-    // ✅ cache audio elements so playback starts immediately
     const PREVIEW_AUDIO_CACHE = new Map(); // voiceId -> HTMLAudioElement
 
     function previewUrlFor(voiceId) {
@@ -996,17 +1010,14 @@
     function warmPreviews() {
       if (!PREVIEW_BASE) return;
 
-      // preload a small set so it feels instant without nuking bandwidth
       VOICES.slice(0, 10).forEach((v) => preloadPreview(v.id));
 
-      // also preload currently selected voices
       const curPost = String(postVoiceEl?.value || "").trim();
       const curScr = String(scriptVoiceEl?.value || "").trim();
       if (curPost && curPost !== "default") preloadPreview(curPost);
       if (curScr && curScr !== "default") preloadPreview(curScr);
     }
 
-    // ✅ unlock audio on first interaction (needed on iOS/Safari sometimes)
     (function installAudioUnlock() {
       const handler = () => {
         try {
@@ -1052,9 +1063,7 @@
       if (el) el.value = voice?.id || "default";
       if (labelEl) labelEl.textContent = voice?.name || "Default";
 
-      // preload the chosen voice so preview is instant next time
       if (voice?.id) preloadPreview(voice.id);
-
       renderVoiceGrid(String(voiceSearch?.value || "").trim());
     }
 
@@ -1080,7 +1089,6 @@
       previewingVoiceId = voiceId;
       renderVoiceGrid(String(voiceSearch?.value || "").trim());
 
-      // ✅ Use cached audio (instant)
       preloadPreview(voiceId);
       const a = PREVIEW_AUDIO_CACHE.get(voiceId);
       if (!a) {
