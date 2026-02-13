@@ -459,7 +459,7 @@ async function buildModifications(body) {
 
   // ✅ END TRIM: reduce the total timeline by ~2s
   // This is the only “silence fix” here (won’t cut audio because we’re not forcing audio durations)
-  const END_TRIM_SECONDS = 1.5; // change this to 1.2 / 1.6 / 2.4 to taste
+  const END_TRIM_SECONDS = 2.4; // change this to 1.2 / 1.6 / 2.4 to taste
   const TAIL_PAD = 0.12;
 
   const scriptSecsRaw = scriptText ? estimateSpeechSeconds(scriptText) : 0;
