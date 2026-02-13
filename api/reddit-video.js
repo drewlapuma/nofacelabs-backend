@@ -428,10 +428,8 @@ async function buildModifications(body) {
     m["script_voice.source"] = scriptUrl;
   }
 
-    // ==========================================================
-  // ✅ NEW: timing tweaks (DROP-IN CHANGE)
-  // - card disappears earlier
-  // - script voice starts EARLIER (overlap) to remove dead air
+  // ==========================================================
+  // ✅ timing tweaks
   // ==========================================================
   function estimateSpeechSeconds(text) {
     const words = String(text || "")
@@ -450,7 +448,6 @@ async function buildModifications(body) {
   const CARD_EARLY_CUT = 1.1;
 
   // Audio: start script before title ends (overlap)
-  // This fights trailing silence baked into the title mp3 (very common with ElevenLabs)
   const SCRIPT_OVERLAP = 0.75;
 
   const cardSecs = Math.max(0.35, postSecsRaw - CARD_EARLY_CUT);
@@ -466,10 +463,30 @@ async function buildModifications(body) {
   m["post_voice.time"] = 0;
   if (scriptText) m["script_voice.time"] = scriptStart;
 
+  // ==========================================================
+  // ✅ NEW: hard-stop video length to match SCRIPT VOICE end
+  // This trims the background video so the render ends when the script voice ends.
+  // ==========================================================
+  const TAIL_PAD = 0.12; // tiny padding so you don't cut the last syllable visually
+  const scriptSecsRaw = scriptText ? estimateSpeechSeconds(scriptText) : 0;
+
+  // End time = (script start) + (script duration) + padding
+  // If no script, fall back to post voice length.
+  const totalTimelineSecs = scriptText
+    ? (scriptStart + scriptSecsRaw + TAIL_PAD)
+    : (postSecsRaw + TAIL_PAD);
+
+  // Trim the background layer so it doesn't keep the timeline alive
+  m["Video.time"] = 0;
+  m["Video.duration"] = totalTimelineSecs;
+
+  // (Optional but recommended) ensure post/script audio don't extend the timeline accidentally
+  // If your audio files have long trailing silence, you can also clamp their duration.
+  // m["post_voice.duration"] = postSecsRaw + 0.2;
+  // if (scriptText) m["script_voice.duration"] = scriptSecsRaw + 0.25;
+
   return m;
 } // ✅ IMPORTANT: closes buildModifications
-
-
 
 module.exports = async function handler(req, res) {
   setCors(req, res);
