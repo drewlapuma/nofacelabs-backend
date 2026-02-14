@@ -226,14 +226,22 @@ function normalizeElevenVoiceId(v) {
 // buildModifications(body) — FULL UPDATED (keeps your current flow, fixes captions style bleed)
 // NOTE: Paste this whole function in place of your existing buildModifications.
 async function buildModifications(body) {
-  // -----------------------------
-  // MP3 duration (buffer) helper
-  // -----------------------------
+  // ==========================================================
+  // ✅ knobs you’ll actually tweak
+  // ==========================================================
+  const GAP_BETWEEN_TITLE_AND_SCRIPT = 0.65; // ✅ make the gap longer/shorter
+  const CARD_EXTRA_AFTER_TITLE = 0.25;       // ✅ card lasts a bit longer than title voice
+  const END_PAD = 0.12;                      // tiny padding so last word doesn’t feel clipped
+
+  // ==========================================================
+  // MP3 duration helper (buffer -> seconds)
+  // ==========================================================
   function mp3DurationSeconds(buf) {
     try {
       const b = Buffer.isBuffer(buf) ? buf : Buffer.from(buf);
       let offset = 0;
 
+      // ID3v2 skip
       if (b.length >= 10 && b.toString("utf8", 0, 3) === "ID3") {
         const size =
           ((b[6] & 0x7f) << 21) |
@@ -244,15 +252,21 @@ async function buildModifications(body) {
       }
 
       const BITRATES = {
-        3: { 3: [0,32,64,96,128,160,192,224,256,288,320,352,384,416,448],
-             2: [0,32,48,56,64,80,96,112,128,160,192,224,256,320,384],
-             1: [0,32,40,48,56,64,80,96,112,128,160,192,224,256,320] },
-        2: { 3: [0,32,48,56,64,80,96,112,128,144,160,176,192,224,256],
-             2: [0,8,16,24,32,40,48,56,64,80,96,112,128,144,160],
-             1: [0,8,16,24,32,40,48,56,64,80,96,112,128,144,160] },
-        0: { 3: [0,32,48,56,64,80,96,112,128,144,160,176,192,224,256],
-             2: [0,8,16,24,32,40,48,56,64,80,96,112,128,144,160],
-             1: [0,8,16,24,32,40,48,56,64,80,96,112,128,144,160] }
+        3: { // MPEG1
+          3: [0,32,64,96,128,160,192,224,256,288,320,352,384,416,448],
+          2: [0,32,48,56,64,80,96,112,128,160,192,224,256,320,384],
+          1: [0,32,40,48,56,64,80,96,112,128,160,192,224,256,320],
+        },
+        2: { // MPEG2
+          3: [0,32,48,56,64,80,96,112,128,144,160,176,192,224,256],
+          2: [0,8,16,24,32,40,48,56,64,80,96,112,128,144,160],
+          1: [0,8,16,24,32,40,48,56,64,80,96,112,128,144,160],
+        },
+        0: { // MPEG2.5
+          3: [0,32,48,56,64,80,96,112,128,144,160,176,192,224,256],
+          2: [0,8,16,24,32,40,48,56,64,80,96,112,128,144,160],
+          1: [0,8,16,24,32,40,48,56,64,80,96,112,128,144,160],
+        },
       };
 
       const SAMPLERATES = {
@@ -271,8 +285,8 @@ async function buildModifications(body) {
           continue;
         }
 
-        const verBits = (b[offset + 1] >> 3) & 0x03;
-        const layerBits = (b[offset + 1] >> 1) & 0x03;
+        const verBits = (b[offset + 1] >> 3) & 0x03;   // 00=2.5,10=2,11=1
+        const layerBits = (b[offset + 1] >> 1) & 0x03; // 01=III,10=II,11=I
         if (verBits === 1 || layerBits === 0) { offset += 1; continue; }
 
         const versionIndex = verBits === 3 ? 3 : (verBits === 2 ? 2 : 0);
@@ -291,7 +305,6 @@ async function buildModifications(body) {
         const bitrateKbps = brTable[bitrateIdx];
         const sr = srTable[srIdx];
         if (!bitrateKbps || !sr) { offset += 1; continue; }
-
         sampleRate = sr;
 
         let samplesPerFrame;
@@ -320,9 +333,13 @@ async function buildModifications(body) {
     }
   }
 
-  // -----------------------------
-  // your existing setup
-  // -----------------------------
+  // ==========================================================
+  // helpers you already have in your file
+  // - safeStr, normalizeMode, clamp, pct, setMulti, ensurePublicHttpUrl
+  // - elevenlabsTtsToMp3Buffer, uploadMp3ToSupabasePublic
+  // - normalizeElevenVoiceId, DEFAULT_ELEVEN_VOICE_ID, randId
+  // ==========================================================
+
   const mode = normalizeMode(body.mode);
   const showLight = mode === "light";
   const showDark = mode === "dark";
@@ -336,7 +353,7 @@ async function buildModifications(body) {
   const pfpUrl = ensurePublicHttpUrl(body.pfpUrl, "pfpUrl");
   const bgUrl = ensurePublicHttpUrl(body.backgroundVideoUrl, "backgroundVideoUrl");
 
-  // --- your existing layout math unchanged ---
+  // --- your existing layout math (unchanged) ---
   const BG_WIDTH = 75;
   const BG_CENTER_X = 50;
   const cardRight = BG_CENTER_X + BG_WIDTH / 2;
@@ -503,69 +520,61 @@ async function buildModifications(body) {
     m["Video.fit"] = "cover";
   }
 
+  // ==========================================================
+  // ✅ AUDIO: use REAL mp3 durations (this is what removes tail silence)
+  // ==========================================================
   const postVoiceId = normalizeElevenVoiceId(body.postVoice) || DEFAULT_ELEVEN_VOICE_ID;
   const scriptVoiceId = normalizeElevenVoiceId(body.scriptVoice) || DEFAULT_ELEVEN_VOICE_ID;
   const scriptText = safeStr(body.script, "");
 
-  // -----------------------------
-  // timing (use REAL audio lengths)
-  // -----------------------------
-  const CARD_EARLY_CUT = 0.75;
-  const SCRIPT_OVERLAP = 0.2;
-
-  const DUR_CUSHION = 0.35;
-  const MIN_AUDIO = 0.6;
-
-  let postVoiceDur = 0;
-
-  // Post voice
+  // Post mp3
+  let postDur = 0;
   {
     const postMp3 = await elevenlabsTtsToMp3Buffer(postText, postVoiceId);
     const postPath = `reddit/${Date.now()}_${randId()}_post.mp3`;
     const postUrl = await uploadMp3ToSupabasePublic(postMp3, postPath);
     m["post_voice.source"] = postUrl;
 
-    const measured = mp3DurationSeconds(postMp3) || 0;
-    postVoiceDur = Math.max(MIN_AUDIO, measured + DUR_CUSHION);
-
+    // ✅ no cushion, no trimming — use the real duration
+    postDur = mp3DurationSeconds(postMp3) || 0;
+    postDur = Math.max(0.6, postDur);
     m["post_voice.time"] = 0;
-    m["post_voice.duration"] = postVoiceDur;
+    m["post_voice.duration"] = postDur;
   }
 
-  const cardSecs = Math.max(0.35, postVoiceDur - CARD_EARLY_CUT);
-  const scriptStart = Math.max(0, postVoiceDur - SCRIPT_OVERLAP);
-
-  m["post_card_light.time"] = 0;
-  m["post_card_light.duration"] = cardSecs;
-  m["post_card_dark.time"] = 0;
-  m["post_card_dark.duration"] = cardSecs;
-
-  // Script voice
-  let scriptVoiceDur = 0;
+  // Script mp3
+  let scriptDur = 0;
+  let scriptStart = postDur + GAP_BETWEEN_TITLE_AND_SCRIPT; // ✅ gap control
   if (scriptText) {
     const scriptMp3 = await elevenlabsTtsToMp3Buffer(scriptText, scriptVoiceId);
     const scriptPath = `reddit/${Date.now()}_${randId()}_script.mp3`;
     const scriptUrl = await uploadMp3ToSupabasePublic(scriptMp3, scriptPath);
     m["script_voice.source"] = scriptUrl;
 
-    const measured = mp3DurationSeconds(scriptMp3) || 0;
-    scriptVoiceDur = Math.max(MIN_AUDIO, measured + DUR_CUSHION);
+    scriptDur = mp3DurationSeconds(scriptMp3) || 0;
+    scriptDur = Math.max(0.6, scriptDur);
 
     m["script_voice.time"] = scriptStart;
-    m["script_voice.duration"] = scriptVoiceDur;
+    m["script_voice.duration"] = scriptDur;
   }
 
-  const TAIL_PAD = 0.12;
-  const audioEnd = scriptText ? (scriptStart + scriptVoiceDur) : postVoiceDur;
-  const totalTimelineSecs = Math.max(0.9, audioEnd + TAIL_PAD);
+  // Card duration (last a bit longer)
+  const cardSecs = Math.max(0.35, postDur + CARD_EXTRA_AFTER_TITLE);
+  m["post_card_light.time"] = 0;
+  m["post_card_light.duration"] = cardSecs;
+  m["post_card_dark.time"] = 0;
+  m["post_card_dark.duration"] = cardSecs;
+
+  // Timeline end = exact audio end (+ tiny pad)
+  const audioEnd = scriptText ? (scriptStart + scriptDur) : postDur;
+  const totalTimelineSecs = Math.max(0.9, audioEnd + END_PAD);
 
   m["Video.time"] = 0;
   m["Video.duration"] = totalTimelineSecs;
 
   // ==========================================================
-  // ✅ CAPTIONS (Subtitles_* layers) — SAFE VERSION
-  // IMPORTANT: DO NOT set time/duration/opacity on subtitle layers.
-  // Only hide/show + set text + optional styling.
+  // ✅ CAPTIONS: use Creatomate auto-subtitles correctly
+  // (key fix: transcript_source must point to your audio layer id)
   // ==========================================================
   const captionsEnabled =
     body.captionsEnabled === true ||
@@ -582,8 +591,6 @@ async function buildModifications(body) {
           try { return JSON.parse(String(body.captionSettings || "")); }
           catch { return null; }
         })();
-
-  const captionsText = safeStr(body.script, "");
 
   const STYLE_TO_LAYER = {
     sentence: "Subtitles_Sentence",
@@ -619,25 +626,42 @@ async function buildModifications(body) {
     if (s.strokeColor) m[`${layerName}.stroke_color`] = String(s.strokeColor);
     if (s.strokeWidth != null) m[`${layerName}.stroke_width`] = Number(s.strokeWidth);
 
+    if (s.backgroundColor) m[`${layerName}.background_color`] = String(s.backgroundColor);
+    if (s.shadowColor) m[`${layerName}.shadow_color`] = String(s.shadowColor);
+
     if (s.textTransform) m[`${layerName}.text_transform`] = String(s.textTransform);
   }
 
-  // hide all
+  // Hide all by default
   for (const layer of ALL_SUBTITLE_LAYERS) {
     m[`${layer}.hidden`] = true;
+    m[`${layer}.opacity`] = "0%";
   }
 
-  // show chosen (no time/duration/opacity overrides)
-  if (captionsEnabled && captionsText && scriptText) {
+  if (captionsEnabled && scriptText) {
     const chosenLayer = STYLE_TO_LAYER[style] || STYLE_TO_LAYER.sentence;
+
+    // ✅ SHOW chosen layer
     m[`${chosenLayer}.hidden`] = false;
-    m[`${chosenLayer}.text`] = captionsText;
+    m[`${chosenLayer}.opacity`] = "100%";
+
+    // ✅ IMPORTANT: tell Creatomate what to transcribe
+    // (your audio element id is literally "script_voice")
+    m[`${chosenLayer}.transcript_source`] = "script_voice";
+
+    // ✅ Only run captions during script window
+    m[`${chosenLayer}.time`] = scriptStart;
+    m[`${chosenLayer}.duration`] = Math.max(0.1, totalTimelineSecs - scriptStart);
+
+    // Optional: clear any placeholder text so it doesn’t interfere
+    m[`${chosenLayer}.text`] = "";
 
     applyCaptionSettings(chosenLayer, captionSettings);
   }
 
   return m;
 }
+
 
 
 
