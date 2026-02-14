@@ -394,6 +394,7 @@
           gap:14px;
           min-height: 148px;
           transition:border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease;
+          position: relative; /* ✅ so the options button can sit in the top right */
         }
         .nf-voiceCard:hover{
           border-color: rgba(90,193,255,.45);
@@ -457,6 +458,37 @@
     const PATH_LIKE = `M 50 100 L 7.5578 50.9275 C 2.6844 45.2929 0 37.8006 0 29.833 C 0 21.8641 2.6844 14.3731 7.5578 8.7384 C 12.4311 3.1038 18.91 0 25.8022 0 C 32.6944 0 39.1733 3.1038 44.0467 8.7384 L 50 15.6218 L 55.9533 8.7384 C 60.8267 3.1038 67.3067 0 74.1978 0 C 81.09 0 87.5689 3.1038 92.4422 8.7384 C 97.3167 14.3731 100 21.8641 100 29.833 C 100 37.8019 97.3167 45.2929 92.4422 50.9275 L 50 100 Z M 25.8022 5.1387 C 20.0978 5.1387 14.7344 7.7081 10.7 12.3715 C 6.6656 17.0349 4.4444 23.2374 4.4444 29.833 C 4.4444 36.4286 6.6667 42.6298 10.7 47.2945 L 50 92.7338 L 89.3 47.2945 C 93.3344 42.6298 95.5556 36.4286 95.5556 29.833 C 95.5556 23.2374 93.3344 17.0362 89.3 12.3715 C 85.2656 7.7081 79.9033 5.1387 74.1978 5.1387 C 68.4933 5.1387 63.13 7.7081 59.0956 12.3715 L 50 22.8893 L 40.9033 12.3715 C 36.87 7.7081 31.5067 5.1387 25.8022 5.1387 Z`;
     const PATH_COMMENT = `M 94.2357 72.6204 C 97.8532 65.5833 99.7431 57.786 99.7491 49.8735 C 99.7491 22.3751 77.3736 0 49.8745 0 C 22.3755 0 0 22.3751 0 49.8735 C 0 77.372 22.3755 99.7471 49.8745 99.7471 C 57.7729 99.7471 65.5986 97.8473 72.6264 94.2383 L 94.1178 99.611 C 95.662 100 97.2969 99.5469 98.4206 98.4186 C 99.5473 97.2921 100 95.6569 99.6131 94.1114 L 94.2357 72.6204 Z M 85.018 73.1191 L 88.9807 88.9789 L 73.1206 85.0117 C 71.9994 84.7349 70.8149 84.8937 69.8062 85.456 C 63.7193 88.8753 56.8561 90.6738 49.8745 90.6792 C 27.3721 90.6792 9.0681 72.371 9.0681 49.8735 C 9.0681 27.376 27.3721 9.0679 49.8745 9.0679 C 72.377 9.0679 90.681 27.376 90.681 49.8735 C 90.6748 56.8528 88.8779 63.7138 85.4623 69.8003 C 84.8939 70.8086 84.7348 71.9968 85.018 73.1191 Z`;
     const PATH_SHARE = `M 33.55 28.6214 L 45 17.1329 L 45 65.035 C 45 67.7918 47.2404 70.03 50 70.03 C 52.7596 70.03 55 67.7918 55 65.035 L 55 17.1329 L 66.45 28.6214 C 67.3888 29.5671 68.6668 30.099 70 30.099 C 71.3332 30.099 72.6112 29.5671 73.55 28.6214 C 74.4966 27.6835 75.029 26.4068 75.029 25.075 C 75.029 23.7431 74.4966 22.4664 73.55 21.5285 L 53.55 1.5485 C 53.55 1.5485 52.5138 0.7373 51.9 0.4996 C 50.6827 0 49.3173 0 48.1 0.4996 C 47.4862 0.7373 46.45 1.5485 46.45 1.5485 L 26.45 21.5285 C 24.4907 23.4859 24.4907 26.6641 26.45 28.6214 C 28.4093 30.5788 31.5907 30.5788 33.55 28.6214 Z M 95 50.05 C 92.2404 50.05 90 52.2882 90 55.045 L 90 85.015 C 90 87.7718 87.7596 90.01 85 90.01 L 15 90.01 C 12.2404 90.01 10 87.7718 10 85.015 L 10 55.045 C 10 52.2882 7.7596 50.05 5 50.05 C 2.2404 50.05 0 52.2882 0 55.045 L 0 85.015 C 0 93.2854 6.7213 100 15 100 L 85 100 C 93.2787 100 100 93.2854 100 85.015 L 100 55.045 C 100 52.2882 97.7596 50.05 95 50.05 Z`;
+
+    // ==========================================================
+    // ✅ Voice options helpers (READ from localStorage)
+    // Keys match your options UI: nf_voice_opts_v1:${mode}:${voiceId}
+    // ==========================================================
+    const NF_DEFAULT_SPEED = 1.0;
+    const NF_DEFAULT_VOL = 1.0;
+
+    function nfClamp(n, a, b) {
+      n = Number(n);
+      if (!Number.isFinite(n)) return a;
+      return Math.max(a, Math.min(b, n));
+    }
+
+    function nfGetVoiceOpts(mode, voiceId) {
+      const id = String(voiceId || "").trim();
+      if (!id || id === "default") return { speed: NF_DEFAULT_SPEED, volume: NF_DEFAULT_VOL };
+
+      try {
+        const key = `nf_voice_opts_v1:${mode}:${id}`;
+        const raw = localStorage.getItem(key);
+        if (!raw) return { speed: NF_DEFAULT_SPEED, volume: NF_DEFAULT_VOL };
+        const o = JSON.parse(raw);
+        return {
+          speed: nfClamp(o.speed ?? NF_DEFAULT_SPEED, 0.7, 1.3),
+          volume: nfClamp(o.volume ?? NF_DEFAULT_VOL, 0.0, 1.5),
+        };
+      } catch {
+        return { speed: NF_DEFAULT_SPEED, volume: NF_DEFAULT_VOL };
+      }
+    }
 
     function ensureNodes() {
       const host = findPreviewHost();
@@ -695,9 +727,6 @@
 
     // ==========================
     // ✅ SCRIPT GENERATOR MODAL (UPDATED)
-    // - clicking modal Generate closes modal immediately
-    // - main page button shows "Generating..." + disabled while request runs
-    // - no dependency on cancel button / bottom message element
     // ==========================
     function setupModalSeg(segEl, trackEl, hiddenEl, dataKey) {
       if (!segEl) return;
@@ -1138,7 +1167,7 @@
           const isPreviewing = previewingVoiceId === v.id;
 
           return `
-          <div class="nf-voiceCard ${selected ? "nf-voiceSelected" : ""}">
+          <div class="nf-voiceCard ${selected ? "nf-voiceSelected" : ""}" data-voice-id="${v.id}">
             <div style="min-width:0;">
               <div class="nf-voiceName" title="${v.name}">${v.name}</div>
               <div class="nf-voiceDesc" title="${String(v.desc || "")}">${String(v.desc || "—")}</div>
@@ -1233,72 +1262,69 @@
     }
 
     // ==============================
-// ✅ FULL UPDATED buildPayload()
-// ==============================
-function buildPayload() {
-  // --- captions (unchanged) ---
-  const capEnabledEl = document.getElementById("caption-enabled-value");
-  const capStyleEl = document.getElementById("caption-style-value");
-  const capSettingsEl = document.getElementById("caption-settings-value");
+    // ✅ FULL UPDATED buildPayload()
+    // - Reads voice speed/volume from localStorage (your options popup)
+    // - NO hidden inputs needed
+    // ==============================
+    function buildPayload() {
+      // --- captions (unchanged) ---
+      const capEnabledEl = document.getElementById("caption-enabled-value");
+      const capStyleEl = document.getElementById("caption-style-value");
+      const capSettingsEl = document.getElementById("caption-settings-value");
 
-  const captionsEnabled = String(capEnabledEl?.value || "0") === "1";
-  const captionStyle = String(capStyleEl?.value || "").trim();
-  const captionSettingsRaw = String(capSettingsEl?.value || "").trim();
+      const captionsEnabled = String(capEnabledEl?.value || "0") === "1";
+      const captionStyle = String(capStyleEl?.value || "").trim();
+      const captionSettingsRaw = String(capSettingsEl?.value || "").trim();
 
-  let captionSettings = null;
-  if (captionsEnabled && captionSettingsRaw) {
-    try { captionSettings = JSON.parse(captionSettingsRaw); } catch { captionSettings = null; }
-  }
+      let captionSettings = null;
+      if (captionsEnabled && captionSettingsRaw) {
+        try { captionSettings = JSON.parse(captionSettingsRaw); } catch { captionSettings = null; }
+      }
 
-  // --- NEW: voice options inputs ---
-  const postSpeedEl = document.getElementById("post-voice-speed-value");
-  const postVolEl   = document.getElementById("post-voice-volume-value");
-  const scriptSpeedEl = document.getElementById("script-voice-speed-value");
-  const scriptVolEl   = document.getElementById("script-voice-volume-value");
+      // --- ✅ NEW: pull saved voice options for the SELECTED voice IDs ---
+      const postVoiceId = String(postVoiceEl?.value || "default").trim();
+      const scriptVoiceId = String(scriptVoiceEl?.value || "default").trim();
 
-  // defaults
-  const postVoiceSpeed = Number(postSpeedEl?.value ?? 1);
-  const postVoiceVolume = Number(postVolEl?.value ?? 1);
-  const scriptVoiceSpeed = Number(scriptSpeedEl?.value ?? 1);
-  const scriptVoiceVolume = Number(scriptVolEl?.value ?? 1);
+      const postOpts = nfGetVoiceOpts("post", postVoiceId);
+      const scriptOpts = nfGetVoiceOpts("script", scriptVoiceId);
 
-  const payload = {
-    username: String(readAnyText(usernameEl)).trim(),
-    mode: modeHidden?.value || "light",
-    pfpUrl: String(getPfpUrl() || "").trim(),
-    postTitle: String(readAnyText(postTitleEl)).trim(),
-    postText: getPostTextForPayload(),
-    likes: String(readAnyText(likesEl) || "0").trim(),
-    comments: String(readAnyText(commentsEl) || "0").trim(),
-    shareText: String(readAnyText(shareTextEl) || "share").trim(),
-    postVoice: postVoiceEl?.value || "default",
-    scriptVoice: scriptVoiceEl?.value || "default",
-    script: String(readAnyText(scriptEl)).trim(),
-    tone: String(readAnyText(toneHidden)).trim(),
-    length: String(readAnyText(lenHidden)).trim(),
-    backgroundVideoUrl: bgLibraryUrl,
-    backgroundVideoName: bgLibraryName,
+      const payload = {
+        username: String(readAnyText(usernameEl)).trim(),
+        mode: modeHidden?.value || "light",
+        pfpUrl: String(getPfpUrl() || "").trim(),
+        postTitle: String(readAnyText(postTitleEl)).trim(),
+        postText: getPostTextForPayload(),
+        likes: String(readAnyText(likesEl) || "0").trim(),
+        comments: String(readAnyText(commentsEl) || "0").trim(),
+        shareText: String(readAnyText(shareTextEl) || "share").trim(),
 
-    // ✅ NEW: send these
-    postVoiceSpeed,
-    postVoiceVolume,
-    scriptVoiceSpeed,
-    scriptVoiceVolume,
-  };
+        postVoice: postVoiceId || "default",
+        scriptVoice: scriptVoiceId || "default",
+        script: String(readAnyText(scriptEl)).trim(),
 
-  // Only send caption fields if enabled + valid
-  if (captionsEnabled && captionStyle && captionSettings) {
-    payload.captionsEnabled = true;
-    payload.captionStyle = captionStyle;
-    payload.captionSettings = captionSettings;
-  } else {
-    payload.captionsEnabled = false;
-  }
+        tone: String(readAnyText(toneHidden)).trim(),
+        length: String(readAnyText(lenHidden)).trim(),
+        backgroundVideoUrl: bgLibraryUrl,
+        backgroundVideoName: bgLibraryName,
 
-  return payload;
-}
+        // ✅ voice params (now real)
+        postVoiceSpeed: postOpts.speed,
+        postVoiceVolume: postOpts.volume,
+        scriptVoiceSpeed: scriptOpts.speed,
+        scriptVoiceVolume: scriptOpts.volume,
+      };
 
+      // Only send caption fields if enabled + valid
+      if (captionsEnabled && captionStyle && captionSettings) {
+        payload.captionsEnabled = true;
+        payload.captionStyle = captionStyle;
+        payload.captionSettings = captionSettings;
+      } else {
+        payload.captionsEnabled = false;
+      }
 
+      return payload;
+    }
 
     if (genBtn) {
       genBtn.addEventListener("click", async () => {
