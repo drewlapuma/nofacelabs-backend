@@ -224,6 +224,126 @@ function normalizeElevenVoiceId(v) {
 // (only changed: captions support added)
 // =====================================
 async function buildModifications(body) {
+  // -----------------------------
+  // MP3 duration (buffer) helper
+  // -----------------------------
+  function mp3DurationSeconds(buf) {
+    try {
+      const b = Buffer.isBuffer(buf) ? buf : Buffer.from(buf);
+
+      let offset = 0;
+
+      // ID3v2 tag skip
+      if (b.length >= 10 && b.toString("utf8", 0, 3) === "ID3") {
+        const size =
+          ((b[6] & 0x7f) << 21) |
+          ((b[7] & 0x7f) << 14) |
+          ((b[8] & 0x7f) << 7) |
+          (b[9] & 0x7f);
+        offset = 10 + size;
+      }
+
+      const BITRATES = {
+        // [versionIndex][layerIndex][bitrateIndex] kbps
+        // versionIndex: 0=2.5,1=reserved,2=2,3=1
+        // layerIndex: 1=III,2=II,3=I (we'll map)
+        3: { // MPEG1
+          3: [0,32,64,96,128,160,192,224,256,288,320,352,384,416,448], // Layer I
+          2: [0,32,48,56,64,80,96,112,128,160,192,224,256,320,384],   // Layer II
+          1: [0,32,40,48,56,64,80,96,112,128,160,192,224,256,320],    // Layer III
+        },
+        2: { // MPEG2
+          3: [0,32,48,56,64,80,96,112,128,144,160,176,192,224,256],
+          2: [0,8,16,24,32,40,48,56,64,80,96,112,128,144,160],
+          1: [0,8,16,24,32,40,48,56,64,80,96,112,128,144,160],
+        },
+        0: { // MPEG2.5 (same as MPEG2 tables for bitrate)
+          3: [0,32,48,56,64,80,96,112,128,144,160,176,192,224,256],
+          2: [0,8,16,24,32,40,48,56,64,80,96,112,128,144,160],
+          1: [0,8,16,24,32,40,48,56,64,80,96,112,128,144,160],
+        }
+      };
+
+      const SAMPLERATES = {
+        3: [44100, 48000, 32000], // MPEG1
+        2: [22050, 24000, 16000], // MPEG2
+        0: [11025, 12000, 8000],  // MPEG2.5
+      };
+
+      let totalSamples = 0;
+      let sampleRate = 44100; // fallback
+
+      // scan frames
+      let guard = 0;
+      while (offset + 4 < b.length && guard++ < 200000) {
+        // sync 11 bits (0xFFE)
+        if (b[offset] !== 0xff || (b[offset + 1] & 0xe0) !== 0xe0) {
+          offset += 1;
+          continue;
+        }
+
+        const verBits = (b[offset + 1] >> 3) & 0x03;  // 00=2.5,10=2,11=1
+        const layerBits = (b[offset + 1] >> 1) & 0x03; // 01=III,10=II,11=I
+        if (verBits === 1 || layerBits === 0) { offset += 1; continue; }
+
+        const versionIndex = verBits === 3 ? 3 : (verBits === 2 ? 2 : 0);
+        const layerIndex = layerBits === 3 ? 3 : (layerBits === 2 ? 2 : 1);
+
+        const bitrateIdx = (b[offset + 2] >> 4) & 0x0f;
+        const srIdx = (b[offset + 2] >> 2) & 0x03;
+        const padding = (b[offset + 2] >> 1) & 0x01;
+
+        if (bitrateIdx === 0 || bitrateIdx === 15 || srIdx === 3) { offset += 1; continue; }
+
+        const brTable = BITRATES[versionIndex]?.[layerIndex];
+        const srTable = SAMPLERATES[versionIndex];
+        if (!brTable || !srTable) { offset += 1; continue; }
+
+        const bitrateKbps = brTable[bitrateIdx];
+        const sr = srTable[srIdx];
+        if (!bitrateKbps || !sr) { offset += 1; continue; }
+
+        sampleRate = sr;
+
+        // samples per frame
+        let samplesPerFrame;
+        if (layerIndex === 3) { // Layer I
+          samplesPerFrame = 384;
+        } else if (layerIndex === 2) { // Layer II
+          samplesPerFrame = 1152;
+        } else { // Layer III
+          samplesPerFrame = (versionIndex === 3) ? 1152 : 576;
+        }
+
+        // frame length
+        let frameLen;
+        if (layerIndex === 3) {
+          // Layer I: (12 * bitrate / samplerate + padding) * 4
+          frameLen = Math.floor((12 * (bitrateKbps * 1000) / sr + padding) * 4);
+        } else {
+          // Layer II/III:
+          // MPEG1 Layer III: 144 * bitrate / sr + padding
+          // MPEG2/2.5 Layer III: 72 * bitrate / sr + padding
+          const coef = (layerIndex === 1 && versionIndex !== 3) ? 72 : 144;
+          frameLen = Math.floor((coef * (bitrateKbps * 1000)) / sr + padding);
+        }
+
+        if (!Number.isFinite(frameLen) || frameLen <= 0) { offset += 1; continue; }
+
+        totalSamples += samplesPerFrame;
+        offset += frameLen;
+      }
+
+      if (totalSamples <= 0 || !sampleRate) return 0;
+      return totalSamples / sampleRate;
+    } catch {
+      return 0;
+    }
+  }
+
+  // -----------------------------
+  // your existing setup
+  // -----------------------------
   const mode = normalizeMode(body.mode);
   const showLight = mode === "light";
   const showDark = mode === "dark";
@@ -237,7 +357,6 @@ async function buildModifications(body) {
   const pfpUrl = ensurePublicHttpUrl(body.pfpUrl, "pfpUrl");
   const bgUrl = ensurePublicHttpUrl(body.backgroundVideoUrl, "backgroundVideoUrl");
 
-  // --- your existing layout math unchanged ---
   const BG_WIDTH = 75;
   const BG_CENTER_X = 50;
   const cardRight = BG_CENTER_X + BG_WIDTH / 2;
@@ -408,78 +527,73 @@ async function buildModifications(body) {
   const scriptVoiceId = normalizeElevenVoiceId(body.scriptVoice) || DEFAULT_ELEVEN_VOICE_ID;
   const scriptText = safeStr(body.script, "");
 
-  // ==========================================================
-  // ✅ NEW: timing + force audio durations (cuts trailing silence inside mp3)
-  // ==========================================================
-  function estimateSpeechSeconds(text) {
-    const words = String(text || "")
-      .trim()
-      .split(/\s+/)
-      .filter(Boolean).length;
-
-    // Slightly slower estimate so we DON'T clip words
-    const WPS = 2.6;
-    return Math.max(0.55, words / WPS);
-  }
-
+  // -----------------------------
+  // timing
+  // -----------------------------
   const CARD_EARLY_CUT = 1.1;
   const SCRIPT_OVERLAP = 0.75;
 
-  const postSecsEst = estimateSpeechSeconds(postText);
+  // visual card end uses rough estimate (fine)
+  const postSecsEst = Math.max(0.55, postText.trim().split(/\s+/).filter(Boolean).length / 2.9);
   const cardSecs = Math.max(0.35, postSecsEst - CARD_EARLY_CUT);
   const scriptStart = Math.max(0, postSecsEst - SCRIPT_OVERLAP);
 
-  // cards end earlier (visual)
   m["post_card_light.time"] = 0;
   m["post_card_light.duration"] = cardSecs;
   m["post_card_dark.time"] = 0;
   m["post_card_dark.duration"] = cardSecs;
 
-  // ✅ Generate mp3s (unchanged)
+  // -----------------------------
+  // generate mp3 + duration trim
+  // -----------------------------
+  const POST_TAIL_CUT = 0.2;   // cut tiny silence off title audio
+  const SCRIPT_TAIL_CUT = 2.2; // cut ElevenLabs trailing silence (tweak: 2.2 -> 2.8)
+
+  // Post voice
+  let postVoiceDur = 0;
   {
     const postMp3 = await elevenlabsTtsToMp3Buffer(postText, postVoiceId);
     const postPath = `reddit/${Date.now()}_${randId()}_post.mp3`;
     const postUrl = await uploadMp3ToSupabasePublic(postMp3, postPath);
     m["post_voice.source"] = postUrl;
+
+    const dur = mp3DurationSeconds(postMp3) || postSecsEst;
+    postVoiceDur = Math.max(0.35, dur - POST_TAIL_CUT);
   }
 
+  // Script voice
+  let scriptVoiceDur = 0;
   if (scriptText) {
     const scriptMp3 = await elevenlabsTtsToMp3Buffer(scriptText, scriptVoiceId);
     const scriptPath = `reddit/${Date.now()}_${randId()}_script.mp3`;
     const scriptUrl = await uploadMp3ToSupabasePublic(scriptMp3, scriptPath);
     m["script_voice.source"] = scriptUrl;
+
+    const scriptDur = mp3DurationSeconds(scriptMp3) || Math.max(0.6, scriptText.trim().split(/\s+/).filter(Boolean).length / 2.7);
+    // ✅ key: subtract big tail to remove trailing silence
+    scriptVoiceDur = Math.max(0.6, scriptDur - SCRIPT_TAIL_CUT);
   }
 
-  // ✅ Audio times
+  // audio timing + forced durations (THIS controls end)
   m["post_voice.time"] = 0;
-  if (scriptText) m["script_voice.time"] = scriptStart;
-
-  // ✅ THIS is the real fix: force durations to cut any trailing silence in the MP3s
-  const AUDIO_BUFFER = 0.45; // safety so we don't clip last word
-  const postVoiceDur = Math.max(0.6, postSecsEst + AUDIO_BUFFER);
-
   m["post_voice.duration"] = postVoiceDur;
 
-  let scriptVoiceDur = 0;
   if (scriptText) {
-    const scriptSecsEst = estimateSpeechSeconds(scriptText);
-    scriptVoiceDur = Math.max(0.6, scriptSecsEst + AUDIO_BUFFER);
+    m["script_voice.time"] = scriptStart;
     m["script_voice.duration"] = scriptVoiceDur;
   }
 
-  // ✅ Now compute the real end based on audio (NOT the mp3 file length)
-  const audioEnd = scriptText ? (scriptStart + scriptVoiceDur) : postVoiceDur;
-
-  // Tiny tail so captions don’t pop off early
+  // timeline end based on trimmed audio
   const TAIL_PAD = 0.12;
+  const audioEnd = scriptText ? (scriptStart + scriptVoiceDur) : postVoiceDur;
   const totalTimelineSecs = Math.max(0.9, audioEnd + TAIL_PAD);
 
-  // Force render end by trimming background
+  // trim background to match
   m["Video.time"] = 0;
   m["Video.duration"] = totalTimelineSecs;
 
   // ==========================================================
-  // ✅ CAPTIONS (Subtitles_* layers)
+  // ✅ CAPTIONS (Subtitles_* layers) - unchanged
   // ==========================================================
   const captionsEnabled =
     body.captionsEnabled === true ||
@@ -539,13 +653,11 @@ async function buildModifications(body) {
     if (s.textTransform) m[`${layerName}.text_transform`] = String(s.textTransform);
   }
 
-  // hide all
   for (const layer of ALL_SUBTITLE_LAYERS) {
     m[`${layer}.hidden`] = true;
     m[`${layer}.opacity`] = "0%";
   }
 
-  // show chosen
   if (captionsEnabled && captionsText && scriptText) {
     const chosenLayer = STYLE_TO_LAYER[style] || STYLE_TO_LAYER.sentence;
 
@@ -561,6 +673,7 @@ async function buildModifications(body) {
 
   return m;
 }
+
 
 
 
