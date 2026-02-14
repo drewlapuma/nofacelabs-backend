@@ -247,21 +247,21 @@ async function buildModifications(body) {
       }
 
       const BITRATES = {
-        3: {
-          3: [0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448],
-          2: [0, 32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384],
-          1: [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320],
+        3: { // MPEG1
+          3: [0,32,64,96,128,160,192,224,256,288,320,352,384,416,448],
+          2: [0,32,48,56,64,80,96,112,128,160,192,224,256,320,384],
+          1: [0,32,40,48,56,64,80,96,112,128,160,192,224,256,320],
         },
-        2: {
-          3: [0, 32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256],
-          2: [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160],
-          1: [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160],
+        2: { // MPEG2
+          3: [0,32,48,56,64,80,96,112,128,144,160,176,192,224,256],
+          2: [0,8,16,24,32,40,48,56,64,80,96,112,128,144,160],
+          1: [0,8,16,24,32,40,48,56,64,80,96,112,128,144,160],
         },
-        0: {
-          3: [0, 32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256],
-          2: [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160],
-          1: [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160],
-        },
+        0: { // MPEG2.5
+          3: [0,32,48,56,64,80,96,112,128,144,160,176,192,224,256],
+          2: [0,8,16,24,32,40,48,56,64,80,96,112,128,144,160],
+          1: [0,8,16,24,32,40,48,56,64,80,96,112,128,144,160],
+        }
       };
 
       const SAMPLERATES = {
@@ -282,56 +282,41 @@ async function buildModifications(body) {
 
         const verBits = (b[offset + 1] >> 3) & 0x03;
         const layerBits = (b[offset + 1] >> 1) & 0x03;
-        if (verBits === 1 || layerBits === 0) {
-          offset += 1;
-          continue;
-        }
+        if (verBits === 1 || layerBits === 0) { offset += 1; continue; }
 
-        const versionIndex = verBits === 3 ? 3 : verBits === 2 ? 2 : 0;
-        const layerIndex = layerBits === 3 ? 3 : layerBits === 2 ? 2 : 1;
+        const versionIndex = verBits === 3 ? 3 : (verBits === 2 ? 2 : 0);
+        const layerIndex = layerBits === 3 ? 3 : (layerBits === 2 ? 2 : 1);
 
         const bitrateIdx = (b[offset + 2] >> 4) & 0x0f;
         const srIdx = (b[offset + 2] >> 2) & 0x03;
         const padding = (b[offset + 2] >> 1) & 0x01;
 
-        if (bitrateIdx === 0 || bitrateIdx === 15 || srIdx === 3) {
-          offset += 1;
-          continue;
-        }
+        if (bitrateIdx === 0 || bitrateIdx === 15 || srIdx === 3) { offset += 1; continue; }
 
         const brTable = BITRATES[versionIndex]?.[layerIndex];
         const srTable = SAMPLERATES[versionIndex];
-        if (!brTable || !srTable) {
-          offset += 1;
-          continue;
-        }
+        if (!brTable || !srTable) { offset += 1; continue; }
 
         const bitrateKbps = brTable[bitrateIdx];
         const sr = srTable[srIdx];
-        if (!bitrateKbps || !sr) {
-          offset += 1;
-          continue;
-        }
+        if (!bitrateKbps || !sr) { offset += 1; continue; }
 
         sampleRate = sr;
 
         let samplesPerFrame;
         if (layerIndex === 3) samplesPerFrame = 384;
         else if (layerIndex === 2) samplesPerFrame = 1152;
-        else samplesPerFrame = versionIndex === 3 ? 1152 : 576;
+        else samplesPerFrame = (versionIndex === 3) ? 1152 : 576;
 
         let frameLen;
         if (layerIndex === 3) {
-          frameLen = Math.floor((12 * ((bitrateKbps * 1000) / sr) + padding) * 4);
+          frameLen = Math.floor((12 * (bitrateKbps * 1000) / sr + padding) * 4);
         } else {
-          const coef = layerIndex === 1 && versionIndex !== 3 ? 72 : 144;
+          const coef = (layerIndex === 1 && versionIndex !== 3) ? 72 : 144;
           frameLen = Math.floor((coef * (bitrateKbps * 1000)) / sr + padding);
         }
 
-        if (!Number.isFinite(frameLen) || frameLen <= 0) {
-          offset += 1;
-          continue;
-        }
+        if (!Number.isFinite(frameLen) || frameLen <= 0) { offset += 1; continue; }
 
         totalSamples += samplesPerFrame;
         offset += frameLen;
@@ -345,8 +330,12 @@ async function buildModifications(body) {
   }
 
   // -----------------------------
-  // your existing setup
+  // basic helpers assumed existing in your file:
+  // normalizeMode, safeStr, ensurePublicHttpUrl, clamp, pct, setMulti,
+  // elevenlabsTtsToMp3Buffer, uploadMp3ToSupabasePublic, randId,
+  // normalizeElevenVoiceId, DEFAULT_ELEVEN_VOICE_ID
   // -----------------------------
+
   const mode = normalizeMode(body.mode);
   const showLight = mode === "light";
   const showDark = mode === "dark";
@@ -360,6 +349,7 @@ async function buildModifications(body) {
   const pfpUrl = ensurePublicHttpUrl(body.pfpUrl, "pfpUrl");
   const bgUrl = ensurePublicHttpUrl(body.backgroundVideoUrl, "backgroundVideoUrl");
 
+  // --- your layout math (unchanged) ---
   const BG_WIDTH = 75;
   const BG_CENTER_X = 50;
   const cardRight = BG_CENTER_X + BG_WIDTH / 2;
@@ -531,17 +521,17 @@ async function buildModifications(body) {
   const scriptText = safeStr(body.script, "");
 
   // -----------------------------
-  // timing (use REAL audio lengths)
+  // timing (REAL audio lengths) + GUARDED timeline
   // -----------------------------
   const CARD_EARLY_CUT = 0.75;
   const SCRIPT_OVERLAP = 0.2;
 
-  const POST_TAIL_CUT = 0.15;
-  const SCRIPT_TAIL_CUT = 0.5;
-  const DUR_CUSHION = 0.55;
+  const DUR_CUSHION = 0.35;  // small safety
   const MIN_AUDIO = 0.6;
 
   let postVoiceDur = 0;
+
+  // Post voice
   {
     const postMp3 = await elevenlabsTtsToMp3Buffer(postText, postVoiceId);
     const postPath = `reddit/${Date.now()}_${randId()}_post.mp3`;
@@ -549,11 +539,13 @@ async function buildModifications(body) {
     m["post_voice.source"] = postUrl;
 
     const measured = mp3DurationSeconds(postMp3) || 0;
-    const base = Math.max(MIN_AUDIO, measured + DUR_CUSHION);
-    const maxCut = Math.min(POST_TAIL_CUT, base * 0.25);
-    postVoiceDur = Math.max(MIN_AUDIO, base - maxCut);
+    postVoiceDur = Math.max(MIN_AUDIO, measured + DUR_CUSHION);
+
+    m["post_voice.time"] = 0;
+    m["post_voice.duration"] = postVoiceDur;
   }
 
+  // compute start times off REAL post duration
   const cardSecs = Math.max(0.35, postVoiceDur - CARD_EARLY_CUT);
   const scriptStart = Math.max(0, postVoiceDur - SCRIPT_OVERLAP);
 
@@ -562,9 +554,7 @@ async function buildModifications(body) {
   m["post_card_dark.time"] = 0;
   m["post_card_dark.duration"] = cardSecs;
 
-  m["post_voice.time"] = 0;
-  m["post_voice.duration"] = postVoiceDur;
-
+  // Script voice
   let scriptVoiceDur = 0;
   if (scriptText) {
     const scriptMp3 = await elevenlabsTtsToMp3Buffer(scriptText, scriptVoiceId);
@@ -573,28 +563,28 @@ async function buildModifications(body) {
     m["script_voice.source"] = scriptUrl;
 
     const measured = mp3DurationSeconds(scriptMp3) || 0;
-    const base = Math.max(MIN_AUDIO, measured + DUR_CUSHION);
-    const maxCut = Math.min(SCRIPT_TAIL_CUT, base * 0.25);
-    scriptVoiceDur = Math.max(MIN_AUDIO, base - maxCut);
+    scriptVoiceDur = Math.max(MIN_AUDIO, measured + DUR_CUSHION);
 
     m["script_voice.time"] = scriptStart;
     m["script_voice.duration"] = scriptVoiceDur;
   }
 
+  // ✅ GUARDED timeline end (THIS is what prevents captions disappearing)
   const TAIL_PAD = 0.12;
-  const audioEnd = scriptText ? scriptStart + scriptVoiceDur : postVoiceDur;
-  const totalTimelineSecs = Math.max(0.9, audioEnd + TAIL_PAD);
+  const audioEnd = scriptText ? (scriptStart + scriptVoiceDur) : postVoiceDur;
+
+  // Make sure timeline ALWAYS extends past scriptStart (even if audio math gets weird)
+  const totalTimelineSecs = Math.max(
+    0.9,
+    audioEnd + TAIL_PAD,
+    scriptStart + 0.35 // ✅ guarantee subtitles have time to appear
+  );
 
   m["Video.time"] = 0;
   m["Video.duration"] = totalTimelineSecs;
 
   // ==========================================================
-  // ✅ CAPTIONS (exact names + FIXED style bleed)
-  // - only BlackBar gets background_color
-  // - only NeonGlow gets shadow_color
-  // ==========================================================
-    // ==========================================================
-  // ✅ CAPTIONS (exact names) — FORCE ON TOP
+  // ✅ CAPTIONS (exact names) — TIMING GUARDED
   // ==========================================================
   const captionsEnabled =
     body.captionsEnabled === true ||
@@ -634,11 +624,7 @@ async function buildModifications(body) {
 
   const ALL_SUBTITLE_LAYERS = Object.values(STYLE_TO_LAYER);
 
-  // Put subtitles ABOVE everything else (Video/card/etc)
-  // 1=bottom, higher tracks render on top.
-  const SUBTITLE_TRACK = 10;
-
-  function applyCaptionSettings(layerName, s, selectedStyle) {
+  function applyCaptionSettings(layerName, s) {
     if (!s || typeof s !== "object") return;
 
     if (s.x != null) m[`${layerName}.x`] = pct(Number(s.x));
@@ -653,42 +639,34 @@ async function buildModifications(body) {
     if (s.strokeWidth != null) m[`${layerName}.stroke_width`] = Number(s.strokeWidth);
 
     if (s.textTransform) m[`${layerName}.text_transform`] = String(s.textTransform);
-
-    // ✅ prevent style bleed
-    if (selectedStyle === "blackbar" && s.backgroundColor) {
-      m[`${layerName}.background_color`] = String(s.backgroundColor);
-    }
-    if (selectedStyle === "neonglow" && s.shadowColor) {
-      m[`${layerName}.shadow_color`] = String(s.shadowColor);
-    }
   }
 
-  // hide all subtitle layers by default + force them to top track
+  // hide all by default
   for (const layer of ALL_SUBTITLE_LAYERS) {
     m[`${layer}.hidden`] = true;
     m[`${layer}.opacity`] = "0%";
-    m[`${layer}.track`] = SUBTITLE_TRACK; // ✅ key fix
   }
 
   if (captionsEnabled && captionsText && scriptText) {
     const chosenLayer = STYLE_TO_LAYER[style] || STYLE_TO_LAYER.sentence;
 
-    m[`${chosenLayer}.track`] = SUBTITLE_TRACK; // ✅ keep on top
+    // ✅ guard start: must be inside the timeline
+    const subTime = Math.min(scriptStart, Math.max(0, totalTimelineSecs - 0.25));
+    const subDur = Math.max(0.25, totalTimelineSecs - subTime);
+
     m[`${chosenLayer}.hidden`] = false;
     m[`${chosenLayer}.opacity`] = "100%";
-
     m[`${chosenLayer}.text`] = captionsText;
 
-    // start when script starts
-    m[`${chosenLayer}.time`] = scriptStart;
-    m[`${chosenLayer}.duration`] = Math.max(0.1, totalTimelineSecs - scriptStart);
+    m[`${chosenLayer}.time`] = subTime;
+    m[`${chosenLayer}.duration`] = subDur;
 
-    applyCaptionSettings(chosenLayer, captionSettings, style);
+    applyCaptionSettings(chosenLayer, captionSettings);
   }
-
 
   return m;
 }
+
 
 
 
