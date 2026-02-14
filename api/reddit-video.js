@@ -405,7 +405,7 @@ async function buildModifications(body) {
   }
 
   // ==========================================================
-  // AUDIO + TIMING (fix trailing silence by forcing layer DURATION)
+  // AUDIO + TIMING (use trim_end to kill tail silence)
   // ==========================================================
   function estimateSpeechSeconds(text) {
     const words = String(text || "").trim().split(/\s+/).filter(Boolean).length;
@@ -430,14 +430,13 @@ async function buildModifications(body) {
   const scriptVoiceId = normalizeElevenVoiceId(body.scriptVoice) || DEFAULT_ELEVEN_VOICE_ID;
   const scriptText = safeStr(body.script, "");
 
-  // Create audio URLs
+  // Generate + upload mp3s (unchanged)
   {
     const postMp3 = await elevenlabsTtsToMp3Buffer(postText, postVoiceId);
     const postPath = `reddit/${Date.now()}_${randId()}_post.mp3`;
     const postUrl = await uploadMp3ToSupabasePublic(postMp3, postPath);
     m["post_voice.source"] = postUrl;
   }
-
   if (scriptText) {
     const scriptMp3 = await elevenlabsTtsToMp3Buffer(scriptText, scriptVoiceId);
     const scriptPath = `reddit/${Date.now()}_${randId()}_script.mp3`;
@@ -445,37 +444,39 @@ async function buildModifications(body) {
     m["script_voice.source"] = scriptUrl;
   }
 
-  // place audio
+  // Place audio
   m["post_voice.time"] = 0;
   if (scriptText) m["script_voice.time"] = scriptStart;
 
-  // ✅ KEY CHANGE:
-  // Creatomate will often keep the timeline alive based on the ACTUAL mp3 length.
-  // Forcing the layer "duration" cuts that trailing silence.
-  const AUDIO_PAD = 0.22;   // protects last syllable
-  const TAIL_PAD = 0.12;    // tiny visual pad at end
+  // ✅ Trim the AUDIO SOURCE (kills “silent tail” inside mp3)
+  const AUDIO_PAD = 0.18; // small safety so last syllable doesn't clip
+  const TAIL_PAD = 0.08;  // tiny end pad for video
 
-  const postDur = Math.max(0.2, postSecsEst + AUDIO_PAD);
-  m["post_voice.duration"] = postDur;
+  const postTrim = Math.max(0.2, postSecsEst + AUDIO_PAD);
+  m["post_voice.trim_start"] = 0;
+  m["post_voice.trim_end"] = postTrim;
+  m["post_voice.duration"] = postTrim; // backup
 
-  let scriptDur = 0;
+  let scriptTrim = 0;
   if (scriptText) {
     const scriptSecsEst = estimateSpeechSeconds(scriptText);
-    scriptDur = Math.max(0.2, scriptSecsEst + AUDIO_PAD);
-    m["script_voice.duration"] = scriptDur;
+    scriptTrim = Math.max(0.2, scriptSecsEst + AUDIO_PAD);
+
+    m["script_voice.trim_start"] = 0;
+    m["script_voice.trim_end"] = scriptTrim;
+    m["script_voice.duration"] = scriptTrim; // backup
   }
 
-  // End of timeline should be the end of the last audio (post or script)
   const endTime = scriptText
-    ? (scriptStart + scriptDur + TAIL_PAD)
-    : (postDur + TAIL_PAD);
+    ? (scriptStart + scriptTrim + TAIL_PAD)
+    : (postTrim + TAIL_PAD);
 
-  // Keep background from extending the render
+  // Ensure background can't extend the render
   m["Video.time"] = 0;
   m["Video.duration"] = Math.max(0.9, endTime);
 
   // ==========================================================
-  // CAPTIONS (unchanged from your working version)
+  // CAPTIONS (leave your working captions logic as-is)
   // ==========================================================
   const captionsEnabled =
     body.captionsEnabled === true ||
@@ -488,10 +489,7 @@ async function buildModifications(body) {
   const captionSettings =
     body.captionSettings && typeof body.captionSettings === "object"
       ? body.captionSettings
-      : (() => {
-          try { return JSON.parse(String(body.captionSettings || "")); }
-          catch { return null; }
-        })();
+      : (() => { try { return JSON.parse(String(body.captionSettings || "")); } catch { return null; } })();
 
   const captionsText = safeStr(body.script, "");
 
@@ -507,7 +505,7 @@ async function buildModifications(body) {
     highlighter: "Subtitles_Highlighter",
     neonglow: "Subtitles_NeonGlow",
     purplepop: "Subtitles_PurplePop",
-    compactlowerthird: "Subtitles_CompactLowerthird",
+    compactlowerthird: "Subtitles_CompactLowerThird",
     bouncepop: "Subtitles_BouncePop",
     redalert: "Subtitles_RedAlert",
     redtag: "Subtitles_RedTag",
@@ -515,30 +513,33 @@ async function buildModifications(body) {
 
   const ALL_SUBTITLE_LAYERS = Object.values(STYLE_TO_LAYER);
 
-  function applyCaptionSettings(layerName, s) {
-    if (!s || typeof s !== "object") return;
-    if (s.x != null) m[`${layerName}.x`] = pct(Number(s.x));
-    if (s.y != null) m[`${layerName}.y`] = pct(Number(s.y));
-  }
-
   for (const layer of ALL_SUBTITLE_LAYERS) {
     m[`${layer}.hidden`] = true;
     m[`${layer}.opacity`] = "0%";
   }
 
+  function applyCaptionSettings(layerName, s) {
+    if (!s || typeof s !== "object") return;
+    if (s.x != null) m[`${layerName}.x`] = pct(Number(s.x));
+    if (s.y != null) m[`${layerName}.y`] = pct(Number(s.y));
+    // (add your other settings mappings here if you want)
+  }
+
   if (captionsEnabled && captionsText) {
     const chosenLayer = STYLE_TO_LAYER[style] || STYLE_TO_LAYER.sentence;
+
     m[`${chosenLayer}.hidden`] = false;
     m[`${chosenLayer}.opacity`] = "100%";
     m[`${chosenLayer}.text`] = captionsText;
+
     m[`${chosenLayer}.time`] = scriptStart;
     m[`${chosenLayer}.duration`] = Math.max(0.1, (Math.max(0.9, endTime) - scriptStart));
+
     applyCaptionSettings(chosenLayer, captionSettings);
   }
 
   return m;
 }
-
 
 
 
