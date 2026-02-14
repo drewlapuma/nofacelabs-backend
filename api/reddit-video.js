@@ -453,22 +453,23 @@ async function buildModifications(body) {
   if (scriptText) m["script_voice.time"] = scriptStart;
 
   const END_TRIM_SECONDS = 2.4;
-  const TAIL_PAD = 0.18;
+  const TAIL_PAD = 0.06; // tiny pad so it doesn't cut the last syllable
 
   const scriptSecsRaw = scriptText ? estimateSpeechSeconds(scriptText) : 0;
   const estimatedEnd = scriptText
     ? (scriptStart + scriptSecsRaw + TAIL_PAD)
     : (postSecsRaw + TAIL_PAD);
 
-  // don’t cut below script end
-  const totalTimelineSecs = Math.max(
-    0.9,
-    (scriptText ? (scriptStart + scriptSecsRaw + TAIL_PAD) : estimatedEnd),
-    estimatedEnd - END_TRIM_SECONDS
-  );
+  // ✅ HARD END: timeline ends when audio ends
+  const totalTimelineSecs = Math.max(0.9, estimatedEnd);
 
+  // Trim background so it can't extend the render
   m["Video.time"] = 0;
   m["Video.duration"] = totalTimelineSecs;
+
+  // (optional but recommended) also keep captions from extending past end
+  // if you set captions elsewhere, use the same totalTimelineSecs there too
+
 
   // ==========================================================
   // ✅ CAPTIONS (HARD FORCE ON)
