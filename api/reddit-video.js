@@ -533,7 +533,7 @@ async function buildModifications(body) {
     // -----------------------------
   // timing (use REAL audio lengths)
   // -----------------------------
-  const CARD_EARLY_CUT = 0.9;
+  const CARD_EARLY_CUT = 0.75;
   const SCRIPT_OVERLAP = 0.2;
 
   // tail silence removal knobs (SAFE)
