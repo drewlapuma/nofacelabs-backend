@@ -362,10 +362,10 @@ async function buildModifications(body) {
     return `${Math.round(n * 100)}%`;
   }
 
-  const postVoiceSpeed = clampNum(body.postVoiceSpeed, 0.7, 1.3, 1.0);
-  const postVoiceVolume = clampNum(body.postVoiceVolume, 0.0, 1.5, 1.0);
+  const postVoiceSpeed = clampNum(body.postVoiceSpeed, 0.5, 2.0, 1.0);
+  const scriptVoiceSpeed = clampNum(body.scriptVoiceSpeed, 0.5, 2.0, 1.0);
 
-  const scriptVoiceSpeed = clampNum(body.scriptVoiceSpeed, 0.7, 1.3, 1.0);
+  const scriptVoiceSpeed = clampNum(body.scriptVoiceSpeed, 0.5, 2.0, 1.0);
   const scriptVoiceVolume = clampNum(body.scriptVoiceVolume, 0.0, 1.5, 1.0);
 
   // ==========================================================
