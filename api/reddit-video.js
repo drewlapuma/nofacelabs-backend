@@ -408,7 +408,34 @@ async function buildModifications(body) {
   const scriptVoiceId = normalizeElevenVoiceId(body.scriptVoice) || DEFAULT_ELEVEN_VOICE_ID;
   const scriptText = safeStr(body.script, "");
 
-  // voices (generate mp3s)
+  // ==========================================================
+  // ✅ NEW: timing + force audio durations (cuts trailing silence inside mp3)
+  // ==========================================================
+  function estimateSpeechSeconds(text) {
+    const words = String(text || "")
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean).length;
+
+    // Slightly slower estimate so we DON'T clip words
+    const WPS = 2.6;
+    return Math.max(0.55, words / WPS);
+  }
+
+  const CARD_EARLY_CUT = 1.1;
+  const SCRIPT_OVERLAP = 0.75;
+
+  const postSecsEst = estimateSpeechSeconds(postText);
+  const cardSecs = Math.max(0.35, postSecsEst - CARD_EARLY_CUT);
+  const scriptStart = Math.max(0, postSecsEst - SCRIPT_OVERLAP);
+
+  // cards end earlier (visual)
+  m["post_card_light.time"] = 0;
+  m["post_card_light.duration"] = cardSecs;
+  m["post_card_dark.time"] = 0;
+  m["post_card_dark.duration"] = cardSecs;
+
+  // ✅ Generate mp3s (unchanged)
   {
     const postMp3 = await elevenlabsTtsToMp3Buffer(postText, postVoiceId);
     const postPath = `reddit/${Date.now()}_${randId()}_post.mp3`;
@@ -423,58 +450,36 @@ async function buildModifications(body) {
     m["script_voice.source"] = scriptUrl;
   }
 
-  // ==========================================================
-  // ✅ TIMING (hard-trim video end by 1.5s, BUT never cut speech)
-  // ==========================================================
-  function estimateSpeechSeconds(text) {
-    const words = String(text || "")
-      .trim()
-      .split(/\s+/)
-      .filter(Boolean).length;
-    const WPS = 2.9;
-    return Math.max(0.55, words / WPS);
-  }
-
-  const CARD_EARLY_CUT = 1.1;
-  const SCRIPT_OVERLAP = 0.75;
-
-  const postSecsEst = estimateSpeechSeconds(postText);
-  const cardSecs = Math.max(0.35, postSecsEst - CARD_EARLY_CUT);
-  const scriptStart = Math.max(0, postSecsEst - SCRIPT_OVERLAP);
-
-  m["post_card_light.time"] = 0;
-  m["post_card_light.duration"] = cardSecs;
-  m["post_card_dark.time"] = 0;
-  m["post_card_dark.duration"] = cardSecs;
-
+  // ✅ Audio times
   m["post_voice.time"] = 0;
   if (scriptText) m["script_voice.time"] = scriptStart;
 
-  // Estimated audio end
-  const scriptSecsEst = scriptText ? estimateSpeechSeconds(scriptText) : 0;
-  const audioEnd = scriptText ? (scriptStart + scriptSecsEst) : postSecsEst;
+  // ✅ THIS is the real fix: force durations to cut any trailing silence in the MP3s
+  const AUDIO_BUFFER = 0.45; // safety so we don't clip last word
+  const postVoiceDur = Math.max(0.6, postSecsEst + AUDIO_BUFFER);
 
-  // Your desired cut
-  const CUT_SECONDS = 1.5;
+  m["post_voice.duration"] = postVoiceDur;
 
-  // Safety so we don't cut speech (leave a tiny tail)
-  const SAFE_TAIL = 0.05;
+  let scriptVoiceDur = 0;
+  if (scriptText) {
+    const scriptSecsEst = estimateSpeechSeconds(scriptText);
+    scriptVoiceDur = Math.max(0.6, scriptSecsEst + AUDIO_BUFFER);
+    m["script_voice.duration"] = scriptVoiceDur;
+  }
 
-  // Final timeline
-  let totalTimelineSecs = audioEnd - CUT_SECONDS;
+  // ✅ Now compute the real end based on audio (NOT the mp3 file length)
+  const audioEnd = scriptText ? (scriptStart + scriptVoiceDur) : postVoiceDur;
 
-  // If cut would go into speech, clamp to just after speech
-  totalTimelineSecs = Math.max(totalTimelineSecs, audioEnd + SAFE_TAIL);
+  // Tiny tail so captions don’t pop off early
+  const TAIL_PAD = 0.12;
+  const totalTimelineSecs = Math.max(0.9, audioEnd + TAIL_PAD);
 
-  // Also keep a sane minimum
-  totalTimelineSecs = Math.max(0.9, totalTimelineSecs);
-
-  // Trim background to force render to end
+  // Force render end by trimming background
   m["Video.time"] = 0;
   m["Video.duration"] = totalTimelineSecs;
 
   // ==========================================================
-  // ✅ CAPTIONS (if enabled)
+  // ✅ CAPTIONS (Subtitles_* layers)
   // ==========================================================
   const captionsEnabled =
     body.captionsEnabled === true ||
@@ -534,11 +539,13 @@ async function buildModifications(body) {
     if (s.textTransform) m[`${layerName}.text_transform`] = String(s.textTransform);
   }
 
+  // hide all
   for (const layer of ALL_SUBTITLE_LAYERS) {
     m[`${layer}.hidden`] = true;
     m[`${layer}.opacity`] = "0%";
   }
 
+  // show chosen
   if (captionsEnabled && captionsText && scriptText) {
     const chosenLayer = STYLE_TO_LAYER[style] || STYLE_TO_LAYER.sentence;
 
@@ -554,6 +561,7 @@ async function buildModifications(body) {
 
   return m;
 }
+
 
 
 
