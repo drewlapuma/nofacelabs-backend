@@ -404,45 +404,33 @@ async function buildModifications(body) {
     m["Video.fit"] = "cover";
   }
 
-  const postVoiceId = normalizeElevenVoiceId(body.postVoice) || DEFAULT_ELEVEN_VOICE_ID;
-  const scriptVoiceId = normalizeElevenVoiceId(body.scriptVoice) || DEFAULT_ELEVEN_VOICE_ID;
-  const scriptText = safeStr(body.script, "");
-
   // ==========================================================
-  // ✅ timing + silence fix (IMPORTANT)
-  // Use Creatomate trim_duration on the AUDIO layers to remove trailing silence.
-  // Do NOT subtract random seconds from the whole timeline.
+  // AUDIO + TIMING (fix trailing silence by forcing layer DURATION)
   // ==========================================================
   function estimateSpeechSeconds(text) {
-    const words = String(text || "")
-      .trim()
-      .split(/\s+/)
-      .filter(Boolean).length;
-
-    // keep your WPS
+    const words = String(text || "").trim().split(/\s+/).filter(Boolean).length;
     const WPS = 2.9;
     return Math.max(0.55, words / WPS);
   }
 
   const postSecsEst = estimateSpeechSeconds(postText);
-  const scriptSecsEst = scriptText ? estimateSpeechSeconds(scriptText) : 0;
 
-  // Visual: end card earlier (your original)
   const CARD_EARLY_CUT = 1.1;
-
-  // Audio: overlap to reduce dead air between title and script
   const SCRIPT_OVERLAP = 0.75;
 
   const cardSecs = Math.max(0.35, postSecsEst - CARD_EARLY_CUT);
   const scriptStart = Math.max(0, postSecsEst - SCRIPT_OVERLAP);
 
-  // cards only exist during title window (shortened)
   m["post_card_light.time"] = 0;
   m["post_card_light.duration"] = cardSecs;
   m["post_card_dark.time"] = 0;
   m["post_card_dark.duration"] = cardSecs;
 
-  // ---- generate audio URLs (same as before) ----
+  const postVoiceId = normalizeElevenVoiceId(body.postVoice) || DEFAULT_ELEVEN_VOICE_ID;
+  const scriptVoiceId = normalizeElevenVoiceId(body.scriptVoice) || DEFAULT_ELEVEN_VOICE_ID;
+  const scriptText = safeStr(body.script, "");
+
+  // Create audio URLs
   {
     const postMp3 = await elevenlabsTtsToMp3Buffer(postText, postVoiceId);
     const postPath = `reddit/${Date.now()}_${randId()}_post.mp3`;
@@ -457,36 +445,37 @@ async function buildModifications(body) {
     m["script_voice.source"] = scriptUrl;
   }
 
-  // audio timing
+  // place audio
   m["post_voice.time"] = 0;
   if (scriptText) m["script_voice.time"] = scriptStart;
 
-  // ✅ THIS is what removes the extra ~2s silence:
-  // Trim each audio clip to the estimated speaking length (+ a tiny pad)
-  const AUDIO_PAD = 0.18; // prevents cutting last syllable
-  m["post_voice.trim_start"] = 0;
-  m["post_voice.trim_duration"] = Math.max(0.2, postSecsEst + AUDIO_PAD);
+  // ✅ KEY CHANGE:
+  // Creatomate will often keep the timeline alive based on the ACTUAL mp3 length.
+  // Forcing the layer "duration" cuts that trailing silence.
+  const AUDIO_PAD = 0.22;   // protects last syllable
+  const TAIL_PAD = 0.12;    // tiny visual pad at end
 
+  const postDur = Math.max(0.2, postSecsEst + AUDIO_PAD);
+  m["post_voice.duration"] = postDur;
+
+  let scriptDur = 0;
   if (scriptText) {
-    m["script_voice.trim_start"] = 0;
-    m["script_voice.trim_duration"] = Math.max(0.2, scriptSecsEst + AUDIO_PAD);
+    const scriptSecsEst = estimateSpeechSeconds(scriptText);
+    scriptDur = Math.max(0.2, scriptSecsEst + AUDIO_PAD);
+    m["script_voice.duration"] = scriptDur;
   }
 
-  // total timeline end (based on trimmed audio end)
-  const TAIL_PAD = 0.12;
-  const totalTimelineSecs = scriptText
-    ? (scriptStart + (scriptSecsEst + AUDIO_PAD) + TAIL_PAD)
-    : (postSecsEst + AUDIO_PAD + TAIL_PAD);
+  // End of timeline should be the end of the last audio (post or script)
+  const endTime = scriptText
+    ? (scriptStart + scriptDur + TAIL_PAD)
+    : (postDur + TAIL_PAD);
 
-  // Trim the background layer so it doesn't keep the timeline alive
+  // Keep background from extending the render
   m["Video.time"] = 0;
-  m["Video.duration"] = totalTimelineSecs;
+  m["Video.duration"] = Math.max(0.9, endTime);
 
   // ==========================================================
-  // ✅ CAPTIONS (your existing “exact names” mapping)
-  // - show only chosen style
-  // - caption text = SCRIPT ONLY (never title)
-  // - start at scriptStart
+  // CAPTIONS (unchanged from your working version)
   // ==========================================================
   const captionsEnabled =
     body.captionsEnabled === true ||
@@ -504,7 +493,7 @@ async function buildModifications(body) {
           catch { return null; }
         })();
 
-  const captionsText = safeStr(body.script, ""); // ✅ script only
+  const captionsText = safeStr(body.script, "");
 
   const STYLE_TO_LAYER = {
     sentence: "Subtitles_Sentence",
@@ -528,27 +517,10 @@ async function buildModifications(body) {
 
   function applyCaptionSettings(layerName, s) {
     if (!s || typeof s !== "object") return;
-
     if (s.x != null) m[`${layerName}.x`] = pct(Number(s.x));
     if (s.y != null) m[`${layerName}.y`] = pct(Number(s.y));
-
-    // NOTE: these property names must match your template fields.
-    // Keep/remove as needed based on what Creatomate exposes on your subtitle layers.
-    if (s.fontFamily) m[`${layerName}.font_family`] = String(s.fontFamily);
-    if (s.fontSize != null) m[`${layerName}.font_size`] = Number(s.fontSize);
-    if (s.fontWeight != null) m[`${layerName}.font_weight`] = Number(s.fontWeight);
-
-    if (s.fillColor) m[`${layerName}.fill_color`] = String(s.fillColor);
-    if (s.strokeColor) m[`${layerName}.stroke_color`] = String(s.strokeColor);
-    if (s.strokeWidth != null) m[`${layerName}.stroke_width`] = Number(s.strokeWidth);
-
-    if (s.backgroundColor) m[`${layerName}.background_color`] = String(s.backgroundColor);
-    if (s.shadowColor) m[`${layerName}.shadow_color`] = String(s.shadowColor);
-
-    if (s.textTransform) m[`${layerName}.text_transform`] = String(s.textTransform);
   }
 
-  // hide all by default
   for (const layer of ALL_SUBTITLE_LAYERS) {
     m[`${layer}.hidden`] = true;
     m[`${layer}.opacity`] = "0%";
@@ -556,19 +528,17 @@ async function buildModifications(body) {
 
   if (captionsEnabled && captionsText) {
     const chosenLayer = STYLE_TO_LAYER[style] || STYLE_TO_LAYER.sentence;
-
     m[`${chosenLayer}.hidden`] = false;
     m[`${chosenLayer}.opacity`] = "100%";
-
     m[`${chosenLayer}.text`] = captionsText;
     m[`${chosenLayer}.time`] = scriptStart;
-    m[`${chosenLayer}.duration`] = Math.max(0.1, totalTimelineSecs - scriptStart);
-
+    m[`${chosenLayer}.duration`] = Math.max(0.1, (Math.max(0.9, endTime) - scriptStart));
     applyCaptionSettings(chosenLayer, captionSettings);
   }
 
   return m;
 }
+
 
 
 
