@@ -408,11 +408,24 @@ async function buildModifications(body) {
   const scriptVoiceId = normalizeElevenVoiceId(body.scriptVoice) || DEFAULT_ELEVEN_VOICE_ID;
   const scriptText = safeStr(body.script, "");
 
+  // voices (generate mp3s)
+  {
+    const postMp3 = await elevenlabsTtsToMp3Buffer(postText, postVoiceId);
+    const postPath = `reddit/${Date.now()}_${randId()}_post.mp3`;
+    const postUrl = await uploadMp3ToSupabasePublic(postMp3, postPath);
+    m["post_voice.source"] = postUrl;
+  }
+
+  if (scriptText) {
+    const scriptMp3 = await elevenlabsTtsToMp3Buffer(scriptText, scriptVoiceId);
+    const scriptPath = `reddit/${Date.now()}_${randId()}_script.mp3`;
+    const scriptUrl = await uploadMp3ToSupabasePublic(scriptMp3, scriptPath);
+    m["script_voice.source"] = scriptUrl;
+  }
+
   // ==========================================================
-  // ✅ timing + SILENCE FIX
-  // - We TRIM the audio elements themselves (ElevenLabs MP3 tail)
-  // - Creatomate uses trim_start / trim_duration for audio clips
-  // ========================================================== :contentReference[oaicite:1]{index=1}
+  // ✅ TIMING (hard-trim video end by 1.5s, BUT never cut speech)
+  // ==========================================================
   function estimateSpeechSeconds(text) {
     const words = String(text || "")
       .trim()
@@ -429,61 +442,39 @@ async function buildModifications(body) {
   const cardSecs = Math.max(0.35, postSecsEst - CARD_EARLY_CUT);
   const scriptStart = Math.max(0, postSecsEst - SCRIPT_OVERLAP);
 
-  // ✅ Trim durations: small pad so it doesn’t clip the last syllable
-  const AUDIO_TAIL_PAD = 0.10;
-  const postTrim = Math.max(0.35, postSecsEst + AUDIO_TAIL_PAD);
-  const scriptSecsEst = scriptText ? estimateSpeechSeconds(scriptText) : 0;
-  const scriptTrim = scriptText ? Math.max(0.35, scriptSecsEst + AUDIO_TAIL_PAD) : 0;
-
-  // cards only exist during title window
   m["post_card_light.time"] = 0;
   m["post_card_light.duration"] = cardSecs;
   m["post_card_dark.time"] = 0;
   m["post_card_dark.duration"] = cardSecs;
 
-  // ------------------ voices ------------------
-  // Post voice (ALWAYS generate mp3)
-  {
-    const postMp3 = await elevenlabsTtsToMp3Buffer(postText, postVoiceId);
-    const postPath = `reddit/${Date.now()}_${randId()}_post.mp3`;
-    const postUrl = await uploadMp3ToSupabasePublic(postMp3, postPath);
+  m["post_voice.time"] = 0;
+  if (scriptText) m["script_voice.time"] = scriptStart;
 
-    m["post_voice.source"] = postUrl;
-    m["post_voice.time"] = 0;
+  // Estimated audio end
+  const scriptSecsEst = scriptText ? estimateSpeechSeconds(scriptText) : 0;
+  const audioEnd = scriptText ? (scriptStart + scriptSecsEst) : postSecsEst;
 
-    // ✅ Kill ElevenLabs dead-air tail
-    m["post_voice.trim_start"] = 0;
-    m["post_voice.trim_duration"] = postTrim;
-  }
+  // Your desired cut
+  const CUT_SECONDS = 1.5;
 
-  // Script voice (only if script exists)
-  if (scriptText) {
-    const scriptMp3 = await elevenlabsTtsToMp3Buffer(scriptText, scriptVoiceId);
-    const scriptPath = `reddit/${Date.now()}_${randId()}_script.mp3`;
-    const scriptUrl = await uploadMp3ToSupabasePublic(scriptMp3, scriptPath);
+  // Safety so we don't cut speech (leave a tiny tail)
+  const SAFE_TAIL = 0.05;
 
-    m["script_voice.source"] = scriptUrl;
-    m["script_voice.time"] = scriptStart;
+  // Final timeline
+  let totalTimelineSecs = audioEnd - CUT_SECONDS;
 
-    // ✅ Kill ElevenLabs dead-air tail
-    m["script_voice.trim_start"] = 0;
-    m["script_voice.trim_duration"] = scriptTrim;
-  }
+  // If cut would go into speech, clamp to just after speech
+  totalTimelineSecs = Math.max(totalTimelineSecs, audioEnd + SAFE_TAIL);
 
-  // ✅ Make timeline end exactly after trimmed audio
-  const END_PAD = 0.12;
-  const totalTimelineSecs = scriptText
-    ? Math.max(0.9, scriptStart + scriptTrim + END_PAD)
-    : Math.max(0.9, postTrim + END_PAD);
+  // Also keep a sane minimum
+  totalTimelineSecs = Math.max(0.9, totalTimelineSecs);
 
+  // Trim background to force render to end
   m["Video.time"] = 0;
   m["Video.duration"] = totalTimelineSecs;
 
   // ==========================================================
-  // ✅ CAPTIONS (Subtitles_* layers)
-  // - show only chosen style
-  // - caption text = SCRIPT ONLY
-  // - start at scriptStart
+  // ✅ CAPTIONS (if enabled)
   // ==========================================================
   const captionsEnabled =
     body.captionsEnabled === true ||
@@ -543,7 +534,6 @@ async function buildModifications(body) {
     if (s.textTransform) m[`${layerName}.text_transform`] = String(s.textTransform);
   }
 
-  // hide all by default
   for (const layer of ALL_SUBTITLE_LAYERS) {
     m[`${layer}.hidden`] = true;
     m[`${layer}.opacity`] = "0%";
@@ -554,7 +544,6 @@ async function buildModifications(body) {
 
     m[`${chosenLayer}.hidden`] = false;
     m[`${chosenLayer}.opacity`] = "100%";
-
     m[`${chosenLayer}.text`] = captionsText;
 
     m[`${chosenLayer}.time`] = scriptStart;
@@ -565,6 +554,7 @@ async function buildModifications(body) {
 
   return m;
 }
+
 
 
 
