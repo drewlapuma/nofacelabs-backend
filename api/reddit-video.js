@@ -530,24 +530,17 @@ async function buildModifications(body) {
   // -----------------------------
   // timing
   // -----------------------------
+    // -----------------------------
+  // timing (use REAL audio lengths)
+  // -----------------------------
   const CARD_EARLY_CUT = 1.1;
   const SCRIPT_OVERLAP = 0.75;
 
-  // visual card end uses rough estimate (fine)
-  const postSecsEst = Math.max(0.55, postText.trim().split(/\s+/).filter(Boolean).length / 2.9);
-  const cardSecs = Math.max(0.35, postSecsEst - CARD_EARLY_CUT);
-  const scriptStart = Math.max(0, postSecsEst - SCRIPT_OVERLAP);
-
-  m["post_card_light.time"] = 0;
-  m["post_card_light.duration"] = cardSecs;
-  m["post_card_dark.time"] = 0;
-  m["post_card_dark.duration"] = cardSecs;
-
-  // -----------------------------
-  // generate mp3 + duration trim
-  // -----------------------------
-  const POST_TAIL_CUT = 0.2;   // cut tiny silence off title audio
-  const SCRIPT_TAIL_CUT = 2.2; // cut ElevenLabs trailing silence (tweak: 2.2 -> 2.8)
+  // tail silence removal knobs (SAFE)
+  const POST_TAIL_CUT = 0.15;      // tiny trim
+  const SCRIPT_TAIL_CUT = 1.6;     // start here (not 2.2)
+  const DUR_CUSHION = 0.55;        // protects against duration under-estimation
+  const MIN_AUDIO = 0.6;
 
   // Post voice
   let postVoiceDur = 0;
@@ -557,9 +550,26 @@ async function buildModifications(body) {
     const postUrl = await uploadMp3ToSupabasePublic(postMp3, postPath);
     m["post_voice.source"] = postUrl;
 
-    const dur = mp3DurationSeconds(postMp3) || postSecsEst;
-    postVoiceDur = Math.max(0.35, dur - POST_TAIL_CUT);
+    // measured duration + cushion (prevents early cutoff)
+    const measured = mp3DurationSeconds(postMp3) || 0;
+    const base = Math.max(MIN_AUDIO, measured + DUR_CUSHION);
+
+    // trim, but NEVER trim more than 25% of the clip
+    const maxCut = Math.min(POST_TAIL_CUT, base * 0.25);
+    postVoiceDur = Math.max(MIN_AUDIO, base - maxCut);
   }
+
+  // Now that we know real post duration, compute card + scriptStart from it
+  const cardSecs = Math.max(0.35, postVoiceDur - CARD_EARLY_CUT);
+  const scriptStart = Math.max(0, postVoiceDur - SCRIPT_OVERLAP);
+
+  m["post_card_light.time"] = 0;
+  m["post_card_light.duration"] = cardSecs;
+  m["post_card_dark.time"] = 0;
+  m["post_card_dark.duration"] = cardSecs;
+
+  m["post_voice.time"] = 0;
+  m["post_voice.duration"] = postVoiceDur;
 
   // Script voice
   let scriptVoiceDur = 0;
@@ -569,28 +579,25 @@ async function buildModifications(body) {
     const scriptUrl = await uploadMp3ToSupabasePublic(scriptMp3, scriptPath);
     m["script_voice.source"] = scriptUrl;
 
-    const scriptDur = mp3DurationSeconds(scriptMp3) || Math.max(0.6, scriptText.trim().split(/\s+/).filter(Boolean).length / 2.7);
-    // ✅ key: subtract big tail to remove trailing silence
-    scriptVoiceDur = Math.max(0.6, scriptDur - SCRIPT_TAIL_CUT);
-  }
+    const measured = mp3DurationSeconds(scriptMp3) || 0;
+    const base = Math.max(MIN_AUDIO, measured + DUR_CUSHION);
 
-  // audio timing + forced durations (THIS controls end)
-  m["post_voice.time"] = 0;
-  m["post_voice.duration"] = postVoiceDur;
+    // trim, but NEVER trim more than 25% of the clip
+    const maxCut = Math.min(SCRIPT_TAIL_CUT, base * 0.25);
+    scriptVoiceDur = Math.max(MIN_AUDIO, base - maxCut);
 
-  if (scriptText) {
     m["script_voice.time"] = scriptStart;
     m["script_voice.duration"] = scriptVoiceDur;
   }
 
-  // timeline end based on trimmed audio
+  // timeline end (based on trimmed audio)
   const TAIL_PAD = 0.12;
   const audioEnd = scriptText ? (scriptStart + scriptVoiceDur) : postVoiceDur;
   const totalTimelineSecs = Math.max(0.9, audioEnd + TAIL_PAD);
 
-  // trim background to match
   m["Video.time"] = 0;
   m["Video.duration"] = totalTimelineSecs;
+
 
   // ==========================================================
   // ✅ CAPTIONS (Subtitles_* layers) - unchanged
