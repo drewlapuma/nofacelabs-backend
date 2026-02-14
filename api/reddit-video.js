@@ -219,8 +219,10 @@ function normalizeElevenVoiceId(v) {
   return s;
 }
 
-/* ----------------- build modifications ----------------- */
-
+// =====================================
+// ✅ FULL UPDATED buildModifications()
+// (only changed: captions support added)
+// =====================================
 async function buildModifications(body) {
   const mode = normalizeMode(body.mode);
   const showLight = mode === "light";
@@ -424,8 +426,6 @@ async function buildModifications(body) {
 
   // ==========================================================
   // ✅ timing tweaks (SAFE VERSION)
-  // - DO NOT clamp audio durations
-  // - ONLY shorten the background layer so the render ends earlier
   // ==========================================================
   function estimateSpeechSeconds(text) {
     const words = String(text || "")
@@ -438,28 +438,21 @@ async function buildModifications(body) {
 
   const postSecsRaw = estimateSpeechSeconds(postText);
 
-  // Visual: end card earlier (your original)
   const CARD_EARLY_CUT = 1.1;
-
-  // Audio: overlap to reduce dead air between title and script
   const SCRIPT_OVERLAP = 0.75;
 
   const cardSecs = Math.max(0.35, postSecsRaw - CARD_EARLY_CUT);
   const scriptStart = Math.max(0, postSecsRaw - SCRIPT_OVERLAP);
 
-  // cards only exist during title window (shortened)
   m["post_card_light.time"] = 0;
   m["post_card_light.duration"] = cardSecs;
   m["post_card_dark.time"] = 0;
   m["post_card_dark.duration"] = cardSecs;
 
-  // audio timing (no duration clamping)
   m["post_voice.time"] = 0;
   if (scriptText) m["script_voice.time"] = scriptStart;
 
-  // ✅ END TRIM: reduce the total timeline by ~2s
-  // This is the only “silence fix” here (won’t cut audio because we’re not forcing audio durations)
-  const END_TRIM_SECONDS = 2.4; // change this to 1.2 / 1.6 / 2.4 to taste
+  const END_TRIM_SECONDS = 2.4;
   const TAIL_PAD = 0.12;
 
   const scriptSecsRaw = scriptText ? estimateSpeechSeconds(scriptText) : 0;
@@ -467,15 +460,99 @@ async function buildModifications(body) {
     ? (scriptStart + scriptSecsRaw + TAIL_PAD)
     : (postSecsRaw + TAIL_PAD);
 
-  // Don’t let it go below a sane minimum
   const totalTimelineSecs = Math.max(0.9, estimatedEnd - END_TRIM_SECONDS);
 
-  // Trim the background layer so it doesn't keep the timeline alive
   m["Video.time"] = 0;
   m["Video.duration"] = totalTimelineSecs;
 
+  // ==========================================================
+  // ✅ CAPTIONS (Subtitles_* layers)
+  // - show only chosen style
+  // - caption text = SCRIPT ONLY (never title)
+  // - start at scriptStart
+  // ==========================================================
+  const captionsEnabled =
+    body.captionsEnabled === true ||
+    String(body.captionsEnabled || "").toLowerCase() === "true" ||
+    String(body.captionsEnabled || "") === "1";
+
+  const styleRaw = String(body.captionStyle || "").trim().toLowerCase();
+  const style = styleRaw === "karoke" ? "karaoke" : styleRaw;
+
+  const captionSettings =
+    body.captionSettings && typeof body.captionSettings === "object"
+      ? body.captionSettings
+      : (() => {
+          try { return JSON.parse(String(body.captionSettings || "")); }
+          catch { return null; }
+        })();
+
+  const captionsText = safeStr(body.script, ""); // ✅ script only
+
+  const STYLE_TO_LAYER = {
+    sentence: "Subtitles_Sentence",
+    karaoke: "Subtitles_Karaoke",
+    word: "Subtitles_Word",
+    boldwhite: "Subtitles_BoldWhite",
+    yellowpop: "Subtitles_YellowPop",
+    minttag: "Subtitles_MintTag",
+    outlinepunch: "Subtitles_OutlinePunch",
+    blackbar: "Subtitles_BlackBar",
+    highlighter: "Subtitles_Highlighter",
+    neonglow: "Subtitles_NeonGlow",
+    purplepop: "Subtitles_PurplePop",
+    compactlowerthird: "Subtitles_CompactLowerThird",
+    bouncepop: "Subtitles_BouncePop",
+    redalert: "Subtitles_RedAlert",
+    redtag: "Subtitles_RedTag",
+  };
+
+  const ALL_SUBTITLE_LAYERS = Object.values(STYLE_TO_LAYER);
+
+  function applyCaptionSettings(layerName, s) {
+    if (!s || typeof s !== "object") return;
+
+    if (s.x != null) m[`${layerName}.x`] = pct(Number(s.x));
+    if (s.y != null) m[`${layerName}.y`] = pct(Number(s.y));
+
+    if (s.fontFamily) m[`${layerName}.font_family`] = String(s.fontFamily);
+    if (s.fontSize != null) m[`${layerName}.font_size`] = Number(s.fontSize);
+    if (s.fontWeight != null) m[`${layerName}.font_weight`] = Number(s.fontWeight);
+
+    if (s.fillColor) m[`${layerName}.fill_color`] = String(s.fillColor);
+    if (s.strokeColor) m[`${layerName}.stroke_color`] = String(s.strokeColor);
+    if (s.strokeWidth != null) m[`${layerName}.stroke_width`] = Number(s.strokeWidth);
+
+    if (s.backgroundColor) m[`${layerName}.background_color`] = String(s.backgroundColor);
+    if (s.shadowColor) m[`${layerName}.shadow_color`] = String(s.shadowColor);
+
+    if (s.textTransform) m[`${layerName}.text_transform`] = String(s.textTransform);
+  }
+
+  // hide all by default
+  for (const layer of ALL_SUBTITLE_LAYERS) {
+    m[`${layer}.hidden`] = true;
+    m[`${layer}.opacity`] = "0%";
+  }
+
+  if (captionsEnabled && captionsText) {
+    const chosenLayer = STYLE_TO_LAYER[style] || STYLE_TO_LAYER.sentence;
+
+    m[`${chosenLayer}.hidden`] = false;
+    m[`${chosenLayer}.opacity`] = "100%";
+
+    m[`${chosenLayer}.text`] = captionsText;
+
+    m[`${chosenLayer}.time`] = scriptStart;
+    m[`${chosenLayer}.duration`] = Math.max(0.1, totalTimelineSecs - scriptStart);
+
+    applyCaptionSettings(chosenLayer, captionSettings);
+  }
+
   return m;
 }
+
+
 
 
 
