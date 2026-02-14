@@ -404,179 +404,86 @@ async function buildModifications(body) {
     m["Video.fit"] = "cover";
   }
 
-  // ==========================================================
-  // ✅ timing (SAFE + accurate)
-  // - get MP3 duration by scanning frames (works for VBR)
-  // - NEVER allow duration to go below speech estimate
-  // - trim only the END silence (without cutting words)
-  // ==========================================================
-  function estimateSpeechSeconds(text) {
-    const words = String(text || "").trim().split(/\s+/).filter(Boolean).length;
-    const WPS = 2.9;
-    return Math.max(0.55, words / WPS);
-  }
-
-  // Robust MP3 duration (frame scan). Works even without Xing/Info.
-  function mp3DurationByFrameScan(buf, fallbackSeconds = 1.0) {
-    try {
-      if (!buf || buf.length < 128) return fallbackSeconds;
-
-      let off = 0;
-
-      // Skip ID3v2 tag if present
-      if (buf.slice(0, 3).toString("utf8") === "ID3") {
-        const size =
-          ((buf[6] & 0x7f) << 21) |
-          ((buf[7] & 0x7f) << 14) |
-          ((buf[8] & 0x7f) << 7) |
-          (buf[9] & 0x7f);
-        off = 10 + size;
-      }
-
-      const brTableMpeg1L3 = [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0];
-      const brTableMpeg2L3 = [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0];
-      const srMpeg1 = [44100, 48000, 32000, 0];
-      const srMpeg2 = [22050, 24000, 16000, 0];
-      const srMpeg25 = [11025, 12000, 8000, 0];
-
-      let samplesTotal = 0;
-      let sampleRateLast = 44100;
-
-      let frames = 0;
-      const MAX_FRAMES = 200000;
-
-      while (off + 4 < buf.length && frames < MAX_FRAMES) {
-        if (!(buf[off] === 0xff && (buf[off + 1] & 0xe0) === 0xe0)) {
-          off++;
-          continue;
-        }
-
-        const b1 = buf[off + 1];
-        const b2 = buf[off + 2];
-
-        const versionBits = (b1 >> 3) & 0x03; // 3=MPEG1, 2=MPEG2, 0=MPEG2.5
-        const layerBits = (b1 >> 1) & 0x03; // 1=Layer III
-        const bitrateIdx = (b2 >> 4) & 0x0f;
-        const srIdx = (b2 >> 2) & 0x03;
-        const padding = (b2 >> 1) & 0x01;
-
-        if (layerBits !== 1 || bitrateIdx === 0 || bitrateIdx === 15 || srIdx === 3) {
-          off++;
-          continue;
-        }
-
-        const isMpeg1 = versionBits === 3;
-        const isMpeg2 = versionBits === 2;
-        const isMpeg25 = versionBits === 0;
-
-        const sampleRate = isMpeg1 ? srMpeg1[srIdx] : (isMpeg2 ? srMpeg2[srIdx] : srMpeg25[srIdx]);
-        if (!sampleRate) {
-          off++;
-          continue;
-        }
-        sampleRateLast = sampleRate;
-
-        const bitrateKbps = isMpeg1 ? brTableMpeg1L3[bitrateIdx] : brTableMpeg2L3[bitrateIdx];
-        if (!bitrateKbps) {
-          off++;
-          continue;
-        }
-
-        const spf = isMpeg1 ? 1152 : 576;
-        samplesTotal += spf;
-
-        const coef = isMpeg1 ? 144 : 72;
-        const frameLen = Math.floor((coef * (bitrateKbps * 1000)) / sampleRate) + padding;
-        if (frameLen <= 0) {
-          off++;
-          continue;
-        }
-
-        off += frameLen;
-        frames++;
-      }
-
-      if (samplesTotal <= 0) return fallbackSeconds;
-      return samplesTotal / sampleRateLast;
-    } catch {
-      return fallbackSeconds;
-    }
-  }
-
   const postVoiceId = normalizeElevenVoiceId(body.postVoice) || DEFAULT_ELEVEN_VOICE_ID;
   const scriptVoiceId = normalizeElevenVoiceId(body.scriptVoice) || DEFAULT_ELEVEN_VOICE_ID;
   const scriptText = safeStr(body.script, "");
 
-  const postEstimate = estimateSpeechSeconds(postText);
-  const scriptEstimate = scriptText ? estimateSpeechSeconds(scriptText) : 0;
+  // ==========================================================
+  // ✅ timing + silence fix (IMPORTANT)
+  // Use Creatomate trim_duration on the AUDIO layers to remove trailing silence.
+  // Do NOT subtract random seconds from the whole timeline.
+  // ==========================================================
+  function estimateSpeechSeconds(text) {
+    const words = String(text || "")
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean).length;
 
-  let postDur = postEstimate;
-  let scriptDur = scriptEstimate;
-
-  // Post voice (ALWAYS generate mp3)
-  {
-    const postMp3 = await elevenlabsTtsToMp3Buffer(postText, postVoiceId);
-    postDur = mp3DurationByFrameScan(postMp3, postEstimate);
-
-    const postPath = `reddit/${Date.now()}_${randId()}_post.mp3`;
-    const postUrl = await uploadMp3ToSupabasePublic(postMp3, postPath);
-    m["post_voice.source"] = postUrl;
+    // keep your WPS
+    const WPS = 2.9;
+    return Math.max(0.55, words / WPS);
   }
 
-  // Script voice (only if script exists)
-  if (scriptText) {
-    const scriptMp3 = await elevenlabsTtsToMp3Buffer(scriptText, scriptVoiceId);
-    scriptDur = mp3DurationByFrameScan(scriptMp3, scriptEstimate);
+  const postSecsEst = estimateSpeechSeconds(postText);
+  const scriptSecsEst = scriptText ? estimateSpeechSeconds(scriptText) : 0;
 
-    const scriptPath = `reddit/${Date.now()}_${randId()}_script.mp3`;
-    const scriptUrl = await uploadMp3ToSupabasePublic(scriptMp3, scriptPath);
-    m["script_voice.source"] = scriptUrl;
-  }
-
-  // overlap + card timing
+  // Visual: end card earlier (your original)
   const CARD_EARLY_CUT = 1.1;
+
+  // Audio: overlap to reduce dead air between title and script
   const SCRIPT_OVERLAP = 0.75;
 
-  const postDurSafe = Math.max(postEstimate * 0.9, postDur); // never shorter than estimate
-  const cardSecs = Math.max(0.35, postDurSafe - CARD_EARLY_CUT);
+  const cardSecs = Math.max(0.35, postSecsEst - CARD_EARLY_CUT);
+  const scriptStart = Math.max(0, postSecsEst - SCRIPT_OVERLAP);
 
-  const scriptStart = scriptText ? Math.max(0, postDurSafe - SCRIPT_OVERLAP) : 0;
-
-  // ✅ CUT ONLY trailing silence (script)
-  const TRAIL_SILENCE_CUT = 1; // bump to 2.3 if you still hear ~2s
-  const scriptDurSafe = scriptText
-    ? Math.max(scriptEstimate * 0.9, scriptDur - TRAIL_SILENCE_CUT)
-    : 0;
-
-  // cards
+  // cards only exist during title window (shortened)
   m["post_card_light.time"] = 0;
   m["post_card_light.duration"] = cardSecs;
   m["post_card_dark.time"] = 0;
   m["post_card_dark.duration"] = cardSecs;
 
-  // audio (✅ clamp duration so Creatomate trims mp3 tail)
-  m["post_voice.time"] = 0;
-  m["post_voice.duration"] = postDurSafe;
-
-  if (scriptText) {
-    m["script_voice.time"] = scriptStart;
-    m["script_voice.duration"] = scriptDurSafe;
+  // ---- generate audio URLs (same as before) ----
+  {
+    const postMp3 = await elevenlabsTtsToMp3Buffer(postText, postVoiceId);
+    const postPath = `reddit/${Date.now()}_${randId()}_post.mp3`;
+    const postUrl = await uploadMp3ToSupabasePublic(postMp3, postPath);
+    m["post_voice.source"] = postUrl;
   }
 
-  // timeline end = end of last audio layer (safe)
-  const TAIL_PAD = 0.08;
-  const audioEnd = scriptText
-    ? (scriptStart + scriptDurSafe + TAIL_PAD)
-    : (postDurSafe + TAIL_PAD);
+  if (scriptText) {
+    const scriptMp3 = await elevenlabsTtsToMp3Buffer(scriptText, scriptVoiceId);
+    const scriptPath = `reddit/${Date.now()}_${randId()}_script.mp3`;
+    const scriptUrl = await uploadMp3ToSupabasePublic(scriptMp3, scriptPath);
+    m["script_voice.source"] = scriptUrl;
+  }
 
-  const totalTimelineSecs = Math.max(0.9, audioEnd);
+  // audio timing
+  m["post_voice.time"] = 0;
+  if (scriptText) m["script_voice.time"] = scriptStart;
 
-  // background cannot extend timeline
+  // ✅ THIS is what removes the extra ~2s silence:
+  // Trim each audio clip to the estimated speaking length (+ a tiny pad)
+  const AUDIO_PAD = 0.18; // prevents cutting last syllable
+  m["post_voice.trim_start"] = 0;
+  m["post_voice.trim_duration"] = Math.max(0.2, postSecsEst + AUDIO_PAD);
+
+  if (scriptText) {
+    m["script_voice.trim_start"] = 0;
+    m["script_voice.trim_duration"] = Math.max(0.2, scriptSecsEst + AUDIO_PAD);
+  }
+
+  // total timeline end (based on trimmed audio end)
+  const TAIL_PAD = 0.12;
+  const totalTimelineSecs = scriptText
+    ? (scriptStart + (scriptSecsEst + AUDIO_PAD) + TAIL_PAD)
+    : (postSecsEst + AUDIO_PAD + TAIL_PAD);
+
+  // Trim the background layer so it doesn't keep the timeline alive
   m["Video.time"] = 0;
   m["Video.duration"] = totalTimelineSecs;
 
   // ==========================================================
-  // ✅ CAPTIONS (Subtitles_* layers)
+  // ✅ CAPTIONS (your existing “exact names” mapping)
   // - show only chosen style
   // - caption text = SCRIPT ONLY (never title)
   // - start at scriptStart
@@ -593,16 +500,12 @@ async function buildModifications(body) {
     body.captionSettings && typeof body.captionSettings === "object"
       ? body.captionSettings
       : (() => {
-          try {
-            return JSON.parse(String(body.captionSettings || ""));
-          } catch {
-            return null;
-          }
+          try { return JSON.parse(String(body.captionSettings || "")); }
+          catch { return null; }
         })();
 
   const captionsText = safeStr(body.script, ""); // ✅ script only
 
-  // IMPORTANT: must match your template layer NAMES exactly
   const STYLE_TO_LAYER = {
     sentence: "Subtitles_Sentence",
     karaoke: "Subtitles_Karaoke",
@@ -615,7 +518,7 @@ async function buildModifications(body) {
     highlighter: "Subtitles_Highlighter",
     neonglow: "Subtitles_NeonGlow",
     purplepop: "Subtitles_PurplePop",
-    compactlowerthird: "Subtitles_CompactLowerThird",
+    compactlowerthird: "Subtitles_CompactLowerthird",
     bouncepop: "Subtitles_BouncePop",
     redalert: "Subtitles_RedAlert",
     redtag: "Subtitles_RedTag",
@@ -629,7 +532,8 @@ async function buildModifications(body) {
     if (s.x != null) m[`${layerName}.x`] = pct(Number(s.x));
     if (s.y != null) m[`${layerName}.y`] = pct(Number(s.y));
 
-    // These only work if your Creatomate subtitle layers expose these properties.
+    // NOTE: these property names must match your template fields.
+    // Keep/remove as needed based on what Creatomate exposes on your subtitle layers.
     if (s.fontFamily) m[`${layerName}.font_family`] = String(s.fontFamily);
     if (s.fontSize != null) m[`${layerName}.font_size`] = Number(s.fontSize);
     if (s.fontWeight != null) m[`${layerName}.font_weight`] = Number(s.fontWeight);
@@ -657,7 +561,6 @@ async function buildModifications(body) {
     m[`${chosenLayer}.opacity`] = "100%";
 
     m[`${chosenLayer}.text`] = captionsText;
-
     m[`${chosenLayer}.time`] = scriptStart;
     m[`${chosenLayer}.duration`] = Math.max(0.1, totalTimelineSecs - scriptStart);
 
