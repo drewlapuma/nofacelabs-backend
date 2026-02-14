@@ -578,7 +578,7 @@ async function buildModifications(body) {
   m["Video.duration"] = totalTimelineSecs;
 
   // ==========================================================
-  // ✅ CAPTIONS (FIXED FOR REAL): nested transcription keys
+  // ✅ CAPTIONS (ONLY CHANGE): prevent box/glow leakage
   // ==========================================================
   const captionsEnabled =
     body.captionsEnabled === true ||
@@ -619,10 +619,8 @@ async function buildModifications(body) {
   function forceHideLayer(layerName) {
     m[`${layerName}.hidden`] = true;
     m[`${layerName}.opacity`] = "0%";
-    // extra flags (some templates rely on these)
     m[`${layerName}.visible`] = false;
     m[`${layerName}.enabled`] = false;
-    // also disable transcription explicitly
     m[`${layerName}.transcription`] = false;
     m[`${layerName}.transcription.enabled`] = false;
   }
@@ -634,53 +632,72 @@ async function buildModifications(body) {
     m[`${layerName}.enabled`] = true;
   }
 
- function applyCaptionSettings(layerName, styleKey, s) {
-  if (!s || typeof s !== "object") return;
+  // ✅ FIX: only apply backgroundColor for blackbar; only shadowColor for neonglow.
+  // Always clear both first so effects never “stick” when switching styles.
+  function applyCaptionSettings(layerName, styleKey, s) {
+    if (!s || typeof s !== "object") return;
 
-  // position
-  if (s.x != null) m[`${layerName}.x`] = pct(Number(s.x));
-  if (s.y != null) m[`${layerName}.y`] = pct(Number(s.y));
+    // position
+    if (s.x != null) m[`${layerName}.x`] = pct(Number(s.x));
+    if (s.y != null) m[`${layerName}.y`] = pct(Number(s.y));
 
-  // typography
-  if (s.fontFamily) m[`${layerName}.font_family`] = String(s.fontFamily);
-  if (s.fontSize != null) m[`${layerName}.font_size`] = Number(s.fontSize);
-  if (s.fontWeight != null) m[`${layerName}.font_weight`] = Number(s.fontWeight);
+    // typography
+    if (s.fontFamily) m[`${layerName}.font_family`] = String(s.fontFamily);
+    if (s.fontSize != null) m[`${layerName}.font_size`] = Number(s.fontSize);
+    if (s.fontWeight != null) m[`${layerName}.font_weight`] = Number(s.fontWeight);
 
-  // fill + stroke
-  if (s.fillColor) m[`${layerName}.fill_color`] = String(s.fillColor);
-  if (s.strokeColor) m[`${layerName}.stroke_color`] = String(s.strokeColor);
-  if (s.strokeWidth != null) m[`${layerName}.stroke_width`] = Number(s.strokeWidth);
+    // fill + stroke
+    if (s.fillColor) m[`${layerName}.fill_color`] = String(s.fillColor);
+    if (s.strokeColor) m[`${layerName}.stroke_color`] = String(s.strokeColor);
+    if (s.strokeWidth != null) m[`${layerName}.stroke_width`] = Number(s.strokeWidth);
 
-  // casing
-  if (s.textTransform) m[`${layerName}.text_transform`] = String(s.textTransform);
+    // casing
+    if (s.textTransform) m[`${layerName}.text_transform`] = String(s.textTransform);
 
-  // ✅ HARD RESET so effects NEVER “leak” between styles
-  // (word/sentence/etc should NOT inherit box or glow)
-  m[`${layerName}.background_color`] = "transparent";
-  m[`${layerName}.shadow_color`] = "transparent";
-  m[`${layerName}.shadow_blur`] = 0;
-  m[`${layerName}.shadow_distance`] = 0;
+    // ✅ HARD RESET (prevents leakage)
+    m[`${layerName}.background_color`] = "transparent";
+    m[`${layerName}.shadow_color`] = "transparent";
+    m[`${layerName}.shadow_blur`] = 0;
+    m[`${layerName}.shadow_distance`] = 0;
 
-  // ✅ Only BlackBar can have box
-  if (styleKey === "blackbar" && s.backgroundColor) {
-    m[`${layerName}.background_color`] = String(s.backgroundColor);
+    // Only BlackBar can have background box
+    if (styleKey === "blackbar" && s.backgroundColor) {
+      m[`${layerName}.background_color`] = String(s.backgroundColor);
+    }
+
+    // Only NeonGlow can have glow/shadow
+    if (styleKey === "neonglow" && s.shadowColor) {
+      m[`${layerName}.shadow_color`] = String(s.shadowColor);
+      if (s.shadowBlur != null) m[`${layerName}.shadow_blur`] = Number(s.shadowBlur);
+      if (s.shadowDistance != null) m[`${layerName}.shadow_distance`] = Number(s.shadowDistance);
+    }
   }
 
-  // ✅ Only NeonGlow can have glow
-  if (styleKey === "neonglow" && s.shadowColor) {
-    m[`${layerName}.shadow_color`] = String(s.shadowColor);
-    // optional if you pass these in settings:
-    if (s.shadowBlur != null) m[`${layerName}.shadow_blur`] = Number(s.shadowBlur);
-    if (s.shadowDistance != null) m[`${layerName}.shadow_distance`] = Number(s.shadowDistance);
-  }
-}
+  // Hide all styles
+  for (const layer of ALL_SUBTITLE_LAYERS) forceHideLayer(layer);
 
+  if (captionsEnabled && scriptText) {
+    const chosenLayer = STYLE_TO_LAYER[style] || STYLE_TO_LAYER.sentence;
+
+    forceShowLayer(chosenLayer);
+
+    // ensure transcription
+    m[`${chosenLayer}.dynamic`] = true;
+    m[`${chosenLayer}.transcription`] = true;
+    m[`${chosenLayer}.transcription.enabled`] = true;
+    m[`${chosenLayer}.transcription.source`] = "script_voice";
+    m[`${chosenLayer}.transcription_source`] = "script_voice";
+
+    // show only during script window
+    m[`${chosenLayer}.time`] = scriptStart;
+    m[`${chosenLayer}.duration`] = Math.max(0.1, totalTimelineSecs - scriptStart);
 
     applyCaptionSettings(chosenLayer, style, captionSettings);
   }
 
   return m;
 }
+
 
 
 
