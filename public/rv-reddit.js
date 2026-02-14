@@ -1233,24 +1233,54 @@
     }
 
     function buildPayload() {
-      return {
-        username: String(readAnyText(usernameEl)).trim(),
-        mode: modeHidden?.value || "light",
-        pfpUrl: String(getPfpUrl() || "").trim(),
-        postTitle: String(readAnyText(postTitleEl)).trim(),
-        postText: getPostTextForPayload(),
-        likes: String(readAnyText(likesEl) || "0").trim(),
-        comments: String(readAnyText(commentsEl) || "0").trim(),
-        shareText: String(readAnyText(shareTextEl) || "share").trim(),
-        postVoice: postVoiceEl?.value || "default",
-        scriptVoice: scriptVoiceEl?.value || "default",
-        script: String(readAnyText(scriptEl)).trim(),
-        tone: String(readAnyText(toneHidden)).trim(),
-        length: String(readAnyText(lenHidden)).trim(),
-        backgroundVideoUrl: bgLibraryUrl,
-        backgroundVideoName: bgLibraryName,
-      };
+  // --- captions (read from your modal hidden inputs) ---
+  const capEnabledEl = document.getElementById("caption-enabled-value");
+  const capStyleEl = document.getElementById("caption-style-value");
+  const capSettingsEl = document.getElementById("caption-settings-value");
+
+  const captionsEnabled = String(capEnabledEl?.value || "0") === "1";
+  const captionStyle = String(capStyleEl?.value || "").trim();
+  const captionSettingsRaw = String(capSettingsEl?.value || "").trim();
+
+  let captionSettings = null;
+  if (captionsEnabled && captionSettingsRaw) {
+    try {
+      captionSettings = JSON.parse(captionSettingsRaw);
+    } catch {
+      captionSettings = null;
     }
+  }
+
+  const payload = {
+    username: String(readAnyText(usernameEl)).trim(),
+    mode: modeHidden?.value || "light",
+    pfpUrl: String(getPfpUrl() || "").trim(),
+    postTitle: String(readAnyText(postTitleEl)).trim(),
+    postText: getPostTextForPayload(),
+    likes: String(readAnyText(likesEl) || "0").trim(),
+    comments: String(readAnyText(commentsEl) || "0").trim(),
+    shareText: String(readAnyText(shareTextEl) || "share").trim(),
+    postVoice: postVoiceEl?.value || "default",
+    scriptVoice: scriptVoiceEl?.value || "default",
+    script: String(readAnyText(scriptEl)).trim(),
+    tone: String(readAnyText(toneHidden)).trim(),
+    length: String(readAnyText(lenHidden)).trim(),
+    backgroundVideoUrl: bgLibraryUrl,
+    backgroundVideoName: bgLibraryName,
+  };
+
+  // Only send caption fields if enabled + valid
+  if (captionsEnabled && captionStyle && captionSettings) {
+    payload.captionsEnabled = true;
+    payload.captionStyle = captionStyle;
+    payload.captionSettings = captionSettings;
+  } else {
+    payload.captionsEnabled = false;
+  }
+
+  return payload;
+}
+
 
     if (genBtn) {
       genBtn.addEventListener("click", async () => {
