@@ -404,16 +404,7 @@ async function buildModifications(body) {
     m["Video.fit"] = "cover";
   }
 
-  const postVoiceId = normalizeElevenVoiceId(body.postVoice) || DEFAULT_ELEVEN_VOICE_ID;
-  const scriptVoiceId = normalizeElevenVoiceId(body.scriptVoice) || DEFAULT_ELEVEN_VOICE_ID;
-  const scriptText = safeStr(body.script, "");
-
   // ==========================================================
-  // ✅ MP3 duration helper (no deps)
-  // Reads VBR/Xing if present; otherwise estimates from MPEG frames.
-  // If it can't detect, falls back to rough estimate.
-  // ==========================================================
-    // ==========================================================
   // ✅ timing (SAFE + accurate)
   // - get MP3 duration by scanning frames (works for VBR)
   // - NEVER allow duration to go below speech estimate
@@ -442,9 +433,8 @@ async function buildModifications(body) {
         off = 10 + size;
       }
 
-      // Tables
-      const brTableMpeg1L3 = [0,32,40,48,56,64,80,96,112,128,160,192,224,256,320,0];
-      const brTableMpeg2L3 = [0,8,16,24,32,40,48,56,64,80,96,112,128,144,160,0];
+      const brTableMpeg1L3 = [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0];
+      const brTableMpeg2L3 = [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0];
       const srMpeg1 = [44100, 48000, 32000, 0];
       const srMpeg2 = [22050, 24000, 16000, 0];
       const srMpeg25 = [11025, 12000, 8000, 0];
@@ -452,13 +442,10 @@ async function buildModifications(body) {
       let samplesTotal = 0;
       let sampleRateLast = 44100;
 
-      // Scan frames
-      // Hard cap iterations to avoid pathological cases
       let frames = 0;
       const MAX_FRAMES = 200000;
 
       while (off + 4 < buf.length && frames < MAX_FRAMES) {
-        // find sync 0xFFE
         if (!(buf[off] === 0xff && (buf[off + 1] & 0xe0) === 0xe0)) {
           off++;
           continue;
@@ -466,17 +453,15 @@ async function buildModifications(body) {
 
         const b1 = buf[off + 1];
         const b2 = buf[off + 2];
-        const b3 = buf[off + 3];
 
         const versionBits = (b1 >> 3) & 0x03; // 3=MPEG1, 2=MPEG2, 0=MPEG2.5
-        const layerBits = (b1 >> 1) & 0x03;   // 1=Layer III
+        const layerBits = (b1 >> 1) & 0x03; // 1=Layer III
         const bitrateIdx = (b2 >> 4) & 0x0f;
         const srIdx = (b2 >> 2) & 0x03;
         const padding = (b2 >> 1) & 0x01;
 
-        // We only support Layer III here
         if (layerBits !== 1 || bitrateIdx === 0 || bitrateIdx === 15 || srIdx === 3) {
-          off++; // not a usable frame, continue scanning
+          off++;
           continue;
         }
 
@@ -484,23 +469,28 @@ async function buildModifications(body) {
         const isMpeg2 = versionBits === 2;
         const isMpeg25 = versionBits === 0;
 
-        let sampleRate = isMpeg1 ? srMpeg1[srIdx] : (isMpeg2 ? srMpeg2[srIdx] : srMpeg25[srIdx]);
-        if (!sampleRate) { off++; continue; }
+        const sampleRate = isMpeg1 ? srMpeg1[srIdx] : (isMpeg2 ? srMpeg2[srIdx] : srMpeg25[srIdx]);
+        if (!sampleRate) {
+          off++;
+          continue;
+        }
         sampleRateLast = sampleRate;
 
         const bitrateKbps = isMpeg1 ? brTableMpeg1L3[bitrateIdx] : brTableMpeg2L3[bitrateIdx];
-        if (!bitrateKbps) { off++; continue; }
+        if (!bitrateKbps) {
+          off++;
+          continue;
+        }
 
-        // samples per frame
         const spf = isMpeg1 ? 1152 : 576;
         samplesTotal += spf;
 
-        // frame length in bytes for Layer III
-        // MPEG1: 144 * bitrate / sr + padding
-        // MPEG2/2.5: 72 * bitrate / sr + padding
         const coef = isMpeg1 ? 144 : 72;
         const frameLen = Math.floor((coef * (bitrateKbps * 1000)) / sampleRate) + padding;
-        if (frameLen <= 0) { off++; continue; }
+        if (frameLen <= 0) {
+          off++;
+          continue;
+        }
 
         off += frameLen;
         frames++;
@@ -513,7 +503,6 @@ async function buildModifications(body) {
     }
   }
 
-  // --- generate audio + get real durations safely ---
   const postVoiceId = normalizeElevenVoiceId(body.postVoice) || DEFAULT_ELEVEN_VOICE_ID;
   const scriptVoiceId = normalizeElevenVoiceId(body.scriptVoice) || DEFAULT_ELEVEN_VOICE_ID;
   const scriptText = safeStr(body.script, "");
@@ -524,7 +513,7 @@ async function buildModifications(body) {
   let postDur = postEstimate;
   let scriptDur = scriptEstimate;
 
-  // Post voice (ALWAYS)
+  // Post voice (ALWAYS generate mp3)
   {
     const postMp3 = await elevenlabsTtsToMp3Buffer(postText, postVoiceId);
     postDur = mp3DurationByFrameScan(postMp3, postEstimate);
@@ -544,7 +533,7 @@ async function buildModifications(body) {
     m["script_voice.source"] = scriptUrl;
   }
 
-  // --- overlap + card timing ---
+  // overlap + card timing
   const CARD_EARLY_CUT = 1.1;
   const SCRIPT_OVERLAP = 0.75;
 
@@ -553,11 +542,8 @@ async function buildModifications(body) {
 
   const scriptStart = scriptText ? Math.max(0, postDurSafe - SCRIPT_OVERLAP) : 0;
 
-  // --- CUT ONLY THE TRAILING SILENCE (script) ---
-  // If you still hear silence, bump this to 2.2–2.5
-  const TRAIL_SILENCE_CUT = 2.0;
-
-  // Don’t cut below estimate (prevents chopping words)
+  // ✅ CUT ONLY trailing silence (script)
+  const TRAIL_SILENCE_CUT = 2.0; // bump to 2.3 if you still hear ~2s
   const scriptDurSafe = scriptText
     ? Math.max(scriptEstimate * 0.9, scriptDur - TRAIL_SILENCE_CUT)
     : 0;
@@ -568,7 +554,7 @@ async function buildModifications(body) {
   m["post_card_dark.time"] = 0;
   m["post_card_dark.duration"] = cardSecs;
 
-  // audio (✅ set duration so Creatomate truncates the mp3 tail)
+  // audio (✅ clamp duration so Creatomate trims mp3 tail)
   m["post_voice.time"] = 0;
   m["post_voice.duration"] = postDurSafe;
 
@@ -589,12 +575,11 @@ async function buildModifications(body) {
   m["Video.time"] = 0;
   m["Video.duration"] = totalTimelineSecs;
 
-
   // ==========================================================
   // ✅ CAPTIONS (Subtitles_* layers)
   // - show only chosen style
   // - caption text = SCRIPT ONLY (never title)
-  // - start at scriptStart and end at timeline end
+  // - start at scriptStart
   // ==========================================================
   const captionsEnabled =
     body.captionsEnabled === true ||
@@ -608,12 +593,16 @@ async function buildModifications(body) {
     body.captionSettings && typeof body.captionSettings === "object"
       ? body.captionSettings
       : (() => {
-          try { return JSON.parse(String(body.captionSettings || "")); }
-          catch { return null; }
+          try {
+            return JSON.parse(String(body.captionSettings || ""));
+          } catch {
+            return null;
+          }
         })();
 
   const captionsText = safeStr(body.script, ""); // ✅ script only
 
+  // IMPORTANT: must match your template layer NAMES exactly
   const STYLE_TO_LAYER = {
     sentence: "Subtitles_Sentence",
     karaoke: "Subtitles_Karaoke",
@@ -636,9 +625,11 @@ async function buildModifications(body) {
 
   function applyCaptionSettings(layerName, s) {
     if (!s || typeof s !== "object") return;
+
     if (s.x != null) m[`${layerName}.x`] = pct(Number(s.x));
     if (s.y != null) m[`${layerName}.y`] = pct(Number(s.y));
 
+    // These only work if your Creatomate subtitle layers expose these properties.
     if (s.fontFamily) m[`${layerName}.font_family`] = String(s.fontFamily);
     if (s.fontSize != null) m[`${layerName}.font_size`] = Number(s.fontSize);
     if (s.fontWeight != null) m[`${layerName}.font_weight`] = Number(s.fontWeight);
@@ -667,15 +658,15 @@ async function buildModifications(body) {
 
     m[`${chosenLayer}.text`] = captionsText;
 
-    // show captions during the spoken script
-    m[`${chosenLayer}.time`] = scriptText ? scriptStart : 0;
-    m[`${chosenLayer}.duration`] = Math.max(0.1, totalTimelineSecs - (scriptText ? scriptStart : 0));
+    m[`${chosenLayer}.time`] = scriptStart;
+    m[`${chosenLayer}.duration`] = Math.max(0.1, totalTimelineSecs - scriptStart);
 
     applyCaptionSettings(chosenLayer, captionSettings);
   }
 
   return m;
 }
+
 
 
 
