@@ -369,7 +369,7 @@ async function buildModifications(body) {
   setMulti(m, ["comment_count_dark.y", "post_card_dark.comment_count_dark.y"], pct(commentY));
 
   setMulti(m, ["share_light.y", "post_card_light.share_light.y"], pct(shareTextY));
-  setMulti(m, ["share_dark.y", "post_card_dark.share_dark.y"], pct(shareTextY));
+  setMulti(m, ["share_dark.y", "post_card_dark.share_light.y"], pct(shareTextY));
 
   setMulti(m, ["icon_like.y", "post_card_light.icon_like.y", "post_card_dark.icon_like.y"], pct(iconLikeY));
   setMulti(m, ["icon_comment.y", "post_card_light.icon_comment.y", "post_card_dark.icon_comment.y"], pct(iconCommentY));
@@ -408,71 +408,163 @@ async function buildModifications(body) {
   const scriptVoiceId = normalizeElevenVoiceId(body.scriptVoice) || DEFAULT_ELEVEN_VOICE_ID;
   const scriptText = safeStr(body.script, "");
 
-  // Post voice (ALWAYS generate mp3)
-  {
-    const postMp3 = await elevenlabsTtsToMp3Buffer(postText, postVoiceId);
-    const postPath = `reddit/${Date.now()}_${randId()}_post.mp3`;
-    const postUrl = await uploadMp3ToSupabasePublic(postMp3, postPath);
-    m["post_voice.source"] = postUrl;
-  }
-
-  // Script voice (only if script exists)
-  if (scriptText) {
-    const scriptMp3 = await elevenlabsTtsToMp3Buffer(scriptText, scriptVoiceId);
-    const scriptPath = `reddit/${Date.now()}_${randId()}_script.mp3`;
-    const scriptUrl = await uploadMp3ToSupabasePublic(scriptMp3, scriptPath);
-    m["script_voice.source"] = scriptUrl;
-  }
-
   // ==========================================================
-  // timing (unchanged behavior)
+  // ✅ MP3 duration helper (no deps)
+  // Reads VBR/Xing if present; otherwise estimates from MPEG frames.
+  // If it can't detect, falls back to rough estimate.
   // ==========================================================
   function estimateSpeechSeconds(text) {
-    const words = String(text || "")
-      .trim()
-      .split(/\s+/)
-      .filter(Boolean).length;
+    const words = String(text || "").trim().split(/\s+/).filter(Boolean).length;
     const WPS = 2.9;
     return Math.max(0.55, words / WPS);
   }
 
-  const postSecsRaw = estimateSpeechSeconds(postText);
+  function mp3DurationSeconds(buf, fallbackSeconds = 1.0) {
+    try {
+      if (!buf || buf.length < 128) return fallbackSeconds;
 
+      // Skip ID3v2 if present
+      let offset = 0;
+      if (buf.slice(0, 3).toString("utf8") === "ID3") {
+        const size =
+          ((buf[6] & 0x7f) << 21) |
+          ((buf[7] & 0x7f) << 14) |
+          ((buf[8] & 0x7f) << 7) |
+          (buf[9] & 0x7f);
+        offset = 10 + size;
+      }
+
+      // Find first frame sync
+      const maxScan = Math.min(buf.length - 4, offset + 64 * 1024);
+      let i = offset;
+      for (; i < maxScan; i++) {
+        if (buf[i] === 0xff && (buf[i + 1] & 0xe0) === 0xe0) break;
+      }
+      if (i >= maxScan) return fallbackSeconds;
+
+      const b1 = buf[i + 1];
+      const b2 = buf[i + 2];
+      const b3 = buf[i + 3];
+
+      const versionBits = (b1 >> 3) & 0x03; // 3=MPEG1, 2=MPEG2, 0=MPEG2.5
+      const layerBits = (b1 >> 1) & 0x03;   // 1=Layer III
+      const bitrateIdx = (b2 >> 4) & 0x0f;
+      const srIdx = (b2 >> 2) & 0x03;
+      if (layerBits !== 1 || bitrateIdx === 0 || bitrateIdx === 15 || srIdx === 3) {
+        return fallbackSeconds;
+      }
+
+      const isMpeg1 = versionBits === 3;
+      const sampleRates = isMpeg1 ? [44100, 48000, 32000] : [22050, 24000, 16000];
+      const sampleRate = sampleRates[srIdx];
+
+      // Bitrate tables (kbps) for Layer III
+      const brTableMpeg1 = [0,32,40,48,56,64,80,96,112,128,160,192,224,256,320,0];
+      const brTableMpeg2 = [0,8,16,24,32,40,48,56,64,80,96,112,128,144,160,0];
+      const bitrateKbps = isMpeg1 ? brTableMpeg1[bitrateIdx] : brTableMpeg2[bitrateIdx];
+      if (!bitrateKbps) return fallbackSeconds;
+
+      // Try read Xing/Info header for frames count (best)
+      // Side info size: MPEG1 = 32 bytes stereo/dual, 17 mono. We'll just search nearby.
+      const xingWindowStart = i + 4;
+      const xingWindowEnd = Math.min(buf.length, i + 4 + 256);
+      const xingPos = buf.indexOf(Buffer.from("Xing"), xingWindowStart);
+      const infoPos = buf.indexOf(Buffer.from("Info"), xingWindowStart);
+      const tagPos = (xingPos !== -1 && xingPos < xingWindowEnd) ? xingPos : ((infoPos !== -1 && infoPos < xingWindowEnd) ? infoPos : -1);
+
+      if (tagPos !== -1 && tagPos + 16 < buf.length) {
+        const flags = buf.readUInt32BE(tagPos + 4);
+        const hasFrames = (flags & 0x0001) !== 0;
+        if (hasFrames) {
+          const frames = buf.readUInt32BE(tagPos + 8);
+          // samples per frame: MPEG1 Layer III = 1152, MPEG2/2.5 Layer III = 576
+          const spf = isMpeg1 ? 1152 : 576;
+          return (frames * spf) / sampleRate;
+        }
+      }
+
+      // Fallback: CBR estimate from file size and bitrate
+      const audioBytes = buf.length - i;
+      const bitrateBps = bitrateKbps * 1000;
+      return (audioBytes * 8) / bitrateBps;
+    } catch {
+      return fallbackSeconds;
+    }
+  }
+
+  // ==========================================================
+  // ✅ Generate audio + measure real duration
+  // ==========================================================
+  let postDur = estimateSpeechSeconds(postText);
+  let scriptDur = scriptText ? estimateSpeechSeconds(scriptText) : 0;
+
+  let postUrl = "";
+  {
+    const postMp3 = await elevenlabsTtsToMp3Buffer(postText, postVoiceId);
+    postDur = mp3DurationSeconds(postMp3, postDur);
+    const postPath = `reddit/${Date.now()}_${randId()}_post.mp3`;
+    postUrl = await uploadMp3ToSupabasePublic(postMp3, postPath);
+    m["post_voice.source"] = postUrl;
+  }
+
+  let scriptUrl = "";
+  if (scriptText) {
+    const scriptMp3 = await elevenlabsTtsToMp3Buffer(scriptText, scriptVoiceId);
+    scriptDur = mp3DurationSeconds(scriptMp3, scriptDur);
+    const scriptPath = `reddit/${Date.now()}_${randId()}_script.mp3`;
+    scriptUrl = await uploadMp3ToSupabasePublic(scriptMp3, scriptPath);
+    m["script_voice.source"] = scriptUrl;
+  }
+
+  // ==========================================================
+  // ✅ timing tweaks
+  // - Use REAL audio duration (postDur/scriptDur)
+  // - Cut trailing silence by clamping audio layer duration
+  // ==========================================================
   const CARD_EARLY_CUT = 1.1;
   const SCRIPT_OVERLAP = 0.75;
 
-  const cardSecs = Math.max(0.35, postSecsRaw - CARD_EARLY_CUT);
-  const scriptStart = Math.max(0, postSecsRaw - SCRIPT_OVERLAP);
+  // This is the silence you’re hearing at the end of ElevenLabs audio:
+  const TRAIL_SILENCE_CUT = 2.0; // <-- adjust if needed (1.5–2.5)
 
+  const postDurClamped = Math.max(0.25, postDur - 0.05); // tiny safety
+  const scriptDurClamped = scriptText ? Math.max(0.25, scriptDur - TRAIL_SILENCE_CUT) : 0;
+
+  const cardSecs = Math.max(0.35, postDurClamped - CARD_EARLY_CUT);
+  const scriptStart = scriptText ? Math.max(0, postDurClamped - SCRIPT_OVERLAP) : 0;
+
+  // card timing
   m["post_card_light.time"] = 0;
   m["post_card_light.duration"] = cardSecs;
   m["post_card_dark.time"] = 0;
   m["post_card_dark.duration"] = cardSecs;
 
+  // audio timing + ✅ clamp duration to remove trailing silence
   m["post_voice.time"] = 0;
-  if (scriptText) m["script_voice.time"] = scriptStart;
+  m["post_voice.duration"] = postDurClamped;
 
-  const END_TRIM_SECONDS = 3.0;
-  const TAIL_PAD = 0.03; // tiny pad so it doesn't cut the last syllable
+  if (scriptText) {
+    m["script_voice.time"] = scriptStart;
+    m["script_voice.duration"] = scriptDurClamped;
+  }
 
-  const scriptSecsRaw = scriptText ? estimateSpeechSeconds(scriptText) : 0;
-  const estimatedEnd = scriptText
-    ? (scriptStart + scriptSecsRaw + TAIL_PAD)
-    : (postSecsRaw + TAIL_PAD);
+  // ✅ Timeline end = end of last audio (post or script)
+  const TAIL_PAD = 0.06;
+  const audioEnd = scriptText
+    ? (scriptStart + scriptDurClamped + TAIL_PAD)
+    : (postDurClamped + TAIL_PAD);
 
-  // ✅ HARD END: timeline ends when audio ends
-  const totalTimelineSecs = Math.max(0.9, estimatedEnd);
+  const totalTimelineSecs = Math.max(0.9, audioEnd);
 
-  // Trim background so it can't extend the render
+  // Trim background so it can't keep timeline alive
   m["Video.time"] = 0;
   m["Video.duration"] = totalTimelineSecs;
 
-  // (optional but recommended) also keep captions from extending past end
-  // if you set captions elsewhere, use the same totalTimelineSecs there too
-
-
   // ==========================================================
-  // ✅ CAPTIONS (HARD FORCE ON)
+  // ✅ CAPTIONS (Subtitles_* layers)
+  // - show only chosen style
+  // - caption text = SCRIPT ONLY (never title)
+  // - start at scriptStart and end at timeline end
   // ==========================================================
   const captionsEnabled =
     body.captionsEnabled === true ||
@@ -490,7 +582,7 @@ async function buildModifications(body) {
           catch { return null; }
         })();
 
-  const captionsText = safeStr(body.script, "");
+  const captionsText = safeStr(body.script, ""); // ✅ script only
 
   const STYLE_TO_LAYER = {
     sentence: "Subtitles_Sentence",
@@ -512,79 +604,49 @@ async function buildModifications(body) {
 
   const ALL_SUBTITLE_LAYERS = Object.values(STYLE_TO_LAYER);
 
-  function forceHideLayer(layerName) {
-    // try every flag Creatomate templates commonly use
-    m[`${layerName}.hidden`] = true;
-    m[`${layerName}.visible`] = false;
-    m[`${layerName}.enabled`] = false;
-    m[`${layerName}.opacity`] = "0%";
-  }
+  function applyCaptionSettings(layerName, s) {
+    if (!s || typeof s !== "object") return;
+    if (s.x != null) m[`${layerName}.x`] = pct(Number(s.x));
+    if (s.y != null) m[`${layerName}.y`] = pct(Number(s.y));
 
-  function forceShowLayer(layerName) {
-    m[`${layerName}.hidden`] = false;
-    m[`${layerName}.visible`] = true;
-    m[`${layerName}.enabled`] = true;
-    m[`${layerName}.opacity`] = "100%";
-  }
+    if (s.fontFamily) m[`${layerName}.font_family`] = String(s.fontFamily);
+    if (s.fontSize != null) m[`${layerName}.font_size`] = Number(s.fontSize);
+    if (s.fontWeight != null) m[`${layerName}.font_weight`] = Number(s.fontWeight);
 
-  function applyCaptionSettings(layerName, styleKey, s) {
-  if (!s || typeof s !== "object") return;
+    if (s.fillColor) m[`${layerName}.fill_color`] = String(s.fillColor);
+    if (s.strokeColor) m[`${layerName}.stroke_color`] = String(s.strokeColor);
+    if (s.strokeWidth != null) m[`${layerName}.stroke_width`] = Number(s.strokeWidth);
 
-  // position
-  if (s.x != null) m[`${layerName}.x`] = pct(Number(s.x));
-  if (s.y != null) m[`${layerName}.y`] = pct(Number(s.y));
-
-  // typography
-  if (s.fontFamily) m[`${layerName}.font_family`] = String(s.fontFamily);
-  if (s.fontSize != null) m[`${layerName}.font_size`] = Number(s.fontSize);
-  if (s.fontWeight != null) m[`${layerName}.font_weight`] = Number(s.fontWeight);
-
-  // colors/stroke
-  if (s.fillColor) m[`${layerName}.fill_color`] = String(s.fillColor);
-  if (s.strokeColor) m[`${layerName}.stroke_color`] = String(s.strokeColor);
-  if (s.strokeWidth != null) m[`${layerName}.stroke_width`] = Number(s.strokeWidth);
-
-  // casing
-  if (s.textTransform) m[`${layerName}.text_transform`] = String(s.textTransform);
-
-  // ✅ HARD RULES (no leaking effects)
-  // Only BlackBar can have background box
-  if (styleKey === "blackbar") {
     if (s.backgroundColor) m[`${layerName}.background_color`] = String(s.backgroundColor);
-  } else {
-    // clear it for all other styles
-    m[`${layerName}.background_color`] = "transparent";
-  }
-
-  // Only NeonGlow can have shadow/glow
-  if (styleKey === "neonglow") {
     if (s.shadowColor) m[`${layerName}.shadow_color`] = String(s.shadowColor);
-  } else {
-    // clear it for all other styles
-    m[`${layerName}.shadow_color`] = "transparent";
-  }
-}
 
-  // hide all
-  for (const layer of ALL_SUBTITLE_LAYERS) forceHideLayer(layer);
+    if (s.textTransform) m[`${layerName}.text_transform`] = String(s.textTransform);
+  }
+
+  // hide all by default
+  for (const layer of ALL_SUBTITLE_LAYERS) {
+    m[`${layer}.hidden`] = true;
+    m[`${layer}.opacity`] = "0%";
+  }
 
   if (captionsEnabled && captionsText) {
     const chosenLayer = STYLE_TO_LAYER[style] || STYLE_TO_LAYER.sentence;
 
-    forceShowLayer(chosenLayer);
+    m[`${chosenLayer}.hidden`] = false;
+    m[`${chosenLayer}.opacity`] = "100%";
 
-    // IMPORTANT: set text AND force timing to start at 0 first (removes timing as a variable)
     m[`${chosenLayer}.text`] = captionsText;
 
-    // 🔥 DEBUG-SAFE: show immediately for entire timeline
-    m[`${chosenLayer}.time`] = 0;
-    m[`${chosenLayer}.duration`] = Math.max(0.25, totalTimelineSecs);
+    // show captions during the spoken script
+    m[`${chosenLayer}.time`] = scriptText ? scriptStart : 0;
+    m[`${chosenLayer}.duration`] = Math.max(0.1, totalTimelineSecs - (scriptText ? scriptStart : 0));
 
-    applyCaptionSettings(chosenLayer, style, captionSettings);
+    applyCaptionSettings(chosenLayer, captionSettings);
   }
 
   return m;
 }
+
 
 
 
