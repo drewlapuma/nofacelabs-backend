@@ -1232,20 +1232,22 @@
       }
     }
 
-    function buildPayload() {
+    // ==============================
+// ✅ FULL UPDATED buildPayload()
+// ==============================
+function buildPayload() {
   // --- captions (read from your modal hidden inputs) ---
-  const capEnabledEl = document.getElementById("caption-enabled-value");
-  const capStyleEl = document.getElementById("caption-style-value");
+  const capEnabledEl  = document.getElementById("caption-enabled-value");
+  const capStyleEl    = document.getElementById("caption-style-value");
   const capSettingsEl = document.getElementById("caption-settings-value");
 
   const captionsEnabled = String(capEnabledEl?.value || "0") === "1";
   const captionStyle = String(capStyleEl?.value || "").trim();
-  const captionSettingsRaw = String(capSettingsEl?.value || "").trim();
 
   let captionSettings = null;
-  if (captionsEnabled && captionSettingsRaw) {
+  if (captionsEnabled && capSettingsEl?.value) {
     try {
-      captionSettings = JSON.parse(captionSettingsRaw);
+      captionSettings = JSON.parse(String(capSettingsEl.value));
     } catch {
       captionSettings = null;
     }
@@ -1267,16 +1269,12 @@
     length: String(readAnyText(lenHidden)).trim(),
     backgroundVideoUrl: bgLibraryUrl,
     backgroundVideoName: bgLibraryName,
-  };
 
-  // Only send caption fields if enabled + valid
-  if (captionsEnabled && captionStyle && captionSettings) {
-    payload.captionsEnabled = true;
-    payload.captionStyle = captionStyle;
-    payload.captionSettings = captionSettings;
-  } else {
-    payload.captionsEnabled = false;
-  }
+    // ✅ captions: always include these so backend can rely on them
+    captionsEnabled: captionsEnabled,
+    captionStyle: captionsEnabled ? captionStyle : "",
+    captionSettings: captionsEnabled ? (captionSettings || null) : null,
+  };
 
   return payload;
 }
