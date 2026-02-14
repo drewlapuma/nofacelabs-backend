@@ -543,7 +543,7 @@ async function buildModifications(body) {
   const scriptStart = scriptText ? Math.max(0, postDurSafe - SCRIPT_OVERLAP) : 0;
 
   // ✅ CUT ONLY trailing silence (script)
-  const TRAIL_SILENCE_CUT = 6.0; // bump to 2.3 if you still hear ~2s
+  const TRAIL_SILENCE_CUT = 1; // bump to 2.3 if you still hear ~2s
   const scriptDurSafe = scriptText
     ? Math.max(scriptEstimate * 0.9, scriptDur - TRAIL_SILENCE_CUT)
     : 0;
