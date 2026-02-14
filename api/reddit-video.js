@@ -474,97 +474,108 @@ async function buildModifications(body) {
   // ==========================================================
   // ✅ CAPTIONS (FIXED): do NOT use .text — use transcript/transcript_source
   // ==========================================================
-  const captionsEnabled =
-    body.captionsEnabled === true ||
-    String(body.captionsEnabled || "").toLowerCase() === "true" ||
-    String(body.captionsEnabled || "") === "1";
+  // ==========================================================
+// ✅ CAPTIONS (Creatomate "Transcription" subtitle elements)
+// - Uses transcription_source (matches UI screenshot)
+// - Don't set .text or .transcript
+// - Keep the subtitle layer active from t=0 so transcription always runs
+// ==========================================================
+const captionsEnabled =
+  body.captionsEnabled === true ||
+  String(body.captionsEnabled || "").toLowerCase() === "true" ||
+  String(body.captionsEnabled || "") === "1";
 
-  const styleRaw = String(body.captionStyle || "").trim().toLowerCase();
-  const style = styleRaw === "karoke" ? "karaoke" : styleRaw;
+const styleRaw = String(body.captionStyle || "").trim().toLowerCase();
+const style = styleRaw === "karoke" ? "karaoke" : styleRaw;
 
-  const captionSettings =
-    body.captionSettings && typeof body.captionSettings === "object"
-      ? body.captionSettings
-      : (() => {
-          try { return JSON.parse(String(body.captionSettings || "")); }
-          catch { return null; }
-        })();
+const captionSettings =
+  body.captionSettings && typeof body.captionSettings === "object"
+    ? body.captionSettings
+    : (() => {
+        try { return JSON.parse(String(body.captionSettings || "")); }
+        catch { return null; }
+      })();
 
-  const STYLE_TO_LAYER = {
-    sentence: "Subtitles_Sentence",
-    karaoke: "Subtitles_Karaoke",
-    word: "Subtitles_Word",
-    boldwhite: "Subtitles_BoldWhite",
-    yellowpop: "Subtitles_YellowPop",
-    minttag: "Subtitles_MintTag",
-    outlinepunch: "Subtitles_OutlinePunch",
-    blackbar: "Subtitles_BlackBar",
-    highlighter: "Subtitles_Highlighter",
-    neonglow: "Subtitles_NeonGlow",
-    purplepop: "Subtitles_PurplePop",
-    compactlowerthird: "Subtitles_CompactLowerThird",
-    bouncepop: "Subtitles_BouncePop",
-    redalert: "Subtitles_RedAlert",
-    redtag: "Subtitles_RedTag",
-  };
+const scriptText = safeStr(body.script, ""); // needed so we don't show captions when empty
 
-  const ALL_SUBTITLE_LAYERS = Object.values(STYLE_TO_LAYER);
+const STYLE_TO_LAYER = {
+  sentence: "Subtitles_Sentence",
+  karaoke: "Subtitles_Karaoke",
+  word: "Subtitles_Word",
+  boldwhite: "Subtitles_BoldWhite",
+  yellowpop: "Subtitles_YellowPop",
+  minttag: "Subtitles_MintTag",
+  outlinepunch: "Subtitles_OutlinePunch",
+  blackbar: "Subtitles_BlackBar",
+  highlighter: "Subtitles_Highlighter",
+  neonglow: "Subtitles_NeonGlow",
+  purplepop: "Subtitles_PurplePop",
+  compactlowerthird: "Subtitles_CompactLowerThird",
+  bouncepop: "Subtitles_BouncePop",
+  redalert: "Subtitles_RedAlert",
+  redtag: "Subtitles_RedTag",
+};
 
-  function applyCaptionSettings(layerName, styleKey, s) {
-    if (!s || typeof s !== "object") return;
+const ALL_SUBTITLE_LAYERS = Object.values(STYLE_TO_LAYER);
 
-    if (s.x != null) m[`${layerName}.x`] = pct(Number(s.x));
-    if (s.y != null) m[`${layerName}.y`] = pct(Number(s.y));
+function applyCaptionSettings(layerName, styleKey, s) {
+  if (!s || typeof s !== "object") return;
 
-    if (s.fontFamily) m[`${layerName}.font_family`] = String(s.fontFamily);
-    if (s.fontSize != null) m[`${layerName}.font_size`] = Number(s.fontSize);
-    if (s.fontWeight != null) m[`${layerName}.font_weight`] = Number(s.fontWeight);
+  if (s.x != null) m[`${layerName}.x`] = pct(Number(s.x));
+  if (s.y != null) m[`${layerName}.y`] = pct(Number(s.y));
 
-    if (s.fillColor) m[`${layerName}.fill_color`] = String(s.fillColor);
-    if (s.strokeColor) m[`${layerName}.stroke_color`] = String(s.strokeColor);
-    if (s.strokeWidth != null) m[`${layerName}.stroke_width`] = Number(s.strokeWidth);
+  if (s.fontFamily) m[`${layerName}.font_family`] = String(s.fontFamily);
+  if (s.fontSize != null) m[`${layerName}.font_size`] = Number(s.fontSize);
+  if (s.fontWeight != null) m[`${layerName}.font_weight`] = Number(s.fontWeight);
 
-    if (s.textTransform) m[`${layerName}.text_transform`] = String(s.textTransform);
+  if (s.fillColor) m[`${layerName}.fill_color`] = String(s.fillColor);
+  if (s.strokeColor) m[`${layerName}.stroke_color`] = String(s.strokeColor);
+  if (s.strokeWidth != null) m[`${layerName}.stroke_width`] = Number(s.strokeWidth);
 
-    // Only BlackBar can have background box
-    if (styleKey === "blackbar") {
-      if (s.backgroundColor) m[`${layerName}.background_color`] = String(s.backgroundColor);
-    } else {
-      m[`${layerName}.background_color`] = "transparent";
-    }
+  if (s.textTransform) m[`${layerName}.text_transform`] = String(s.textTransform);
 
-    // Only NeonGlow can have shadow/glow
-    if (styleKey === "neonglow") {
-      if (s.shadowColor) m[`${layerName}.shadow_color`] = String(s.shadowColor);
-    } else {
-      m[`${layerName}.shadow_color`] = "transparent";
-    }
+  // hard rules so effects don't leak
+  if (styleKey === "blackbar") {
+    if (s.backgroundColor) m[`${layerName}.background_color`] = String(s.backgroundColor);
+  } else {
+    m[`${layerName}.background_color`] = "transparent";
   }
 
-  // hide all by default
-  for (const layer of ALL_SUBTITLE_LAYERS) {
-    m[`${layer}.hidden`] = true;
-    m[`${layer}.opacity`] = "0%";
+  if (styleKey === "neonglow") {
+    if (s.shadowColor) m[`${layerName}.shadow_color`] = String(s.shadowColor);
+  } else {
+    m[`${layerName}.shadow_color`] = "transparent";
   }
+}
 
-  if (captionsEnabled && scriptText) {
-    const chosenLayer = STYLE_TO_LAYER[style] || STYLE_TO_LAYER.sentence;
+// hide all subtitle layers first
+for (const layer of ALL_SUBTITLE_LAYERS) {
+  m[`${layer}.hidden`] = true;
+  m[`${layer}.opacity`] = "0%";
+}
 
-    m[`${chosenLayer}.hidden`] = false;
-    m[`${chosenLayer}.opacity`] = "100%";
+// show chosen subtitle layer
+if (captionsEnabled && scriptText) {
+  const chosenLayer = STYLE_TO_LAYER[style] || STYLE_TO_LAYER.sentence;
 
-    // ✅ IMPORTANT: subtitles elements use transcript / transcript_source, not .text
-    m[`${chosenLayer}.transcript_source`] = "script_voice";
-    m[`${chosenLayer}.transcript`] = scriptText;
+  m[`${chosenLayer}.hidden`] = false;
+  m[`${chosenLayer}.opacity`] = "100%";
 
-    // show only during script window
-    m[`${chosenLayer}.time`] = scriptStart;
-    m[`${chosenLayer}.duration`] = Math.max(0.1, totalTimelineSecs - scriptStart);
+  // ✅ These match the UI you screenshotted:
+  m[`${chosenLayer}.transcription`] = true;              // checkbox
+  m[`${chosenLayer}.dynamic`] = true;                    // checkbox (Dynamic Text)
+  m[`${chosenLayer}.transcription_source`] = "script_voice"; // dropdown "Source"
 
-    // ✅ do NOT set `${chosenLayer}.text`
+  // Keep the layer active from the start so transcription always runs
+  m[`${chosenLayer}.time`] = 0;
+  m[`${chosenLayer}.duration`] = totalTimelineSecs;
 
-    applyCaptionSettings(chosenLayer, style, captionSettings);
-  }
+  // ❌ DO NOT set `${chosenLayer}.text`
+  // ❌ DO NOT set `${chosenLayer}.transcript`
+
+  applyCaptionSettings(chosenLayer, style, captionSettings);
+}
+
 
   return m;
 }
