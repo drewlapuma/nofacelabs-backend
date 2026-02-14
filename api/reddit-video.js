@@ -225,7 +225,6 @@ function normalizeElevenVoiceId(v) {
 // =====================================
 // buildModifications(body) — FULL UPDATED (keeps your current flow, fixes captions style bleed)
 // NOTE: Paste this whole function in place of your existing buildModifications.
-
 async function buildModifications(body) {
   // -----------------------------
   // MP3 duration (buffer) helper
@@ -233,10 +232,8 @@ async function buildModifications(body) {
   function mp3DurationSeconds(buf) {
     try {
       const b = Buffer.isBuffer(buf) ? buf : Buffer.from(buf);
-
       let offset = 0;
 
-      // ID3v2 tag skip
       if (b.length >= 10 && b.toString("utf8", 0, 3) === "ID3") {
         const size =
           ((b[6] & 0x7f) << 21) |
@@ -247,21 +244,15 @@ async function buildModifications(body) {
       }
 
       const BITRATES = {
-        3: { // MPEG1
-          3: [0,32,64,96,128,160,192,224,256,288,320,352,384,416,448],
-          2: [0,32,48,56,64,80,96,112,128,160,192,224,256,320,384],
-          1: [0,32,40,48,56,64,80,96,112,128,160,192,224,256,320],
-        },
-        2: { // MPEG2
-          3: [0,32,48,56,64,80,96,112,128,144,160,176,192,224,256],
-          2: [0,8,16,24,32,40,48,56,64,80,96,112,128,144,160],
-          1: [0,8,16,24,32,40,48,56,64,80,96,112,128,144,160],
-        },
-        0: { // MPEG2.5
-          3: [0,32,48,56,64,80,96,112,128,144,160,176,192,224,256],
-          2: [0,8,16,24,32,40,48,56,64,80,96,112,128,144,160],
-          1: [0,8,16,24,32,40,48,56,64,80,96,112,128,144,160],
-        }
+        3: { 3: [0,32,64,96,128,160,192,224,256,288,320,352,384,416,448],
+             2: [0,32,48,56,64,80,96,112,128,160,192,224,256,320,384],
+             1: [0,32,40,48,56,64,80,96,112,128,160,192,224,256,320] },
+        2: { 3: [0,32,48,56,64,80,96,112,128,144,160,176,192,224,256],
+             2: [0,8,16,24,32,40,48,56,64,80,96,112,128,144,160],
+             1: [0,8,16,24,32,40,48,56,64,80,96,112,128,144,160] },
+        0: { 3: [0,32,48,56,64,80,96,112,128,144,160,176,192,224,256],
+             2: [0,8,16,24,32,40,48,56,64,80,96,112,128,144,160],
+             1: [0,8,16,24,32,40,48,56,64,80,96,112,128,144,160] }
       };
 
       const SAMPLERATES = {
@@ -330,12 +321,8 @@ async function buildModifications(body) {
   }
 
   // -----------------------------
-  // basic helpers assumed existing in your file:
-  // normalizeMode, safeStr, ensurePublicHttpUrl, clamp, pct, setMulti,
-  // elevenlabsTtsToMp3Buffer, uploadMp3ToSupabasePublic, randId,
-  // normalizeElevenVoiceId, DEFAULT_ELEVEN_VOICE_ID
+  // your existing setup
   // -----------------------------
-
   const mode = normalizeMode(body.mode);
   const showLight = mode === "light";
   const showDark = mode === "dark";
@@ -349,7 +336,7 @@ async function buildModifications(body) {
   const pfpUrl = ensurePublicHttpUrl(body.pfpUrl, "pfpUrl");
   const bgUrl = ensurePublicHttpUrl(body.backgroundVideoUrl, "backgroundVideoUrl");
 
-  // --- your layout math (unchanged) ---
+  // --- your existing layout math unchanged ---
   const BG_WIDTH = 75;
   const BG_CENTER_X = 50;
   const cardRight = BG_CENTER_X + BG_WIDTH / 2;
@@ -521,12 +508,12 @@ async function buildModifications(body) {
   const scriptText = safeStr(body.script, "");
 
   // -----------------------------
-  // timing (REAL audio lengths) + GUARDED timeline
+  // timing (use REAL audio lengths)
   // -----------------------------
   const CARD_EARLY_CUT = 0.75;
   const SCRIPT_OVERLAP = 0.2;
 
-  const DUR_CUSHION = 0.35;  // small safety
+  const DUR_CUSHION = 0.35;
   const MIN_AUDIO = 0.6;
 
   let postVoiceDur = 0;
@@ -545,7 +532,6 @@ async function buildModifications(body) {
     m["post_voice.duration"] = postVoiceDur;
   }
 
-  // compute start times off REAL post duration
   const cardSecs = Math.max(0.35, postVoiceDur - CARD_EARLY_CUT);
   const scriptStart = Math.max(0, postVoiceDur - SCRIPT_OVERLAP);
 
@@ -569,22 +555,17 @@ async function buildModifications(body) {
     m["script_voice.duration"] = scriptVoiceDur;
   }
 
-  // ✅ GUARDED timeline end (THIS is what prevents captions disappearing)
   const TAIL_PAD = 0.12;
   const audioEnd = scriptText ? (scriptStart + scriptVoiceDur) : postVoiceDur;
-
-  // Make sure timeline ALWAYS extends past scriptStart (even if audio math gets weird)
-  const totalTimelineSecs = Math.max(
-    0.9,
-    audioEnd + TAIL_PAD,
-    scriptStart + 0.35 // ✅ guarantee subtitles have time to appear
-  );
+  const totalTimelineSecs = Math.max(0.9, audioEnd + TAIL_PAD);
 
   m["Video.time"] = 0;
   m["Video.duration"] = totalTimelineSecs;
 
   // ==========================================================
-  // ✅ CAPTIONS (exact names) — TIMING GUARDED
+  // ✅ CAPTIONS (Subtitles_* layers) — SAFE VERSION
+  // IMPORTANT: DO NOT set time/duration/opacity on subtitle layers.
+  // Only hide/show + set text + optional styling.
   // ==========================================================
   const captionsEnabled =
     body.captionsEnabled === true ||
@@ -641,25 +622,16 @@ async function buildModifications(body) {
     if (s.textTransform) m[`${layerName}.text_transform`] = String(s.textTransform);
   }
 
-  // hide all by default
+  // hide all
   for (const layer of ALL_SUBTITLE_LAYERS) {
     m[`${layer}.hidden`] = true;
-    m[`${layer}.opacity`] = "0%";
   }
 
+  // show chosen (no time/duration/opacity overrides)
   if (captionsEnabled && captionsText && scriptText) {
     const chosenLayer = STYLE_TO_LAYER[style] || STYLE_TO_LAYER.sentence;
-
-    // ✅ guard start: must be inside the timeline
-    const subTime = Math.min(scriptStart, Math.max(0, totalTimelineSecs - 0.25));
-    const subDur = Math.max(0.25, totalTimelineSecs - subTime);
-
     m[`${chosenLayer}.hidden`] = false;
-    m[`${chosenLayer}.opacity`] = "100%";
     m[`${chosenLayer}.text`] = captionsText;
-
-    m[`${chosenLayer}.time`] = subTime;
-    m[`${chosenLayer}.duration`] = subDur;
 
     applyCaptionSettings(chosenLayer, captionSettings);
   }
