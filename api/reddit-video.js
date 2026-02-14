@@ -226,6 +226,116 @@ function normalizeElevenVoiceId(v) {
 // buildModifications(body) — FULL UPDATED (keeps your current flow, fixes captions style bleed)
 // NOTE: Paste this whole function in place of your existing buildModifications.
 async function buildModifications(body) {
+  // ==========================================================
+  // ✅ knobs you’ll actually tweak
+  // ==========================================================
+  const GAP_BETWEEN_TITLE_AND_SCRIPT = 0.65; // ✅ make the gap longer/shorter
+  const CARD_EXTRA_AFTER_TITLE = 0.25;       // ✅ card lasts a bit longer than title voice
+  const END_PAD = 0.12;                      // tiny padding so last word doesn’t feel clipped
+
+  // ==========================================================
+  // MP3 duration helper (buffer -> seconds)
+  // ==========================================================
+  function mp3DurationSeconds(buf) {
+    try {
+      const b = Buffer.isBuffer(buf) ? buf : Buffer.from(buf);
+      let offset = 0;
+
+      // ID3v2 skip
+      if (b.length >= 10 && b.toString("utf8", 0, 3) === "ID3") {
+        const size =
+          ((b[6] & 0x7f) << 21) |
+          ((b[7] & 0x7f) << 14) |
+          ((b[8] & 0x7f) << 7) |
+          (b[9] & 0x7f);
+        offset = 10 + size;
+      }
+
+      const BITRATES = {
+        3: { // MPEG1
+          3: [0,32,64,96,128,160,192,224,256,288,320,352,384,416,448],
+          2: [0,32,48,56,64,80,96,112,128,160,192,224,256,320,384],
+          1: [0,32,40,48,56,64,80,96,112,128,160,192,224,256,320],
+        },
+        2: { // MPEG2
+          3: [0,32,48,56,64,80,96,112,128,144,160,176,192,224,256],
+          2: [0,8,16,24,32,40,48,56,64,80,96,112,128,144,160],
+          1: [0,8,16,24,32,40,48,56,64,80,96,112,128,144,160],
+        },
+        0: { // MPEG2.5
+          3: [0,32,48,56,64,80,96,112,128,144,160,176,192,224,256],
+          2: [0,8,16,24,32,40,48,56,64,80,96,112,128,144,160],
+          1: [0,8,16,24,32,40,48,56,64,80,96,112,128,144,160],
+        },
+      };
+
+      const SAMPLERATES = {
+        3: [44100, 48000, 32000],
+        2: [22050, 24000, 16000],
+        0: [11025, 12000, 8000],
+      };
+
+      let totalSamples = 0;
+      let sampleRate = 44100;
+
+      let guard = 0;
+      while (offset + 4 < b.length && guard++ < 200000) {
+        if (b[offset] !== 0xff || (b[offset + 1] & 0xe0) !== 0xe0) {
+          offset += 1;
+          continue;
+        }
+
+        const verBits = (b[offset + 1] >> 3) & 0x03;   // 00=2.5,10=2,11=1
+        const layerBits = (b[offset + 1] >> 1) & 0x03; // 01=III,10=II,11=I
+        if (verBits === 1 || layerBits === 0) { offset += 1; continue; }
+
+        const versionIndex = verBits === 3 ? 3 : (verBits === 2 ? 2 : 0);
+        const layerIndex = layerBits === 3 ? 3 : (layerBits === 2 ? 2 : 1);
+
+        const bitrateIdx = (b[offset + 2] >> 4) & 0x0f;
+        const srIdx = (b[offset + 2] >> 2) & 0x03;
+        const padding = (b[offset + 2] >> 1) & 0x01;
+
+        if (bitrateIdx === 0 || bitrateIdx === 15 || srIdx === 3) { offset += 1; continue; }
+
+        const brTable = BITRATES[versionIndex]?.[layerIndex];
+        const srTable = SAMPLERATES[versionIndex];
+        if (!brTable || !srTable) { offset += 1; continue; }
+
+        const bitrateKbps = brTable[bitrateIdx];
+        const sr = srTable[srIdx];
+        if (!bitrateKbps || !sr) { offset += 1; continue; }
+        sampleRate = sr;
+
+        let samplesPerFrame;
+        if (layerIndex === 3) samplesPerFrame = 384;
+        else if (layerIndex === 2) samplesPerFrame = 1152;
+        else samplesPerFrame = (versionIndex === 3) ? 1152 : 576;
+
+        let frameLen;
+        if (layerIndex === 3) {
+          frameLen = Math.floor((12 * (bitrateKbps * 1000) / sr + padding) * 4);
+        } else {
+          const coef = (layerIndex === 1 && versionIndex !== 3) ? 72 : 144;
+          frameLen = Math.floor((coef * (bitrateKbps * 1000)) / sr + padding);
+        }
+
+        if (!Number.isFinite(frameLen) || frameLen <= 0) { offset += 1; continue; }
+
+        totalSamples += samplesPerFrame;
+        offset += frameLen;
+      }
+
+      if (totalSamples <= 0 || !sampleRate) return 0;
+      return totalSamples / sampleRate;
+    } catch {
+      return 0;
+    }
+  }
+
+  // ==========================================================
+  // your existing helpers assumed present
+  // ==========================================================
   const mode = normalizeMode(body.mode);
   const showLight = mode === "light";
   const showDark = mode === "dark";
@@ -239,7 +349,7 @@ async function buildModifications(body) {
   const pfpUrl = ensurePublicHttpUrl(body.pfpUrl, "pfpUrl");
   const bgUrl = ensurePublicHttpUrl(body.backgroundVideoUrl, "backgroundVideoUrl");
 
-  // --- your existing layout math unchanged ---
+  // --- your existing layout math (unchanged) ---
   const BG_WIDTH = 75;
   const BG_CENTER_X = 50;
   const cardRight = BG_CENTER_X + BG_WIDTH / 2;
@@ -371,7 +481,7 @@ async function buildModifications(body) {
   setMulti(m, ["comment_count_dark.y", "post_card_dark.comment_count_dark.y"], pct(commentY));
 
   setMulti(m, ["share_light.y", "post_card_light.share_light.y"], pct(shareTextY));
-  setMulti(m, ["share_dark.y", "post_card_dark.share_dark.y"], pct(shareTextY));
+  setMulti(m, ["share_dark.y", "post_card_dark.share_light.y"], pct(shareTextY));
 
   setMulti(m, ["icon_like.y", "post_card_light.icon_like.y", "post_card_dark.icon_like.y"], pct(iconLikeY));
   setMulti(m, ["icon_comment.y", "post_card_light.icon_comment.y", "post_card_dark.icon_comment.y"], pct(iconCommentY));
@@ -406,181 +516,149 @@ async function buildModifications(body) {
     m["Video.fit"] = "cover";
   }
 
+  // ==========================================================
+  // ✅ AUDIO: use REAL mp3 durations (this is what removes tail silence)
+  // ==========================================================
   const postVoiceId = normalizeElevenVoiceId(body.postVoice) || DEFAULT_ELEVEN_VOICE_ID;
   const scriptVoiceId = normalizeElevenVoiceId(body.scriptVoice) || DEFAULT_ELEVEN_VOICE_ID;
   const scriptText = safeStr(body.script, "");
 
-  // Post voice (ALWAYS generate mp3)
+  // Post mp3
+  let postDur = 0;
   {
     const postMp3 = await elevenlabsTtsToMp3Buffer(postText, postVoiceId);
     const postPath = `reddit/${Date.now()}_${randId()}_post.mp3`;
     const postUrl = await uploadMp3ToSupabasePublic(postMp3, postPath);
     m["post_voice.source"] = postUrl;
+
+    // ✅ no cushion, no trimming — use the real duration
+    postDur = mp3DurationSeconds(postMp3) || 0;
+    postDur = Math.max(0.6, postDur);
+    m["post_voice.time"] = 0;
+    m["post_voice.duration"] = postDur;
   }
 
-  // Script voice (only if script exists)
+  // Script mp3
+  let scriptDur = 0;
+  let scriptStart = postDur + GAP_BETWEEN_TITLE_AND_SCRIPT; // ✅ gap control
   if (scriptText) {
     const scriptMp3 = await elevenlabsTtsToMp3Buffer(scriptText, scriptVoiceId);
     const scriptPath = `reddit/${Date.now()}_${randId()}_script.mp3`;
     const scriptUrl = await uploadMp3ToSupabasePublic(scriptMp3, scriptPath);
     m["script_voice.source"] = scriptUrl;
+
+    scriptDur = mp3DurationSeconds(scriptMp3) || 0;
+    scriptDur = Math.max(0.6, scriptDur);
+
+    m["script_voice.time"] = scriptStart;
+    m["script_voice.duration"] = scriptDur;
   }
 
-  // ==========================================================
-  // timing (your old behavior)
-  // ==========================================================
-  function estimateSpeechSeconds(text) {
-    const words = String(text || "")
-      .trim()
-      .split(/\s+/)
-      .filter(Boolean).length;
-    const WPS = 2.9;
-    return Math.max(0.55, words / WPS);
-  }
-
-  const postSecsRaw = estimateSpeechSeconds(postText);
-
-  const CARD_EARLY_CUT = 1.1;
-  const SCRIPT_OVERLAP = 0.75;
-
-  const cardSecs = Math.max(0.35, postSecsRaw - CARD_EARLY_CUT);
-  const scriptStart = Math.max(0, postSecsRaw - SCRIPT_OVERLAP);
-
+  // Card duration (last a bit longer)
+  const cardSecs = Math.max(0.35, postDur + CARD_EXTRA_AFTER_TITLE);
   m["post_card_light.time"] = 0;
   m["post_card_light.duration"] = cardSecs;
   m["post_card_dark.time"] = 0;
   m["post_card_dark.duration"] = cardSecs;
 
-  m["post_voice.time"] = 0;
-  if (scriptText) m["script_voice.time"] = scriptStart;
-
-  const END_TRIM_SECONDS = 2.4;
-  const TAIL_PAD = 0.18;
-
-  const scriptSecsRaw = scriptText ? estimateSpeechSeconds(scriptText) : 0;
-  const estimatedEnd = scriptText
-    ? (scriptStart + scriptSecsRaw + TAIL_PAD)
-    : (postSecsRaw + TAIL_PAD);
-
-  const totalTimelineSecs = Math.max(
-    0.9,
-    estimatedEnd - END_TRIM_SECONDS,
-    scriptText ? (scriptStart + scriptSecsRaw + TAIL_PAD) : estimatedEnd
-  );
+  // Timeline end = exact audio end (+ tiny pad)
+  const audioEnd = scriptText ? (scriptStart + scriptDur) : postDur;
+  const totalTimelineSecs = Math.max(0.9, audioEnd + END_PAD);
 
   m["Video.time"] = 0;
   m["Video.duration"] = totalTimelineSecs;
 
   // ==========================================================
-  // ✅ CAPTIONS (FIXED): do NOT use .text — use transcript/transcript_source
+  // ✅ CAPTIONS: ONLY CHANGED SECTION
+  // - uses Creatomate "Transcription" correctly
+  // - uses transcription_source = "script_voice"
+  // - does NOT set .text
   // ==========================================================
-  // ==========================================================
-// ✅ CAPTIONS (Creatomate "Transcription" subtitle elements)
-// - Uses transcription_source (matches UI screenshot)
-// - Don't set .text or .transcript
-// - Keep the subtitle layer active from t=0 so transcription always runs
-// ==========================================================
-const captionsEnabled =
-  body.captionsEnabled === true ||
-  String(body.captionsEnabled || "").toLowerCase() === "true" ||
-  String(body.captionsEnabled || "") === "1";
+  const captionsEnabled =
+    body.captionsEnabled === true ||
+    String(body.captionsEnabled || "").toLowerCase() === "true" ||
+    String(body.captionsEnabled || "") === "1";
 
-const styleRaw = String(body.captionStyle || "").trim().toLowerCase();
-const style = styleRaw === "karoke" ? "karaoke" : styleRaw;
+  const styleRaw = String(body.captionStyle || "").trim().toLowerCase();
+  const style = styleRaw === "karoke" ? "karaoke" : styleRaw;
 
-const captionSettings =
-  body.captionSettings && typeof body.captionSettings === "object"
-    ? body.captionSettings
-    : (() => {
-        try { return JSON.parse(String(body.captionSettings || "")); }
-        catch { return null; }
-      })();
+  const captionSettings =
+    body.captionSettings && typeof body.captionSettings === "object"
+      ? body.captionSettings
+      : (() => {
+          try { return JSON.parse(String(body.captionSettings || "")); }
+          catch { return null; }
+        })();
 
-const scriptText = safeStr(body.script, ""); // needed so we don't show captions when empty
+  const STYLE_TO_LAYER = {
+    sentence: "Subtitles_Sentence",
+    karaoke: "Subtitles_Karaoke",
+    word: "Subtitles_Word",
+    boldwhite: "Subtitles_BoldWhite",
+    yellowpop: "Subtitles_YellowPop",
+    minttag: "Subtitles_MintTag",
+    outlinepunch: "Subtitles_OutlinePunch",
+    blackbar: "Subtitles_BlackBar",
+    highlighter: "Subtitles_Highlighter",
+    neonglow: "Subtitles_NeonGlow",
+    purplepop: "Subtitles_PurplePop",
+    compactlowerthird: "Subtitles_CompactLowerThird",
+    bouncepop: "Subtitles_BouncePop",
+    redalert: "Subtitles_RedAlert",
+    redtag: "Subtitles_RedTag",
+  };
 
-const STYLE_TO_LAYER = {
-  sentence: "Subtitles_Sentence",
-  karaoke: "Subtitles_Karaoke",
-  word: "Subtitles_Word",
-  boldwhite: "Subtitles_BoldWhite",
-  yellowpop: "Subtitles_YellowPop",
-  minttag: "Subtitles_MintTag",
-  outlinepunch: "Subtitles_OutlinePunch",
-  blackbar: "Subtitles_BlackBar",
-  highlighter: "Subtitles_Highlighter",
-  neonglow: "Subtitles_NeonGlow",
-  purplepop: "Subtitles_PurplePop",
-  compactlowerthird: "Subtitles_CompactLowerThird",
-  bouncepop: "Subtitles_BouncePop",
-  redalert: "Subtitles_RedAlert",
-  redtag: "Subtitles_RedTag",
-};
+  const ALL_SUBTITLE_LAYERS = Object.values(STYLE_TO_LAYER);
 
-const ALL_SUBTITLE_LAYERS = Object.values(STYLE_TO_LAYER);
+  function applyCaptionSettings(layerName, s) {
+    if (!s || typeof s !== "object") return;
 
-function applyCaptionSettings(layerName, styleKey, s) {
-  if (!s || typeof s !== "object") return;
+    if (s.x != null) m[`${layerName}.x`] = pct(Number(s.x));
+    if (s.y != null) m[`${layerName}.y`] = pct(Number(s.y));
 
-  if (s.x != null) m[`${layerName}.x`] = pct(Number(s.x));
-  if (s.y != null) m[`${layerName}.y`] = pct(Number(s.y));
+    if (s.fontFamily) m[`${layerName}.font_family`] = String(s.fontFamily);
+    if (s.fontSize != null) m[`${layerName}.font_size`] = Number(s.fontSize);
+    if (s.fontWeight != null) m[`${layerName}.font_weight`] = Number(s.fontWeight);
 
-  if (s.fontFamily) m[`${layerName}.font_family`] = String(s.fontFamily);
-  if (s.fontSize != null) m[`${layerName}.font_size`] = Number(s.fontSize);
-  if (s.fontWeight != null) m[`${layerName}.font_weight`] = Number(s.fontWeight);
+    if (s.fillColor) m[`${layerName}.fill_color`] = String(s.fillColor);
+    if (s.strokeColor) m[`${layerName}.stroke_color`] = String(s.strokeColor);
+    if (s.strokeWidth != null) m[`${layerName}.stroke_width`] = Number(s.strokeWidth);
 
-  if (s.fillColor) m[`${layerName}.fill_color`] = String(s.fillColor);
-  if (s.strokeColor) m[`${layerName}.stroke_color`] = String(s.strokeColor);
-  if (s.strokeWidth != null) m[`${layerName}.stroke_width`] = Number(s.strokeWidth);
-
-  if (s.textTransform) m[`${layerName}.text_transform`] = String(s.textTransform);
-
-  // hard rules so effects don't leak
-  if (styleKey === "blackbar") {
     if (s.backgroundColor) m[`${layerName}.background_color`] = String(s.backgroundColor);
-  } else {
-    m[`${layerName}.background_color`] = "transparent";
-  }
-
-  if (styleKey === "neonglow") {
     if (s.shadowColor) m[`${layerName}.shadow_color`] = String(s.shadowColor);
-  } else {
-    m[`${layerName}.shadow_color`] = "transparent";
+
+    if (s.textTransform) m[`${layerName}.text_transform`] = String(s.textTransform);
   }
-}
 
-// hide all subtitle layers first
-for (const layer of ALL_SUBTITLE_LAYERS) {
-  m[`${layer}.hidden`] = true;
-  m[`${layer}.opacity`] = "0%";
-}
+  // Hide all by default
+  for (const layer of ALL_SUBTITLE_LAYERS) {
+    m[`${layer}.hidden`] = true;
+    m[`${layer}.opacity`] = "0%";
+  }
 
-// show chosen subtitle layer
-if (captionsEnabled && scriptText) {
-  const chosenLayer = STYLE_TO_LAYER[style] || STYLE_TO_LAYER.sentence;
+  if (captionsEnabled && scriptText) {
+    const chosenLayer = STYLE_TO_LAYER[style] || STYLE_TO_LAYER.sentence;
 
-  m[`${chosenLayer}.hidden`] = false;
-  m[`${chosenLayer}.opacity`] = "100%";
+    // show chosen layer
+    m[`${chosenLayer}.hidden`] = false;
+    m[`${chosenLayer}.opacity`] = "100%";
 
-  // ✅ These match the UI you screenshotted:
-  m[`${chosenLayer}.transcription`] = true;              // checkbox
-  m[`${chosenLayer}.dynamic`] = true;                    // checkbox (Dynamic Text)
-  m[`${chosenLayer}.transcription_source`] = "script_voice"; // dropdown "Source"
+    // ✅ MATCH YOUR UI: "Transcription" -> Source: script_voice
+    m[`${chosenLayer}.transcription`] = true;
+    m[`${chosenLayer}.transcription_source`] = "script_voice";
 
-  // Keep the layer active from the start so transcription always runs
-  m[`${chosenLayer}.time`] = 0;
-  m[`${chosenLayer}.duration`] = totalTimelineSecs;
+    // run captions only during script window
+    m[`${chosenLayer}.time`] = scriptStart;
+    m[`${chosenLayer}.duration`] = Math.max(0.1, totalTimelineSecs - scriptStart);
 
-  // ❌ DO NOT set `${chosenLayer}.text`
-  // ❌ DO NOT set `${chosenLayer}.transcript`
+    // ❌ DO NOT set `${chosenLayer}.text`
+    // ❌ DO NOT set `${chosenLayer}.transcript_source`
 
-  applyCaptionSettings(chosenLayer, style, captionSettings);
-}
-
+    applyCaptionSettings(chosenLayer, captionSettings);
+  }
 
   return m;
 }
-
-
 
 
 
