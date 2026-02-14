@@ -634,50 +634,49 @@ async function buildModifications(body) {
     m[`${layerName}.enabled`] = true;
   }
 
-  function applyCaptionSettings(layerName, s) {
-    if (!s || typeof s !== "object") return;
+ function applyCaptionSettings(layerName, styleKey, s) {
+  if (!s || typeof s !== "object") return;
 
-    if (s.x != null) m[`${layerName}.x`] = pct(Number(s.x));
-    if (s.y != null) m[`${layerName}.y`] = pct(Number(s.y));
+  // position
+  if (s.x != null) m[`${layerName}.x`] = pct(Number(s.x));
+  if (s.y != null) m[`${layerName}.y`] = pct(Number(s.y));
 
-    if (s.fontFamily) m[`${layerName}.font_family`] = String(s.fontFamily);
-    if (s.fontSize != null) m[`${layerName}.font_size`] = Number(s.fontSize);
-    if (s.fontWeight != null) m[`${layerName}.font_weight`] = Number(s.fontWeight);
+  // typography
+  if (s.fontFamily) m[`${layerName}.font_family`] = String(s.fontFamily);
+  if (s.fontSize != null) m[`${layerName}.font_size`] = Number(s.fontSize);
+  if (s.fontWeight != null) m[`${layerName}.font_weight`] = Number(s.fontWeight);
 
-    if (s.fillColor) m[`${layerName}.fill_color`] = String(s.fillColor);
-    if (s.strokeColor) m[`${layerName}.stroke_color`] = String(s.strokeColor);
-    if (s.strokeWidth != null) m[`${layerName}.stroke_width`] = Number(s.strokeWidth);
+  // fill + stroke
+  if (s.fillColor) m[`${layerName}.fill_color`] = String(s.fillColor);
+  if (s.strokeColor) m[`${layerName}.stroke_color`] = String(s.strokeColor);
+  if (s.strokeWidth != null) m[`${layerName}.stroke_width`] = Number(s.strokeWidth);
 
-    if (s.backgroundColor) m[`${layerName}.background_color`] = String(s.backgroundColor);
-    if (s.shadowColor) m[`${layerName}.shadow_color`] = String(s.shadowColor);
+  // casing
+  if (s.textTransform) m[`${layerName}.text_transform`] = String(s.textTransform);
 
-    if (s.textTransform) m[`${layerName}.text_transform`] = String(s.textTransform);
+  // ✅ HARD RESET so effects NEVER “leak” between styles
+  // (word/sentence/etc should NOT inherit box or glow)
+  m[`${layerName}.background_color`] = "transparent";
+  m[`${layerName}.shadow_color`] = "transparent";
+  m[`${layerName}.shadow_blur`] = 0;
+  m[`${layerName}.shadow_distance`] = 0;
+
+  // ✅ Only BlackBar can have box
+  if (styleKey === "blackbar" && s.backgroundColor) {
+    m[`${layerName}.background_color`] = String(s.backgroundColor);
   }
 
-  // Hide all styles
-  for (const layer of ALL_SUBTITLE_LAYERS) forceHideLayer(layer);
+  // ✅ Only NeonGlow can have glow
+  if (styleKey === "neonglow" && s.shadowColor) {
+    m[`${layerName}.shadow_color`] = String(s.shadowColor);
+    // optional if you pass these in settings:
+    if (s.shadowBlur != null) m[`${layerName}.shadow_blur`] = Number(s.shadowBlur);
+    if (s.shadowDistance != null) m[`${layerName}.shadow_distance`] = Number(s.shadowDistance);
+  }
+}
 
-  if (captionsEnabled && scriptText) {
-    const chosenLayer = STYLE_TO_LAYER[style] || STYLE_TO_LAYER.sentence;
 
-    forceShowLayer(chosenLayer);
-
-    // ✅ Make sure dynamic + transcription are ON
-    m[`${chosenLayer}.dynamic`] = true;
-
-    // ✅ MOST IMPORTANT: use nested transcription keys (matches UI panel)
-    m[`${chosenLayer}.transcription`] = true;
-    m[`${chosenLayer}.transcription.enabled`] = true;
-    m[`${chosenLayer}.transcription.source`] = "script_voice";
-
-    // (keep your old flat keys too, harmless if ignored)
-    m[`${chosenLayer}.transcription_source`] = "script_voice";
-
-    // Show only during the script section
-    m[`${chosenLayer}.time`] = scriptStart;
-    m[`${chosenLayer}.duration`] = Math.max(0.1, totalTimelineSecs - scriptStart);
-
-    applyCaptionSettings(chosenLayer, captionSettings);
+    applyCaptionSettings(chosenLayer, style, captionSettings);
   }
 
   return m;
