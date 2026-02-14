@@ -378,7 +378,7 @@ async function buildModifications(body) {
   // comment X
   setMulti(m, ["icon_comment.x", "post_card_light.icon_comment.x", "post_card_dark.icon_comment.x"], pct(commentIconX));
   setMulti(m, ["comment_count_light.x", "post_card_light.comment_count_light.x"], pct(commentTextX));
-  setMulti(m, ["comment_count_dark.x", "post_card_dark.comment_count_dark.x"], pct(commentTextX));
+  setMulti(m, ["comment_count_dark.x", "post_card_dark.comment_count_dark.text_x"], pct(commentTextX)); // if your template uses ".x", change back to ".x"
 
   // share anchor + X
   if (shareLong) {
@@ -425,7 +425,8 @@ async function buildModifications(body) {
   }
 
   // ==========================================================
-  // ✅ timing tweaks (SAFE VERSION)
+  // ✅ timing tweaks (captions-safe)
+  // - timeline will NEVER end before script/captions finish
   // ==========================================================
   function estimateSpeechSeconds(text) {
     const words = String(text || "")
@@ -444,24 +445,35 @@ async function buildModifications(body) {
   const cardSecs = Math.max(0.35, postSecsRaw - CARD_EARLY_CUT);
   const scriptStart = Math.max(0, postSecsRaw - SCRIPT_OVERLAP);
 
+  // cards
   m["post_card_light.time"] = 0;
   m["post_card_light.duration"] = cardSecs;
   m["post_card_dark.time"] = 0;
   m["post_card_dark.duration"] = cardSecs;
 
+  // audio timing
   m["post_voice.time"] = 0;
   if (scriptText) m["script_voice.time"] = scriptStart;
 
+  const TAIL_PAD = 0.18;
   const END_TRIM_SECONDS = 2.4;
-  const TAIL_PAD = 0.12;
 
   const scriptSecsRaw = scriptText ? estimateSpeechSeconds(scriptText) : 0;
+
   const estimatedEnd = scriptText
     ? (scriptStart + scriptSecsRaw + TAIL_PAD)
     : (postSecsRaw + TAIL_PAD);
 
-  const totalTimelineSecs = Math.max(0.9, estimatedEnd - END_TRIM_SECONDS);
+  const trimmedEnd = Math.max(0.9, estimatedEnd - END_TRIM_SECONDS);
 
+  // HARD FLOOR so we never cut script/captions
+  const minEndForScript = scriptText
+    ? (scriptStart + scriptSecsRaw + TAIL_PAD)
+    : 0.9;
+
+  const totalTimelineSecs = Math.max(trimmedEnd, minEndForScript);
+
+  // Trim background to set total length
   m["Video.time"] = 0;
   m["Video.duration"] = totalTimelineSecs;
 
@@ -470,6 +482,7 @@ async function buildModifications(body) {
   // - show only chosen style
   // - caption text = SCRIPT ONLY (never title)
   // - start at scriptStart
+  // - duration = scriptSecsRaw (NOT totalTimelineSecs - scriptStart)
   // ==========================================================
   const captionsEnabled =
     body.captionsEnabled === true ||
@@ -515,6 +528,7 @@ async function buildModifications(body) {
     if (s.x != null) m[`${layerName}.x`] = pct(Number(s.x));
     if (s.y != null) m[`${layerName}.y`] = pct(Number(s.y));
 
+    // NOTE: these property names must match Creatomate layer properties
     if (s.fontFamily) m[`${layerName}.font_family`] = String(s.fontFamily);
     if (s.fontSize != null) m[`${layerName}.font_size`] = Number(s.fontSize);
     if (s.fontWeight != null) m[`${layerName}.font_weight`] = Number(s.fontWeight);
@@ -541,16 +555,22 @@ async function buildModifications(body) {
     m[`${chosenLayer}.hidden`] = false;
     m[`${chosenLayer}.opacity`] = "100%";
 
+    // Creatomate subtitles usually want the script text to generate word timing
     m[`${chosenLayer}.text`] = captionsText;
 
+    // captions start when script starts
     m[`${chosenLayer}.time`] = scriptStart;
-    m[`${chosenLayer}.duration`] = Math.max(0.1, totalTimelineSecs - scriptStart);
+
+    // ✅ captions last for the script duration (+ tiny pad)
+    const capDur = Math.max(0.25, scriptSecsRaw + 0.15);
+    m[`${chosenLayer}.duration`] = capDur;
 
     applyCaptionSettings(chosenLayer, captionSettings);
   }
 
   return m;
 }
+
 
 
 
