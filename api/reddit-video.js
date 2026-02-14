@@ -136,6 +136,8 @@ function randId(len = 10) {
   return out;
 }
 
+// ✅ Now accepts optional { speed, volume } but we APPLY those in Creatomate,
+// not ElevenLabs (ElevenLabs “voice_settings” doesn’t do playback rate).
 async function elevenlabsTtsToMp3Buffer(text, voiceId) {
   if (!ELEVENLABS_API_KEY) throw new Error("Missing ELEVENLABS_API_KEY");
   if (!voiceId) throw new Error("Missing ElevenLabs voiceId");
@@ -221,9 +223,8 @@ function normalizeElevenVoiceId(v) {
 
 // =====================================
 // ✅ FULL UPDATED buildModifications()
-// (only changed: captions support added)
+// (voice speed/volume ACTUALLY affect the timeline now)
 // =====================================
-// buildModifications(body) — FULL UPDATED (keeps your current flow, fixes captions style bleed)
 async function buildModifications(body) {
   // ==========================================================
   // ✅ knobs you’ll actually tweak
@@ -347,15 +348,16 @@ async function buildModifications(body) {
   }
 
   // ==========================================================
-  // ✅ NEW: voice speed/volume helpers
+  // ✅ Voice speed/volume helpers (these are what your UI sends)
   // ==========================================================
   function clampNum(n, a, b, fallback) {
     n = Number(n);
     if (!Number.isFinite(n)) return fallback;
     return Math.max(a, Math.min(b, n));
   }
+
   function toPct01(v01) {
-    // Creatomate commonly accepts percentages like "100%"
+    // Creatomate accepts e.g. "100%"
     const n = clampNum(v01, 0, 2, 1);
     return `${Math.round(n * 100)}%`;
   }
@@ -550,65 +552,79 @@ async function buildModifications(body) {
   }
 
   // ==========================================================
-  // ✅ AUDIO: keep your timing logic EXACTLY
-  // + ✅ NEW: apply voice speed/volume (playback_rate + volume)
+  // ✅ AUDIO:
+  // IMPORTANT FIX:
+  // If you set playback_rate, you MUST also shorten the layer duration
+  // (otherwise the clip can still behave like “1x” in timing).
   // ==========================================================
   const postVoiceId = normalizeElevenVoiceId(body.postVoice) || DEFAULT_ELEVEN_VOICE_ID;
   const scriptVoiceId = normalizeElevenVoiceId(body.scriptVoice) || DEFAULT_ELEVEN_VOICE_ID;
   const scriptText = safeStr(body.script, "");
 
-  let postDur = 0;
+  let postDurRaw = 0;
+  let postDurEff = 0;
+
   {
     const postMp3 = await elevenlabsTtsToMp3Buffer(postText, postVoiceId);
     const postPath = `reddit/${Date.now()}_${randId()}_post.mp3`;
     const postUrl = await uploadMp3ToSupabasePublic(postMp3, postPath);
+
     m["post_voice.source"] = postUrl;
 
-    postDur = mp3DurationSeconds(postMp3) || 0;
-    postDur = Math.max(0.6, postDur);
-    m["post_voice.time"] = 0;
-    m["post_voice.duration"] = postDur;
+    postDurRaw = mp3DurationSeconds(postMp3) || 0;
+    postDurRaw = Math.max(0.6, postDurRaw);
 
-    // ✅ NEW: speed + volume
+    // ✅ effective time after playback_rate
+    postDurEff = Math.max(0.6, postDurRaw / postVoiceSpeed);
+
+    m["post_voice.time"] = 0;
+    m["post_voice.duration"] = postDurEff;
+
+    // ✅ NEW: speed + volume applied here
     m["post_voice.playback_rate"] = postVoiceSpeed;
     m["post_voice.volume"] = toPct01(postVoiceVolume);
   }
 
-  let scriptDur = 0;
-  let scriptStart = postDur + GAP_BETWEEN_TITLE_AND_SCRIPT;
+  let scriptDurRaw = 0;
+  let scriptDurEff = 0;
+  let scriptStart = postDurEff + GAP_BETWEEN_TITLE_AND_SCRIPT;
+
   if (scriptText) {
     const scriptMp3 = await elevenlabsTtsToMp3Buffer(scriptText, scriptVoiceId);
     const scriptPath = `reddit/${Date.now()}_${randId()}_script.mp3`;
     const scriptUrl = await uploadMp3ToSupabasePublic(scriptMp3, scriptPath);
+
     m["script_voice.source"] = scriptUrl;
 
-    scriptDur = mp3DurationSeconds(scriptMp3) || 0;
-    scriptDur = Math.max(0.6, scriptDur);
+    scriptDurRaw = mp3DurationSeconds(scriptMp3) || 0;
+    scriptDurRaw = Math.max(0.6, scriptDurRaw);
+
+    // ✅ effective time after playback_rate
+    scriptDurEff = Math.max(0.6, scriptDurRaw / scriptVoiceSpeed);
 
     m["script_voice.time"] = scriptStart;
-    m["script_voice.duration"] = scriptDur;
+    m["script_voice.duration"] = scriptDurEff;
 
-    // ✅ NEW: speed + volume
+    // ✅ NEW: speed + volume applied here
     m["script_voice.playback_rate"] = scriptVoiceSpeed;
     m["script_voice.volume"] = toPct01(scriptVoiceVolume);
   }
 
-  const cardSecs = Math.max(0.35, postDur + CARD_EXTRA_AFTER_TITLE);
+  // Card should stay up for the title segment (post voice)
+  const cardSecs = Math.max(0.35, postDurEff + CARD_EXTRA_AFTER_TITLE);
   m["post_card_light.time"] = 0;
   m["post_card_light.duration"] = cardSecs;
   m["post_card_dark.time"] = 0;
   m["post_card_dark.duration"] = cardSecs;
 
-  const audioEnd = scriptText ? (scriptStart + scriptDur) : postDur;
+  const audioEnd = scriptText ? scriptStart + scriptDurEff : postDurEff;
   const totalTimelineSecs = Math.max(0.9, audioEnd + END_PAD);
 
   m["Video.time"] = 0;
   m["Video.duration"] = totalTimelineSecs;
 
   // ==========================================================
-  // ✅ CAPTIONS (ONLY CHANGE): prevent box/glow leakage
-  // IMPORTANT FIX: we ALWAYS hard-clear background/shadow,
-  // even when captionSettings is null.
+  // ✅ CAPTIONS (your existing block kept)
   // ==========================================================
   const captionsEnabled =
     body.captionsEnabled === true ||
@@ -622,8 +638,11 @@ async function buildModifications(body) {
     body.captionSettings && typeof body.captionSettings === "object"
       ? body.captionSettings
       : (() => {
-          try { return JSON.parse(String(body.captionSettings || "")); }
-          catch { return null; }
+          try {
+            return JSON.parse(String(body.captionSettings || ""));
+          } catch {
+            return null;
+          }
         })();
 
   const STYLE_TO_LAYER = {
@@ -675,37 +694,25 @@ async function buildModifications(body) {
     m[`${layerName}.shadow_blur`] = 0;
     m[`${layerName}.shadow_distance`] = 0;
 
-    // If no custom settings, we still want the reset above to run.
-    if (!s || typeof s !== "object") {
-      // Special-case: if the chosen style itself is blackbar/neonglow
-      // and you want template defaults to show, remove these lines.
-      // For now, keep reset + only allow if settings provide values.
-      return;
-    }
+    if (!s || typeof s !== "object") return;
 
-    // position
     if (s.x != null) m[`${layerName}.x`] = pct(Number(s.x));
     if (s.y != null) m[`${layerName}.y`] = pct(Number(s.y));
 
-    // typography
     if (s.fontFamily) m[`${layerName}.font_family`] = String(s.fontFamily);
     if (s.fontSize != null) m[`${layerName}.font_size`] = Number(s.fontSize);
     if (s.fontWeight != null) m[`${layerName}.font_weight`] = Number(s.fontWeight);
 
-    // fill + stroke
     if (s.fillColor) m[`${layerName}.fill_color`] = String(s.fillColor);
     if (s.strokeColor) m[`${layerName}.stroke_color`] = String(s.strokeColor);
     if (s.strokeWidth != null) m[`${layerName}.stroke_width`] = Number(s.strokeWidth);
 
-    // casing
     if (s.textTransform) m[`${layerName}.text_transform`] = String(s.textTransform);
 
-    // Only BlackBar can have background box
     if (styleKey === "blackbar" && s.backgroundColor) {
       m[`${layerName}.background_color`] = String(s.backgroundColor);
     }
 
-    // Only NeonGlow can have glow/shadow
     if (styleKey === "neonglow" && s.shadowColor) {
       m[`${layerName}.shadow_color`] = String(s.shadowColor);
       if (s.shadowBlur != null) m[`${layerName}.shadow_blur`] = Number(s.shadowBlur);
@@ -713,7 +720,6 @@ async function buildModifications(body) {
     }
   }
 
-  // Hide all styles
   for (const layer of ALL_SUBTITLE_LAYERS) forceHideLayer(layer);
 
   if (captionsEnabled && scriptText) {
@@ -721,38 +727,20 @@ async function buildModifications(body) {
 
     forceShowLayer(chosenLayer);
 
-    // ensure transcription
     m[`${chosenLayer}.dynamic`] = true;
     m[`${chosenLayer}.transcription`] = true;
     m[`${chosenLayer}.transcription.enabled`] = true;
     m[`${chosenLayer}.transcription.source`] = "script_voice";
     m[`${chosenLayer}.transcription_source`] = "script_voice";
 
-    // show only during script window
     m[`${chosenLayer}.time`] = scriptStart;
     m[`${chosenLayer}.duration`] = Math.max(0.1, totalTimelineSecs - scriptStart);
 
-    // ✅ critical: always reset bg/glow, then apply allowed props
     applyCaptionSettings(chosenLayer, style, captionSettings);
   }
 
   return m;
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 module.exports = async function handler(req, res) {
   setCors(req, res);
