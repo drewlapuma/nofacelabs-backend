@@ -413,152 +413,182 @@ async function buildModifications(body) {
   // Reads VBR/Xing if present; otherwise estimates from MPEG frames.
   // If it can't detect, falls back to rough estimate.
   // ==========================================================
+    // ==========================================================
+  // ✅ timing (SAFE + accurate)
+  // - get MP3 duration by scanning frames (works for VBR)
+  // - NEVER allow duration to go below speech estimate
+  // - trim only the END silence (without cutting words)
+  // ==========================================================
   function estimateSpeechSeconds(text) {
     const words = String(text || "").trim().split(/\s+/).filter(Boolean).length;
     const WPS = 2.9;
     return Math.max(0.55, words / WPS);
   }
 
-  function mp3DurationSeconds(buf, fallbackSeconds = 1.0) {
+  // Robust MP3 duration (frame scan). Works even without Xing/Info.
+  function mp3DurationByFrameScan(buf, fallbackSeconds = 1.0) {
     try {
       if (!buf || buf.length < 128) return fallbackSeconds;
 
-      // Skip ID3v2 if present
-      let offset = 0;
+      let off = 0;
+
+      // Skip ID3v2 tag if present
       if (buf.slice(0, 3).toString("utf8") === "ID3") {
         const size =
           ((buf[6] & 0x7f) << 21) |
           ((buf[7] & 0x7f) << 14) |
           ((buf[8] & 0x7f) << 7) |
           (buf[9] & 0x7f);
-        offset = 10 + size;
+        off = 10 + size;
       }
 
-      // Find first frame sync
-      const maxScan = Math.min(buf.length - 4, offset + 64 * 1024);
-      let i = offset;
-      for (; i < maxScan; i++) {
-        if (buf[i] === 0xff && (buf[i + 1] & 0xe0) === 0xe0) break;
-      }
-      if (i >= maxScan) return fallbackSeconds;
+      // Tables
+      const brTableMpeg1L3 = [0,32,40,48,56,64,80,96,112,128,160,192,224,256,320,0];
+      const brTableMpeg2L3 = [0,8,16,24,32,40,48,56,64,80,96,112,128,144,160,0];
+      const srMpeg1 = [44100, 48000, 32000, 0];
+      const srMpeg2 = [22050, 24000, 16000, 0];
+      const srMpeg25 = [11025, 12000, 8000, 0];
 
-      const b1 = buf[i + 1];
-      const b2 = buf[i + 2];
-      const b3 = buf[i + 3];
+      let samplesTotal = 0;
+      let sampleRateLast = 44100;
 
-      const versionBits = (b1 >> 3) & 0x03; // 3=MPEG1, 2=MPEG2, 0=MPEG2.5
-      const layerBits = (b1 >> 1) & 0x03;   // 1=Layer III
-      const bitrateIdx = (b2 >> 4) & 0x0f;
-      const srIdx = (b2 >> 2) & 0x03;
-      if (layerBits !== 1 || bitrateIdx === 0 || bitrateIdx === 15 || srIdx === 3) {
-        return fallbackSeconds;
-      }
+      // Scan frames
+      // Hard cap iterations to avoid pathological cases
+      let frames = 0;
+      const MAX_FRAMES = 200000;
 
-      const isMpeg1 = versionBits === 3;
-      const sampleRates = isMpeg1 ? [44100, 48000, 32000] : [22050, 24000, 16000];
-      const sampleRate = sampleRates[srIdx];
-
-      // Bitrate tables (kbps) for Layer III
-      const brTableMpeg1 = [0,32,40,48,56,64,80,96,112,128,160,192,224,256,320,0];
-      const brTableMpeg2 = [0,8,16,24,32,40,48,56,64,80,96,112,128,144,160,0];
-      const bitrateKbps = isMpeg1 ? brTableMpeg1[bitrateIdx] : brTableMpeg2[bitrateIdx];
-      if (!bitrateKbps) return fallbackSeconds;
-
-      // Try read Xing/Info header for frames count (best)
-      // Side info size: MPEG1 = 32 bytes stereo/dual, 17 mono. We'll just search nearby.
-      const xingWindowStart = i + 4;
-      const xingWindowEnd = Math.min(buf.length, i + 4 + 256);
-      const xingPos = buf.indexOf(Buffer.from("Xing"), xingWindowStart);
-      const infoPos = buf.indexOf(Buffer.from("Info"), xingWindowStart);
-      const tagPos = (xingPos !== -1 && xingPos < xingWindowEnd) ? xingPos : ((infoPos !== -1 && infoPos < xingWindowEnd) ? infoPos : -1);
-
-      if (tagPos !== -1 && tagPos + 16 < buf.length) {
-        const flags = buf.readUInt32BE(tagPos + 4);
-        const hasFrames = (flags & 0x0001) !== 0;
-        if (hasFrames) {
-          const frames = buf.readUInt32BE(tagPos + 8);
-          // samples per frame: MPEG1 Layer III = 1152, MPEG2/2.5 Layer III = 576
-          const spf = isMpeg1 ? 1152 : 576;
-          return (frames * spf) / sampleRate;
+      while (off + 4 < buf.length && frames < MAX_FRAMES) {
+        // find sync 0xFFE
+        if (!(buf[off] === 0xff && (buf[off + 1] & 0xe0) === 0xe0)) {
+          off++;
+          continue;
         }
+
+        const b1 = buf[off + 1];
+        const b2 = buf[off + 2];
+        const b3 = buf[off + 3];
+
+        const versionBits = (b1 >> 3) & 0x03; // 3=MPEG1, 2=MPEG2, 0=MPEG2.5
+        const layerBits = (b1 >> 1) & 0x03;   // 1=Layer III
+        const bitrateIdx = (b2 >> 4) & 0x0f;
+        const srIdx = (b2 >> 2) & 0x03;
+        const padding = (b2 >> 1) & 0x01;
+
+        // We only support Layer III here
+        if (layerBits !== 1 || bitrateIdx === 0 || bitrateIdx === 15 || srIdx === 3) {
+          off++; // not a usable frame, continue scanning
+          continue;
+        }
+
+        const isMpeg1 = versionBits === 3;
+        const isMpeg2 = versionBits === 2;
+        const isMpeg25 = versionBits === 0;
+
+        let sampleRate = isMpeg1 ? srMpeg1[srIdx] : (isMpeg2 ? srMpeg2[srIdx] : srMpeg25[srIdx]);
+        if (!sampleRate) { off++; continue; }
+        sampleRateLast = sampleRate;
+
+        const bitrateKbps = isMpeg1 ? brTableMpeg1L3[bitrateIdx] : brTableMpeg2L3[bitrateIdx];
+        if (!bitrateKbps) { off++; continue; }
+
+        // samples per frame
+        const spf = isMpeg1 ? 1152 : 576;
+        samplesTotal += spf;
+
+        // frame length in bytes for Layer III
+        // MPEG1: 144 * bitrate / sr + padding
+        // MPEG2/2.5: 72 * bitrate / sr + padding
+        const coef = isMpeg1 ? 144 : 72;
+        const frameLen = Math.floor((coef * (bitrateKbps * 1000)) / sampleRate) + padding;
+        if (frameLen <= 0) { off++; continue; }
+
+        off += frameLen;
+        frames++;
       }
 
-      // Fallback: CBR estimate from file size and bitrate
-      const audioBytes = buf.length - i;
-      const bitrateBps = bitrateKbps * 1000;
-      return (audioBytes * 8) / bitrateBps;
+      if (samplesTotal <= 0) return fallbackSeconds;
+      return samplesTotal / sampleRateLast;
     } catch {
       return fallbackSeconds;
     }
   }
 
-  // ==========================================================
-  // ✅ Generate audio + measure real duration
-  // ==========================================================
-  let postDur = estimateSpeechSeconds(postText);
-  let scriptDur = scriptText ? estimateSpeechSeconds(scriptText) : 0;
+  // --- generate audio + get real durations safely ---
+  const postVoiceId = normalizeElevenVoiceId(body.postVoice) || DEFAULT_ELEVEN_VOICE_ID;
+  const scriptVoiceId = normalizeElevenVoiceId(body.scriptVoice) || DEFAULT_ELEVEN_VOICE_ID;
+  const scriptText = safeStr(body.script, "");
 
-  let postUrl = "";
+  const postEstimate = estimateSpeechSeconds(postText);
+  const scriptEstimate = scriptText ? estimateSpeechSeconds(scriptText) : 0;
+
+  let postDur = postEstimate;
+  let scriptDur = scriptEstimate;
+
+  // Post voice (ALWAYS)
   {
     const postMp3 = await elevenlabsTtsToMp3Buffer(postText, postVoiceId);
-    postDur = mp3DurationSeconds(postMp3, postDur);
+    postDur = mp3DurationByFrameScan(postMp3, postEstimate);
+
     const postPath = `reddit/${Date.now()}_${randId()}_post.mp3`;
-    postUrl = await uploadMp3ToSupabasePublic(postMp3, postPath);
+    const postUrl = await uploadMp3ToSupabasePublic(postMp3, postPath);
     m["post_voice.source"] = postUrl;
   }
 
-  let scriptUrl = "";
+  // Script voice (only if script exists)
   if (scriptText) {
     const scriptMp3 = await elevenlabsTtsToMp3Buffer(scriptText, scriptVoiceId);
-    scriptDur = mp3DurationSeconds(scriptMp3, scriptDur);
+    scriptDur = mp3DurationByFrameScan(scriptMp3, scriptEstimate);
+
     const scriptPath = `reddit/${Date.now()}_${randId()}_script.mp3`;
-    scriptUrl = await uploadMp3ToSupabasePublic(scriptMp3, scriptPath);
+    const scriptUrl = await uploadMp3ToSupabasePublic(scriptMp3, scriptPath);
     m["script_voice.source"] = scriptUrl;
   }
 
-  // ==========================================================
-  // ✅ timing tweaks
-  // - Use REAL audio duration (postDur/scriptDur)
-  // - Cut trailing silence by clamping audio layer duration
-  // ==========================================================
+  // --- overlap + card timing ---
   const CARD_EARLY_CUT = 1.1;
   const SCRIPT_OVERLAP = 0.75;
 
-  // This is the silence you’re hearing at the end of ElevenLabs audio:
-  const TRAIL_SILENCE_CUT = 2.0; // <-- adjust if needed (1.5–2.5)
+  const postDurSafe = Math.max(postEstimate * 0.9, postDur); // never shorter than estimate
+  const cardSecs = Math.max(0.35, postDurSafe - CARD_EARLY_CUT);
 
-  const postDurClamped = Math.max(0.25, postDur - 0.05); // tiny safety
-  const scriptDurClamped = scriptText ? Math.max(0.25, scriptDur - TRAIL_SILENCE_CUT) : 0;
+  const scriptStart = scriptText ? Math.max(0, postDurSafe - SCRIPT_OVERLAP) : 0;
 
-  const cardSecs = Math.max(0.35, postDurClamped - CARD_EARLY_CUT);
-  const scriptStart = scriptText ? Math.max(0, postDurClamped - SCRIPT_OVERLAP) : 0;
+  // --- CUT ONLY THE TRAILING SILENCE (script) ---
+  // If you still hear silence, bump this to 2.2–2.5
+  const TRAIL_SILENCE_CUT = 2.0;
 
-  // card timing
+  // Don’t cut below estimate (prevents chopping words)
+  const scriptDurSafe = scriptText
+    ? Math.max(scriptEstimate * 0.9, scriptDur - TRAIL_SILENCE_CUT)
+    : 0;
+
+  // cards
   m["post_card_light.time"] = 0;
   m["post_card_light.duration"] = cardSecs;
   m["post_card_dark.time"] = 0;
   m["post_card_dark.duration"] = cardSecs;
 
-  // audio timing + ✅ clamp duration to remove trailing silence
+  // audio (✅ set duration so Creatomate truncates the mp3 tail)
   m["post_voice.time"] = 0;
-  m["post_voice.duration"] = postDurClamped;
+  m["post_voice.duration"] = postDurSafe;
 
   if (scriptText) {
     m["script_voice.time"] = scriptStart;
-    m["script_voice.duration"] = scriptDurClamped;
+    m["script_voice.duration"] = scriptDurSafe;
   }
 
-  // ✅ Timeline end = end of last audio (post or script)
-  const TAIL_PAD = 0.06;
+  // timeline end = end of last audio layer (safe)
+  const TAIL_PAD = 0.08;
   const audioEnd = scriptText
-    ? (scriptStart + scriptDurClamped + TAIL_PAD)
-    : (postDurClamped + TAIL_PAD);
+    ? (scriptStart + scriptDurSafe + TAIL_PAD)
+    : (postDurSafe + TAIL_PAD);
 
   const totalTimelineSecs = Math.max(0.9, audioEnd);
 
-  // Trim background so it can't keep timeline alive
+  // background cannot extend timeline
   m["Video.time"] = 0;
   m["Video.duration"] = totalTimelineSecs;
+
 
   // ==========================================================
   // ✅ CAPTIONS (Subtitles_* layers)
