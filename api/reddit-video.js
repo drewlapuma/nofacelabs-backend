@@ -405,38 +405,21 @@ async function buildModifications(body) {
   }
 
   // ==========================================================
-  // AUDIO + TIMING (use trim_end to kill tail silence)
+  // Voices
   // ==========================================================
-  function estimateSpeechSeconds(text) {
-    const words = String(text || "").trim().split(/\s+/).filter(Boolean).length;
-    const WPS = 2.9;
-    return Math.max(0.55, words / WPS);
-  }
-
-  const postSecsEst = estimateSpeechSeconds(postText);
-
-  const CARD_EARLY_CUT = 1.1;
-  const SCRIPT_OVERLAP = 0.75;
-
-  const cardSecs = Math.max(0.35, postSecsEst - CARD_EARLY_CUT);
-  const scriptStart = Math.max(0, postSecsEst - SCRIPT_OVERLAP);
-
-  m["post_card_light.time"] = 0;
-  m["post_card_light.duration"] = cardSecs;
-  m["post_card_dark.time"] = 0;
-  m["post_card_dark.duration"] = cardSecs;
-
   const postVoiceId = normalizeElevenVoiceId(body.postVoice) || DEFAULT_ELEVEN_VOICE_ID;
   const scriptVoiceId = normalizeElevenVoiceId(body.scriptVoice) || DEFAULT_ELEVEN_VOICE_ID;
   const scriptText = safeStr(body.script, "");
 
-  // Generate + upload mp3s (unchanged)
+  // Post voice (ALWAYS generate mp3)
   {
     const postMp3 = await elevenlabsTtsToMp3Buffer(postText, postVoiceId);
     const postPath = `reddit/${Date.now()}_${randId()}_post.mp3`;
     const postUrl = await uploadMp3ToSupabasePublic(postMp3, postPath);
     m["post_voice.source"] = postUrl;
   }
+
+  // Script voice (only if script exists)
   if (scriptText) {
     const scriptMp3 = await elevenlabsTtsToMp3Buffer(scriptText, scriptVoiceId);
     const scriptPath = `reddit/${Date.now()}_${randId()}_script.mp3`;
@@ -444,39 +427,64 @@ async function buildModifications(body) {
     m["script_voice.source"] = scriptUrl;
   }
 
-  // Place audio
+  // ==========================================================
+  // ✅ TIMING (this is the key change: cap AUDIO duration)
+  // ==========================================================
+  function estimateSpeechSeconds(text) {
+    const words = String(text || "").trim().split(/\s+/).filter(Boolean).length;
+    const WPS = 2.9;
+    return Math.max(0.55, words / WPS);
+  }
+
+  const postSecsRaw = estimateSpeechSeconds(postText);
+
+  const CARD_EARLY_CUT = 1.1;
+  const SCRIPT_OVERLAP = 0.75;
+
+  const cardSecs = Math.max(0.35, postSecsRaw - CARD_EARLY_CUT);
+  const scriptStart = Math.max(0, postSecsRaw - SCRIPT_OVERLAP);
+
+  // post card duration
+  m["post_card_light.time"] = 0;
+  m["post_card_light.duration"] = cardSecs;
+  m["post_card_dark.time"] = 0;
+  m["post_card_dark.duration"] = cardSecs;
+
+  // audio starts
   m["post_voice.time"] = 0;
   if (scriptText) m["script_voice.time"] = scriptStart;
 
-  // ✅ Trim the AUDIO SOURCE (kills “silent tail” inside mp3)
-  const AUDIO_PAD = 0.18; // small safety so last syllable doesn't clip
-  const TAIL_PAD = 0.08;  // tiny end pad for video
+  // ✅ CAP THE AUDIO LENGTHS so silent tail can't extend timeline
+  // (small padding so last syllable doesn’t clip)
+  const AUDIO_PAD_POST = 0.18;
+  const AUDIO_PAD_SCRIPT = 0.22;
 
-  const postTrim = Math.max(0.2, postSecsEst + AUDIO_PAD);
-  m["post_voice.trim_start"] = 0;
-  m["post_voice.trim_end"] = postTrim;
-  m["post_voice.duration"] = postTrim; // backup
+  const postAudioDur = Math.max(0.35, postSecsRaw + AUDIO_PAD_POST);
+  m["post_voice.duration"] = postAudioDur;
 
-  let scriptTrim = 0;
+  let scriptAudioDur = 0;
   if (scriptText) {
-    const scriptSecsEst = estimateSpeechSeconds(scriptText);
-    scriptTrim = Math.max(0.2, scriptSecsEst + AUDIO_PAD);
-
-    m["script_voice.trim_start"] = 0;
-    m["script_voice.trim_end"] = scriptTrim;
-    m["script_voice.duration"] = scriptTrim; // backup
+    const scriptSecsRaw = estimateSpeechSeconds(scriptText);
+    scriptAudioDur = Math.max(0.35, scriptSecsRaw + AUDIO_PAD_SCRIPT);
+    m["script_voice.duration"] = scriptAudioDur;
   }
 
-  const endTime = scriptText
-    ? (scriptStart + scriptTrim + TAIL_PAD)
-    : (postTrim + TAIL_PAD);
+  // ✅ now compute the real end from audio placements
+  const TAIL_PAD = 0.12;
+  const audioEnd = scriptText
+    ? (scriptStart + scriptAudioDur + TAIL_PAD)
+    : (postAudioDur + TAIL_PAD);
 
-  // Ensure background can't extend the render
+  // keep your old idea: trim a little “extra”
+  const END_TRIM_SECONDS = 0.0; // leave 0 now since we're capping audio directly
+  const totalTimelineSecs = Math.max(0.9, audioEnd - END_TRIM_SECONDS);
+
+  // Trim the background layer so it can't keep the timeline alive
   m["Video.time"] = 0;
-  m["Video.duration"] = Math.max(0.9, endTime);
+  m["Video.duration"] = totalTimelineSecs;
 
   // ==========================================================
-  // CAPTIONS (leave your working captions logic as-is)
+  // ✅ CAPTIONS (your working approach; won’t extend timeline)
   // ==========================================================
   const captionsEnabled =
     body.captionsEnabled === true ||
@@ -516,13 +524,22 @@ async function buildModifications(body) {
   for (const layer of ALL_SUBTITLE_LAYERS) {
     m[`${layer}.hidden`] = true;
     m[`${layer}.opacity`] = "0%";
+    // also cap durations so they can't extend timeline if a template had weird defaults
+    m[`${layer}.time`] = 0;
+    m[`${layer}.duration`] = 0.01;
   }
 
   function applyCaptionSettings(layerName, s) {
     if (!s || typeof s !== "object") return;
     if (s.x != null) m[`${layerName}.x`] = pct(Number(s.x));
     if (s.y != null) m[`${layerName}.y`] = pct(Number(s.y));
-    // (add your other settings mappings here if you want)
+    if (s.fontFamily) m[`${layerName}.font_family`] = String(s.fontFamily);
+    if (s.fontSize != null) m[`${layerName}.font_size`] = Number(s.fontSize);
+    if (s.fontWeight != null) m[`${layerName}.font_weight`] = Number(s.fontWeight);
+    if (s.fillColor) m[`${layerName}.fill_color`] = String(s.fillColor);
+    if (s.strokeColor) m[`${layerName}.stroke_color`] = String(s.strokeColor);
+    if (s.strokeWidth != null) m[`${layerName}.stroke_width`] = Number(s.strokeWidth);
+    if (s.textTransform) m[`${layerName}.text_transform`] = String(s.textTransform);
   }
 
   if (captionsEnabled && captionsText) {
@@ -532,14 +549,16 @@ async function buildModifications(body) {
     m[`${chosenLayer}.opacity`] = "100%";
     m[`${chosenLayer}.text`] = captionsText;
 
+    // start captions at scriptStart, end with timeline
     m[`${chosenLayer}.time`] = scriptStart;
-    m[`${chosenLayer}.duration`] = Math.max(0.1, (Math.max(0.9, endTime) - scriptStart));
+    m[`${chosenLayer}.duration`] = Math.max(0.1, totalTimelineSecs - scriptStart);
 
     applyCaptionSettings(chosenLayer, captionSettings);
   }
 
   return m;
 }
+
 
 
 
