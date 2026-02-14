@@ -224,7 +224,6 @@ function normalizeElevenVoiceId(v) {
 // (only changed: captions support added)
 // =====================================
 // buildModifications(body) — FULL UPDATED (keeps your current flow, fixes captions style bleed)
-// NOTE: Paste this whole function in place of your existing buildModifications.
 async function buildModifications(body) {
   // ==========================================================
   // ✅ knobs you’ll actually tweak
@@ -346,6 +345,26 @@ async function buildModifications(body) {
       return 0;
     }
   }
+
+  // ==========================================================
+  // ✅ NEW: voice speed/volume helpers
+  // ==========================================================
+  function clampNum(n, a, b, fallback) {
+    n = Number(n);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.max(a, Math.min(b, n));
+  }
+  function toPct01(v01) {
+    // Creatomate commonly accepts percentages like "100%"
+    const n = clampNum(v01, 0, 2, 1);
+    return `${Math.round(n * 100)}%`;
+  }
+
+  const postVoiceSpeed = clampNum(body.postVoiceSpeed, 0.7, 1.3, 1.0);
+  const postVoiceVolume = clampNum(body.postVoiceVolume, 0.0, 1.5, 1.0);
+
+  const scriptVoiceSpeed = clampNum(body.scriptVoiceSpeed, 0.7, 1.3, 1.0);
+  const scriptVoiceVolume = clampNum(body.scriptVoiceVolume, 0.0, 1.5, 1.0);
 
   // ==========================================================
   // your existing setup
@@ -532,6 +551,7 @@ async function buildModifications(body) {
 
   // ==========================================================
   // ✅ AUDIO: keep your timing logic EXACTLY
+  // + ✅ NEW: apply voice speed/volume (playback_rate + volume)
   // ==========================================================
   const postVoiceId = normalizeElevenVoiceId(body.postVoice) || DEFAULT_ELEVEN_VOICE_ID;
   const scriptVoiceId = normalizeElevenVoiceId(body.scriptVoice) || DEFAULT_ELEVEN_VOICE_ID;
@@ -548,6 +568,10 @@ async function buildModifications(body) {
     postDur = Math.max(0.6, postDur);
     m["post_voice.time"] = 0;
     m["post_voice.duration"] = postDur;
+
+    // ✅ NEW: speed + volume
+    m["post_voice.playback_rate"] = postVoiceSpeed;
+    m["post_voice.volume"] = toPct01(postVoiceVolume);
   }
 
   let scriptDur = 0;
@@ -563,6 +587,10 @@ async function buildModifications(body) {
 
     m["script_voice.time"] = scriptStart;
     m["script_voice.duration"] = scriptDur;
+
+    // ✅ NEW: speed + volume
+    m["script_voice.playback_rate"] = scriptVoiceSpeed;
+    m["script_voice.volume"] = toPct01(scriptVoiceVolume);
   }
 
   const cardSecs = Math.max(0.35, postDur + CARD_EXTRA_AFTER_TITLE);
@@ -579,6 +607,8 @@ async function buildModifications(body) {
 
   // ==========================================================
   // ✅ CAPTIONS (ONLY CHANGE): prevent box/glow leakage
+  // IMPORTANT FIX: we ALWAYS hard-clear background/shadow,
+  // even when captionSettings is null.
   // ==========================================================
   const captionsEnabled =
     body.captionsEnabled === true ||
@@ -623,6 +653,12 @@ async function buildModifications(body) {
     m[`${layerName}.enabled`] = false;
     m[`${layerName}.transcription`] = false;
     m[`${layerName}.transcription.enabled`] = false;
+
+    // ✅ also clear any sticky effects on hidden layers
+    m[`${layerName}.background_color`] = "transparent";
+    m[`${layerName}.shadow_color`] = "transparent";
+    m[`${layerName}.shadow_blur`] = 0;
+    m[`${layerName}.shadow_distance`] = 0;
   }
 
   function forceShowLayer(layerName) {
@@ -632,10 +668,20 @@ async function buildModifications(body) {
     m[`${layerName}.enabled`] = true;
   }
 
-  // ✅ FIX: only apply backgroundColor for blackbar; only shadowColor for neonglow.
-  // Always clear both first so effects never “stick” when switching styles.
   function applyCaptionSettings(layerName, styleKey, s) {
-    if (!s || typeof s !== "object") return;
+    // ✅ HARD RESET (ALWAYS)
+    m[`${layerName}.background_color`] = "transparent";
+    m[`${layerName}.shadow_color`] = "transparent";
+    m[`${layerName}.shadow_blur`] = 0;
+    m[`${layerName}.shadow_distance`] = 0;
+
+    // If no custom settings, we still want the reset above to run.
+    if (!s || typeof s !== "object") {
+      // Special-case: if the chosen style itself is blackbar/neonglow
+      // and you want template defaults to show, remove these lines.
+      // For now, keep reset + only allow if settings provide values.
+      return;
+    }
 
     // position
     if (s.x != null) m[`${layerName}.x`] = pct(Number(s.x));
@@ -653,12 +699,6 @@ async function buildModifications(body) {
 
     // casing
     if (s.textTransform) m[`${layerName}.text_transform`] = String(s.textTransform);
-
-    // ✅ HARD RESET (prevents leakage)
-    m[`${layerName}.background_color`] = "transparent";
-    m[`${layerName}.shadow_color`] = "transparent";
-    m[`${layerName}.shadow_blur`] = 0;
-    m[`${layerName}.shadow_distance`] = 0;
 
     // Only BlackBar can have background box
     if (styleKey === "blackbar" && s.backgroundColor) {
@@ -692,11 +732,13 @@ async function buildModifications(body) {
     m[`${chosenLayer}.time`] = scriptStart;
     m[`${chosenLayer}.duration`] = Math.max(0.1, totalTimelineSecs - scriptStart);
 
+    // ✅ critical: always reset bg/glow, then apply allowed props
     applyCaptionSettings(chosenLayer, style, captionSettings);
   }
 
   return m;
 }
+
 
 
 
