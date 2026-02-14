@@ -593,6 +593,9 @@ async function buildModifications(body) {
   // - only BlackBar gets background_color
   // - only NeonGlow gets shadow_color
   // ==========================================================
+    // ==========================================================
+  // ✅ CAPTIONS (exact names) — FORCE ON TOP
+  // ==========================================================
   const captionsEnabled =
     body.captionsEnabled === true ||
     String(body.captionsEnabled || "").toLowerCase() === "true" ||
@@ -631,6 +634,10 @@ async function buildModifications(body) {
 
   const ALL_SUBTITLE_LAYERS = Object.values(STYLE_TO_LAYER);
 
+  // Put subtitles ABOVE everything else (Video/card/etc)
+  // 1=bottom, higher tracks render on top.
+  const SUBTITLE_TRACK = 10;
+
   function applyCaptionSettings(layerName, s, selectedStyle) {
     if (!s || typeof s !== "object") return;
 
@@ -647,7 +654,7 @@ async function buildModifications(body) {
 
     if (s.textTransform) m[`${layerName}.text_transform`] = String(s.textTransform);
 
-    // ✅ style-specific effects ONLY
+    // ✅ prevent style bleed
     if (selectedStyle === "blackbar" && s.backgroundColor) {
       m[`${layerName}.background_color`] = String(s.backgroundColor);
     }
@@ -656,23 +663,29 @@ async function buildModifications(body) {
     }
   }
 
+  // hide all subtitle layers by default + force them to top track
   for (const layer of ALL_SUBTITLE_LAYERS) {
     m[`${layer}.hidden`] = true;
     m[`${layer}.opacity`] = "0%";
+    m[`${layer}.track`] = SUBTITLE_TRACK; // ✅ key fix
   }
 
   if (captionsEnabled && captionsText && scriptText) {
     const chosenLayer = STYLE_TO_LAYER[style] || STYLE_TO_LAYER.sentence;
 
+    m[`${chosenLayer}.track`] = SUBTITLE_TRACK; // ✅ keep on top
     m[`${chosenLayer}.hidden`] = false;
     m[`${chosenLayer}.opacity`] = "100%";
 
     m[`${chosenLayer}.text`] = captionsText;
+
+    // start when script starts
     m[`${chosenLayer}.time`] = scriptStart;
     m[`${chosenLayer}.duration`] = Math.max(0.1, totalTimelineSecs - scriptStart);
 
     applyCaptionSettings(chosenLayer, captionSettings, style);
   }
+
 
   return m;
 }
