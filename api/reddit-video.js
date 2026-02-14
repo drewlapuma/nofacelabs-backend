@@ -526,26 +526,43 @@ async function buildModifications(body) {
     m[`${layerName}.opacity`] = "100%";
   }
 
-  function applyCaptionSettings(layerName, s) {
-    if (!s || typeof s !== "object") return;
+  function applyCaptionSettings(layerName, styleKey, s) {
+  if (!s || typeof s !== "object") return;
 
-    if (s.x != null) m[`${layerName}.x`] = pct(Number(s.x));
-    if (s.y != null) m[`${layerName}.y`] = pct(Number(s.y));
+  // position
+  if (s.x != null) m[`${layerName}.x`] = pct(Number(s.x));
+  if (s.y != null) m[`${layerName}.y`] = pct(Number(s.y));
 
-    // These keys are harmless if unsupported; Creatomate will ignore unknown ones.
-    if (s.fontFamily) m[`${layerName}.font_family`] = String(s.fontFamily);
-    if (s.fontSize != null) m[`${layerName}.font_size`] = Number(s.fontSize);
-    if (s.fontWeight != null) m[`${layerName}.font_weight`] = Number(s.fontWeight);
+  // typography
+  if (s.fontFamily) m[`${layerName}.font_family`] = String(s.fontFamily);
+  if (s.fontSize != null) m[`${layerName}.font_size`] = Number(s.fontSize);
+  if (s.fontWeight != null) m[`${layerName}.font_weight`] = Number(s.fontWeight);
 
-    if (s.fillColor) m[`${layerName}.fill_color`] = String(s.fillColor);
-    if (s.strokeColor) m[`${layerName}.stroke_color`] = String(s.strokeColor);
-    if (s.strokeWidth != null) m[`${layerName}.stroke_width`] = Number(s.strokeWidth);
+  // colors/stroke
+  if (s.fillColor) m[`${layerName}.fill_color`] = String(s.fillColor);
+  if (s.strokeColor) m[`${layerName}.stroke_color`] = String(s.strokeColor);
+  if (s.strokeWidth != null) m[`${layerName}.stroke_width`] = Number(s.strokeWidth);
 
+  // casing
+  if (s.textTransform) m[`${layerName}.text_transform`] = String(s.textTransform);
+
+  // ✅ HARD RULES (no leaking effects)
+  // Only BlackBar can have background box
+  if (styleKey === "blackbar") {
     if (s.backgroundColor) m[`${layerName}.background_color`] = String(s.backgroundColor);
-    if (s.shadowColor) m[`${layerName}.shadow_color`] = String(s.shadowColor);
-
-    if (s.textTransform) m[`${layerName}.text_transform`] = String(s.textTransform);
+  } else {
+    // clear it for all other styles
+    m[`${layerName}.background_color`] = "transparent";
   }
+
+  // Only NeonGlow can have shadow/glow
+  if (styleKey === "neonglow") {
+    if (s.shadowColor) m[`${layerName}.shadow_color`] = String(s.shadowColor);
+  } else {
+    // clear it for all other styles
+    m[`${layerName}.shadow_color`] = "transparent";
+  }
+}
 
   // hide all
   for (const layer of ALL_SUBTITLE_LAYERS) forceHideLayer(layer);
@@ -562,7 +579,7 @@ async function buildModifications(body) {
     m[`${chosenLayer}.time`] = 0;
     m[`${chosenLayer}.duration`] = Math.max(0.25, totalTimelineSecs);
 
-    applyCaptionSettings(chosenLayer, captionSettings);
+    applyCaptionSettings(chosenLayer, style, captionSettings);
   }
 
   return m;
