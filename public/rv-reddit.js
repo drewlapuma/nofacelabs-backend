@@ -1236,22 +1236,31 @@
 // ✅ FULL UPDATED buildPayload()
 // ==============================
 function buildPayload() {
-  // --- captions (read from your modal hidden inputs) ---
-  const capEnabledEl  = document.getElementById("caption-enabled-value");
-  const capStyleEl    = document.getElementById("caption-style-value");
+  // --- captions (unchanged) ---
+  const capEnabledEl = document.getElementById("caption-enabled-value");
+  const capStyleEl = document.getElementById("caption-style-value");
   const capSettingsEl = document.getElementById("caption-settings-value");
 
   const captionsEnabled = String(capEnabledEl?.value || "0") === "1";
   const captionStyle = String(capStyleEl?.value || "").trim();
+  const captionSettingsRaw = String(capSettingsEl?.value || "").trim();
 
   let captionSettings = null;
-  if (captionsEnabled && capSettingsEl?.value) {
-    try {
-      captionSettings = JSON.parse(String(capSettingsEl.value));
-    } catch {
-      captionSettings = null;
-    }
+  if (captionsEnabled && captionSettingsRaw) {
+    try { captionSettings = JSON.parse(captionSettingsRaw); } catch { captionSettings = null; }
   }
+
+  // --- NEW: voice options inputs ---
+  const postSpeedEl = document.getElementById("post-voice-speed-value");
+  const postVolEl   = document.getElementById("post-voice-volume-value");
+  const scriptSpeedEl = document.getElementById("script-voice-speed-value");
+  const scriptVolEl   = document.getElementById("script-voice-volume-value");
+
+  // defaults
+  const postVoiceSpeed = Number(postSpeedEl?.value ?? 1);
+  const postVoiceVolume = Number(postVolEl?.value ?? 1);
+  const scriptVoiceSpeed = Number(scriptSpeedEl?.value ?? 1);
+  const scriptVoiceVolume = Number(scriptVolEl?.value ?? 1);
 
   const payload = {
     username: String(readAnyText(usernameEl)).trim(),
@@ -1270,14 +1279,25 @@ function buildPayload() {
     backgroundVideoUrl: bgLibraryUrl,
     backgroundVideoName: bgLibraryName,
 
-    // ✅ captions: always include these so backend can rely on them
-    captionsEnabled: captionsEnabled,
-    captionStyle: captionsEnabled ? captionStyle : "",
-    captionSettings: captionsEnabled ? (captionSettings || null) : null,
+    // ✅ NEW: send these
+    postVoiceSpeed,
+    postVoiceVolume,
+    scriptVoiceSpeed,
+    scriptVoiceVolume,
   };
+
+  // Only send caption fields if enabled + valid
+  if (captionsEnabled && captionStyle && captionSettings) {
+    payload.captionsEnabled = true;
+    payload.captionStyle = captionStyle;
+    payload.captionSettings = captionSettings;
+  } else {
+    payload.captionsEnabled = false;
+  }
 
   return payload;
 }
+
 
 
     if (genBtn) {
