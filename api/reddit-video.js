@@ -369,7 +369,7 @@ async function buildModifications(body) {
   setMulti(m, ["comment_count_dark.y", "post_card_dark.comment_count_dark.y"], pct(commentY));
 
   setMulti(m, ["share_light.y", "post_card_light.share_light.y"], pct(shareTextY));
-  setMulti(m, ["share_dark.y", "post_card_dark.share_light.y"], pct(shareTextY));
+  setMulti(m, ["share_dark.y", "post_card_dark.share_dark.y"], pct(shareTextY));
 
   setMulti(m, ["icon_like.y", "post_card_light.icon_like.y", "post_card_dark.icon_like.y"], pct(iconLikeY));
   setMulti(m, ["icon_comment.y", "post_card_light.icon_comment.y", "post_card_dark.icon_comment.y"], pct(iconCommentY));
@@ -378,7 +378,7 @@ async function buildModifications(body) {
   // comment X
   setMulti(m, ["icon_comment.x", "post_card_light.icon_comment.x", "post_card_dark.icon_comment.x"], pct(commentIconX));
   setMulti(m, ["comment_count_light.x", "post_card_light.comment_count_light.x"], pct(commentTextX));
-  setMulti(m, ["comment_count_dark.x", "post_card_dark.comment_count_dark.text_x"], pct(commentTextX)); // if your template uses ".x", change back to ".x"
+  setMulti(m, ["comment_count_dark.x", "post_card_dark.comment_count_dark.x"], pct(commentTextX));
 
   // share anchor + X
   if (shareLong) {
@@ -425,8 +425,7 @@ async function buildModifications(body) {
   }
 
   // ==========================================================
-  // ✅ timing tweaks (captions-safe)
-  // - timeline will NEVER end before script/captions finish
+  // timing (unchanged behavior)
   // ==========================================================
   function estimateSpeechSeconds(text) {
     const words = String(text || "")
@@ -445,44 +444,34 @@ async function buildModifications(body) {
   const cardSecs = Math.max(0.35, postSecsRaw - CARD_EARLY_CUT);
   const scriptStart = Math.max(0, postSecsRaw - SCRIPT_OVERLAP);
 
-  // cards
   m["post_card_light.time"] = 0;
   m["post_card_light.duration"] = cardSecs;
   m["post_card_dark.time"] = 0;
   m["post_card_dark.duration"] = cardSecs;
 
-  // audio timing
   m["post_voice.time"] = 0;
   if (scriptText) m["script_voice.time"] = scriptStart;
 
-  const TAIL_PAD = 0.18;
   const END_TRIM_SECONDS = 2.4;
+  const TAIL_PAD = 0.18;
 
   const scriptSecsRaw = scriptText ? estimateSpeechSeconds(scriptText) : 0;
-
   const estimatedEnd = scriptText
     ? (scriptStart + scriptSecsRaw + TAIL_PAD)
     : (postSecsRaw + TAIL_PAD);
 
-  const trimmedEnd = Math.max(0.9, estimatedEnd - END_TRIM_SECONDS);
+  // don’t cut below script end
+  const totalTimelineSecs = Math.max(
+    0.9,
+    (scriptText ? (scriptStart + scriptSecsRaw + TAIL_PAD) : estimatedEnd),
+    estimatedEnd - END_TRIM_SECONDS
+  );
 
-  // HARD FLOOR so we never cut script/captions
-  const minEndForScript = scriptText
-    ? (scriptStart + scriptSecsRaw + TAIL_PAD)
-    : 0.9;
-
-  const totalTimelineSecs = Math.max(trimmedEnd, minEndForScript);
-
-  // Trim background to set total length
   m["Video.time"] = 0;
   m["Video.duration"] = totalTimelineSecs;
 
   // ==========================================================
-  // ✅ CAPTIONS (Subtitles_* layers)
-  // - show only chosen style
-  // - caption text = SCRIPT ONLY (never title)
-  // - start at scriptStart
-  // - duration = scriptSecsRaw (NOT totalTimelineSecs - scriptStart)
+  // ✅ CAPTIONS (HARD FORCE ON)
   // ==========================================================
   const captionsEnabled =
     body.captionsEnabled === true ||
@@ -500,7 +489,7 @@ async function buildModifications(body) {
           catch { return null; }
         })();
 
-  const captionsText = safeStr(body.script, ""); // ✅ script only
+  const captionsText = safeStr(body.script, "");
 
   const STYLE_TO_LAYER = {
     sentence: "Subtitles_Sentence",
@@ -522,13 +511,28 @@ async function buildModifications(body) {
 
   const ALL_SUBTITLE_LAYERS = Object.values(STYLE_TO_LAYER);
 
+  function forceHideLayer(layerName) {
+    // try every flag Creatomate templates commonly use
+    m[`${layerName}.hidden`] = true;
+    m[`${layerName}.visible`] = false;
+    m[`${layerName}.enabled`] = false;
+    m[`${layerName}.opacity`] = "0%";
+  }
+
+  function forceShowLayer(layerName) {
+    m[`${layerName}.hidden`] = false;
+    m[`${layerName}.visible`] = true;
+    m[`${layerName}.enabled`] = true;
+    m[`${layerName}.opacity`] = "100%";
+  }
+
   function applyCaptionSettings(layerName, s) {
     if (!s || typeof s !== "object") return;
 
     if (s.x != null) m[`${layerName}.x`] = pct(Number(s.x));
     if (s.y != null) m[`${layerName}.y`] = pct(Number(s.y));
 
-    // NOTE: these property names must match Creatomate layer properties
+    // These keys are harmless if unsupported; Creatomate will ignore unknown ones.
     if (s.fontFamily) m[`${layerName}.font_family`] = String(s.fontFamily);
     if (s.fontSize != null) m[`${layerName}.font_size`] = Number(s.fontSize);
     if (s.fontWeight != null) m[`${layerName}.font_weight`] = Number(s.fontWeight);
@@ -543,33 +547,27 @@ async function buildModifications(body) {
     if (s.textTransform) m[`${layerName}.text_transform`] = String(s.textTransform);
   }
 
-  // hide all by default
-  for (const layer of ALL_SUBTITLE_LAYERS) {
-    m[`${layer}.hidden`] = true;
-    m[`${layer}.opacity`] = "0%";
-  }
+  // hide all
+  for (const layer of ALL_SUBTITLE_LAYERS) forceHideLayer(layer);
 
   if (captionsEnabled && captionsText) {
     const chosenLayer = STYLE_TO_LAYER[style] || STYLE_TO_LAYER.sentence;
 
-    m[`${chosenLayer}.hidden`] = false;
-    m[`${chosenLayer}.opacity`] = "100%";
+    forceShowLayer(chosenLayer);
 
-    // Creatomate subtitles usually want the script text to generate word timing
+    // IMPORTANT: set text AND force timing to start at 0 first (removes timing as a variable)
     m[`${chosenLayer}.text`] = captionsText;
 
-    // captions start when script starts
-    m[`${chosenLayer}.time`] = scriptStart;
-
-    // ✅ captions last for the script duration (+ tiny pad)
-    const capDur = Math.max(0.25, scriptSecsRaw + 0.15);
-    m[`${chosenLayer}.duration`] = capDur;
+    // 🔥 DEBUG-SAFE: show immediately for entire timeline
+    m[`${chosenLayer}.time`] = 0;
+    m[`${chosenLayer}.duration`] = Math.max(0.25, totalTimelineSecs);
 
     applyCaptionSettings(chosenLayer, captionSettings);
   }
 
   return m;
 }
+
 
 
 
