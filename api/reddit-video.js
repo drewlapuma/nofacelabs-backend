@@ -453,7 +453,7 @@ async function buildModifications(body) {
   if (scriptText) m["script_voice.time"] = scriptStart;
 
   const END_TRIM_SECONDS = 2.4;
-  const TAIL_PAD = 0.06; // tiny pad so it doesn't cut the last syllable
+  const TAIL_PAD = 0.03; // tiny pad so it doesn't cut the last syllable
 
   const scriptSecsRaw = scriptText ? estimateSpeechSeconds(scriptText) : 0;
   const estimatedEnd = scriptText
