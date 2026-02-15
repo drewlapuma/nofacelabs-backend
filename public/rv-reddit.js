@@ -1144,50 +1144,59 @@
       });
     }
 
-    function renderVoiceGrid(q) {
-      if (!voiceGrid) return;
+    function escAttr(s){
+  return String(s ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
 
-      const query = String(q || "").toLowerCase().trim();
-      const selectedId = getSelectedVoiceId(voiceTarget);
+function renderVoiceGrid(q) {
+  if (!voiceGrid) return;
 
-      const filtered = VOICES.filter((v) => {
-        if (!query) return true;
-        return (
-          v.name.toLowerCase().includes(query) ||
-          String(v.desc || "").toLowerCase().includes(query) ||
-          v.id.toLowerCase().includes(query)
-        );
-      });
+  const query = String(q || "").toLowerCase().trim();
+  const selectedId = getSelectedVoiceId(voiceTarget);
 
-      voiceGrid.classList.add("nf-voiceGrid");
+  const filtered = VOICES.filter((v) => {
+    if (!query) return true;
+    return (
+      v.name.toLowerCase().includes(query) ||
+      String(v.desc || "").toLowerCase().includes(query) ||
+      v.id.toLowerCase().includes(query)
+    );
+  });
 
-      voiceGrid.innerHTML = filtered
-        .map((v) => {
-          const selected = selectedId === v.id;
-          const isPreviewing = previewingVoiceId === v.id;
+  voiceGrid.classList.add("nf-voiceGrid");
 
-          return `
-          <div class="nf-voiceCard ${selected ? "nf-voiceSelected" : ""}"
-       data-voice-id="${v.id}"
-       data-voice-name="${String(v.name || "").replace(/"/g,'&quot;')}">
-            <div style="min-width:0;">
-              <div class="nf-voiceName" title="${v.name}">${v.name}</div>
-              <div class="nf-voiceDesc" title="${String(v.desc || "")}">${String(v.desc || "—")}</div>
-            </div>
+  voiceGrid.innerHTML = filtered
+    .map((v) => {
+      const selected = selectedId === v.id;
+      const isPreviewing = previewingVoiceId === v.id;
 
-            <div class="nf-voiceBtnsRow">
-              <button class="nf-voiceBtnMini" type="button" data-act="preview" data-id="${v.id}" ${isPreviewing ? "disabled" : ""}>
-                ${isPreviewing ? "Previewing..." : "Preview"}
-              </button>
-              <button class="nf-voiceBtnMini nf-voiceBtnUse" type="button" data-act="use" data-id="${v.id}">
-                ${selected ? "Selected" : "Use voice"}
-              </button>
-            </div>
+      return `
+        <div class="nf-voiceCard ${selected ? "nf-voiceSelected" : ""}"
+          data-voice-id="${escAttr(v.id)}"
+          data-voice-name="${escAttr(v.name)}">
+          <div style="min-width:0;">
+            <div class="nf-voiceName" title="${escAttr(v.name)}">${escAttr(v.name)}</div>
+            <div class="nf-voiceDesc" title="${escAttr(v.desc || "")}">${escAttr(v.desc || "—")}</div>
           </div>
-        `;
-        })
-        .join("");
-    }
+
+          <div class="nf-voiceBtnsRow">
+            <button class="nf-voiceBtnMini" type="button" data-act="preview" data-id="${escAttr(v.id)}" ${isPreviewing ? "disabled" : ""}>
+              ${isPreviewing ? "Previewing..." : "Preview"}
+            </button>
+            <button class="nf-voiceBtnMini nf-voiceBtnUse" type="button" data-act="use" data-id="${escAttr(v.id)}">
+              ${selected ? "Selected" : "Use voice"}
+            </button>
+          </div>
+        </div>
+      `;
+    })
+    .join("");
+}
+
 
     function openVoiceModal() {
       if (voiceSearch) voiceSearch.value = "";
