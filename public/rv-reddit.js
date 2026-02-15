@@ -461,7 +461,8 @@
 
     // ==========================================================
     // ✅ Voice options helpers (READ from localStorage)
-    // Keys match your options UI: nf_voice_opts_v1:${mode}:${voiceId}
+    // ✅ UPDATED: speed clamp is now 0.50 -> 2.00
+    // ✅ UPDATED: also exposes window.nfGetVoiceOpts so EVERY script uses same getter
     // ==========================================================
     const NF_DEFAULT_SPEED = 1.0;
     const NF_DEFAULT_VOL = 1.0;
@@ -472,23 +473,32 @@
       return Math.max(a, Math.min(b, n));
     }
 
+    function nfNormalizeMode(m){
+      const s = String(m || "").toLowerCase().trim();
+      return s === "script" ? "script" : "post";
+    }
+
     function nfGetVoiceOpts(mode, voiceId) {
+      const m = nfNormalizeMode(mode);
       const id = String(voiceId || "").trim();
-      if (!id || id === "default") return { speed: NF_DEFAULT_SPEED, volume: NF_DEFAULT_VOL };
+      if (!id || id.toLowerCase() === "default") return { speed: NF_DEFAULT_SPEED, volume: NF_DEFAULT_VOL };
 
       try {
-        const key = `nf_voice_opts_v1:${mode}:${id}`;
+        const key = `nf_voice_opts_v1:${m}:${id}`;
         const raw = localStorage.getItem(key);
         if (!raw) return { speed: NF_DEFAULT_SPEED, volume: NF_DEFAULT_VOL };
         const o = JSON.parse(raw);
         return {
-          speed: nfClamp(o.speed ?? NF_DEFAULT_SPEED, 0.7, 1.3),
+          speed: nfClamp(o.speed ?? NF_DEFAULT_SPEED, 0.5, 2.0),   // ✅ UPDATED
           volume: nfClamp(o.volume ?? NF_DEFAULT_VOL, 0.0, 1.5),
         };
       } catch {
         return { speed: NF_DEFAULT_SPEED, volume: NF_DEFAULT_VOL };
       }
     }
+
+    // ✅ expose a single shared getter (prevents any other file using an old clamp like 0.7–1.3)
+    window.nfGetVoiceOpts = window.nfGetVoiceOpts || nfGetVoiceOpts;
 
     function ensureNodes() {
       const host = findPreviewHost();
@@ -1145,58 +1155,57 @@
     }
 
     function escAttr(s){
-  return String(s ?? "")
-    .replaceAll("&", "&amp;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;");
-}
+      return String(s ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;");
+    }
 
-function renderVoiceGrid(q) {
-  if (!voiceGrid) return;
+    function renderVoiceGrid(q) {
+      if (!voiceGrid) return;
 
-  const query = String(q || "").toLowerCase().trim();
-  const selectedId = getSelectedVoiceId(voiceTarget);
+      const query = String(q || "").toLowerCase().trim();
+      const selectedId = getSelectedVoiceId(voiceTarget);
 
-  const filtered = VOICES.filter((v) => {
-    if (!query) return true;
-    return (
-      v.name.toLowerCase().includes(query) ||
-      String(v.desc || "").toLowerCase().includes(query) ||
-      v.id.toLowerCase().includes(query)
-    );
-  });
+      const filtered = VOICES.filter((v) => {
+        if (!query) return true;
+        return (
+          v.name.toLowerCase().includes(query) ||
+          String(v.desc || "").toLowerCase().includes(query) ||
+          v.id.toLowerCase().includes(query)
+        );
+      });
 
-  voiceGrid.classList.add("nf-voiceGrid");
+      voiceGrid.classList.add("nf-voiceGrid");
 
-  voiceGrid.innerHTML = filtered
-    .map((v) => {
-      const selected = selectedId === v.id;
-      const isPreviewing = previewingVoiceId === v.id;
+      voiceGrid.innerHTML = filtered
+        .map((v) => {
+          const selected = selectedId === v.id;
+          const isPreviewing = previewingVoiceId === v.id;
 
-      return `
-        <div class="nf-voiceCard ${selected ? "nf-voiceSelected" : ""}"
-          data-voice-id="${escAttr(v.id)}"
-          data-voice-name="${escAttr(v.name)}">
-          <div style="min-width:0;">
-            <div class="nf-voiceName" title="${escAttr(v.name)}">${escAttr(v.name)}</div>
-            <div class="nf-voiceDesc" title="${escAttr(v.desc || "")}">${escAttr(v.desc || "—")}</div>
-          </div>
+          return `
+            <div class="nf-voiceCard ${selected ? "nf-voiceSelected" : ""}"
+              data-voice-id="${escAttr(v.id)}"
+              data-voice-name="${escAttr(v.name)}">
+              <div style="min-width:0;">
+                <div class="nf-voiceName" title="${escAttr(v.name)}">${escAttr(v.name)}</div>
+                <div class="nf-voiceDesc" title="${escAttr(v.desc || "")}">${escAttr(v.desc || "—")}</div>
+              </div>
 
-          <div class="nf-voiceBtnsRow">
-            <button class="nf-voiceBtnMini" type="button" data-act="preview" data-id="${escAttr(v.id)}" ${isPreviewing ? "disabled" : ""}>
-              ${isPreviewing ? "Previewing..." : "Preview"}
-            </button>
-            <button class="nf-voiceBtnMini nf-voiceBtnUse" type="button" data-act="use" data-id="${escAttr(v.id)}">
-              ${selected ? "Selected" : "Use voice"}
-            </button>
-          </div>
-        </div>
-      `;
-    })
-    .join("");
-}
-
+              <div class="nf-voiceBtnsRow">
+                <button class="nf-voiceBtnMini" type="button" data-act="preview" data-id="${escAttr(v.id)}" ${isPreviewing ? "disabled" : ""}>
+                  ${isPreviewing ? "Previewing..." : "Preview"}
+                </button>
+                <button class="nf-voiceBtnMini nf-voiceBtnUse" type="button" data-act="use" data-id="${escAttr(v.id)}">
+                  ${selected ? "Selected" : "Use voice"}
+                </button>
+              </div>
+            </div>
+          `;
+        })
+        .join("");
+    }
 
     function openVoiceModal() {
       if (voiceSearch) voiceSearch.value = "";
@@ -1206,7 +1215,6 @@ function renderVoiceGrid(q) {
       warmPreviews();
     }
 
-    
     function closeVoiceModal() {
       if (voiceModal) voiceModal.classList.remove("open");
       stopPreview();
@@ -1275,8 +1283,7 @@ function renderVoiceGrid(q) {
 
     // ==============================
     // ✅ FULL UPDATED buildPayload()
-    // - Reads voice speed/volume from localStorage (your options popup)
-    // - NO hidden inputs needed
+    // ✅ UPDATED: uses window.nfGetVoiceOpts (single source of truth)
     // ==============================
     function buildPayload() {
       // --- captions (unchanged) ---
@@ -1293,12 +1300,12 @@ function renderVoiceGrid(q) {
         try { captionSettings = JSON.parse(captionSettingsRaw); } catch { captionSettings = null; }
       }
 
-      // --- ✅ NEW: pull saved voice options for the SELECTED voice IDs ---
+      // --- ✅ pull saved voice options for the SELECTED voice IDs ---
       const postVoiceId = String(postVoiceEl?.value || "default").trim();
       const scriptVoiceId = String(scriptVoiceEl?.value || "default").trim();
 
-      const postOpts = nfGetVoiceOpts("post", postVoiceId);
-      const scriptOpts = nfGetVoiceOpts("script", scriptVoiceId);
+      const postOpts = window.nfGetVoiceOpts("post", postVoiceId);
+      const scriptOpts = window.nfGetVoiceOpts("script", scriptVoiceId);
 
       const payload = {
         username: String(readAnyText(usernameEl)).trim(),
@@ -1360,6 +1367,15 @@ function renderVoiceGrid(q) {
           setProgress(20);
 
           const payload = buildPayload();
+
+          // ✅ helpful debug (remove later)
+          console.log("[rv] voice opts check =>", {
+            postVoice: payload.postVoice,
+            postVoiceSpeed: payload.postVoiceSpeed,
+            scriptVoice: payload.scriptVoice,
+            scriptVoiceSpeed: payload.scriptVoiceSpeed,
+          });
+
           console.log("[rv] payload =>", payload);
 
           const res = await fetch(API_BASE + "/api/reddit-video", {
