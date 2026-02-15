@@ -1167,7 +1167,9 @@
           const isPreviewing = previewingVoiceId === v.id;
 
           return `
-          <div class="nf-voiceCard ${selected ? "nf-voiceSelected" : ""}" data-voice-id="${v.id}">
+          <div class="nf-voiceCard ${selected ? "nf-voiceSelected" : ""}"
+       data-voice-id="${v.id}"
+       data-voice-name="${String(v.name || "").replace(/"/g,'&quot;')}">
             <div style="min-width:0;">
               <div class="nf-voiceName" title="${v.name}">${v.name}</div>
               <div class="nf-voiceDesc" title="${String(v.desc || "")}">${String(v.desc || "—")}</div>
@@ -1195,6 +1197,7 @@
       warmPreviews();
     }
 
+    
     function closeVoiceModal() {
       if (voiceModal) voiceModal.classList.remove("open");
       stopPreview();
