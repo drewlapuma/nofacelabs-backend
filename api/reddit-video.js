@@ -1,6 +1,10 @@
 // api/reddit-video.js (CommonJS, Node 18+)
 
 const https = require("https");
+const fs = require("fs");
+const path = require("path");
+const { spawn } = require("child_process");
+const ffmpegPath = require("ffmpeg-static");
 
 const CREATOMATE_API_KEY = process.env.CREATOMATE_API_KEY;
 const TEMPLATE_ID = process.env.CREATOMATE_TEMPLATE_ID_REDDIT;
@@ -219,158 +223,197 @@ function normalizeElevenVoiceId(v) {
   return s;
 }
 
-// =====================================
-// ✅ FULL UPDATED buildModifications()
-// (robust: never cuts audio if playback_rate is ignored)
-// =====================================
+/* ----------------- ✅ FFmpeg audio transform (speed + volume baked in) ----------------- */
+
+function clampNum(n, a, b, fallback) {
+  n = Number(n);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(a, Math.min(b, n));
+}
+
+async function transformMp3WithFfmpeg(mp3Buffer, speed, volume) {
+  // speed: 0.5–2.0, volume: 0–1.5 (linear)
+  const sp = clampNum(speed, 0.5, 2.0, 1.0);
+  const vol = clampNum(volume, 0.0, 1.5, 1.0);
+
+  // If nothing to do, return original
+  if (Math.abs(sp - 1.0) < 0.001 && Math.abs(vol - 1.0) < 0.001) {
+    return mp3Buffer;
+  }
+
+  if (!ffmpegPath) throw new Error("ffmpeg-static not available. Install ffmpeg-static.");
+
+  const tmpIn = path.join("/tmp", `nf_in_${Date.now()}_${randId()}.mp3`);
+  const tmpOut = path.join("/tmp", `nf_out_${Date.now()}_${randId()}.mp3`);
+
+  fs.writeFileSync(tmpIn, mp3Buffer);
+
+  // atempo supports 0.5–2.0; your UI clamps to that range.
+  // volume is linear multiplier.
+  const afilter = `atempo=${sp},volume=${vol}`;
+
+  const args = [
+    "-y",
+    "-i",
+    tmpIn,
+    "-vn",
+    "-af",
+    afilter,
+    "-codec:a",
+    "libmp3lame",
+    "-b:a",
+    "192k",
+    tmpOut,
+  ];
+
+  await new Promise((resolve, reject) => {
+    const p = spawn(ffmpegPath, args);
+    let err = "";
+    p.stderr.on("data", (d) => (err += String(d)));
+    p.on("error", reject);
+    p.on("close", (code) => {
+      if (code === 0) return resolve();
+      reject(new Error(`ffmpeg failed (code ${code}): ${err.slice(-1200)}`));
+    });
+  });
+
+  const outBuf = fs.readFileSync(tmpOut);
+
+  // cleanup
+  try { fs.unlinkSync(tmpIn); } catch {}
+  try { fs.unlinkSync(tmpOut); } catch {}
+
+  return outBuf;
+}
+
+/* ----------------- MP3 duration helper (buffer -> seconds) ----------------- */
+
+function mp3DurationSeconds(buf) {
+  try {
+    const b = Buffer.isBuffer(buf) ? buf : Buffer.from(buf);
+    let offset = 0;
+
+    if (b.length >= 10 && b.toString("utf8", 0, 3) === "ID3") {
+      const size =
+        ((b[6] & 0x7f) << 21) |
+        ((b[7] & 0x7f) << 14) |
+        ((b[8] & 0x7f) << 7) |
+        (b[9] & 0x7f);
+      offset = 10 + size;
+    }
+
+    const BITRATES = {
+      3: {
+        3: [0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448],
+        2: [0, 32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384],
+        1: [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320],
+      },
+      2: {
+        3: [0, 32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256],
+        2: [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160],
+        1: [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160],
+      },
+      0: {
+        3: [0, 32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256],
+        2: [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160],
+        1: [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160],
+      },
+    };
+
+    const SAMPLERATES = {
+      3: [44100, 48000, 32000],
+      2: [22050, 24000, 16000],
+      0: [11025, 12000, 8000],
+    };
+
+    let totalSamples = 0;
+    let sampleRate = 44100;
+
+    let guard = 0;
+    while (offset + 4 < b.length && guard++ < 200000) {
+      if (b[offset] !== 0xff || (b[offset + 1] & 0xe0) !== 0xe0) {
+        offset += 1;
+        continue;
+      }
+
+      const verBits = (b[offset + 1] >> 3) & 0x03;
+      const layerBits = (b[offset + 1] >> 1) & 0x03;
+      if (verBits === 1 || layerBits === 0) {
+        offset += 1;
+        continue;
+      }
+
+      const versionIndex = verBits === 3 ? 3 : verBits === 2 ? 2 : 0;
+      const layerIndex = layerBits === 3 ? 3 : layerBits === 2 ? 2 : 1;
+
+      const bitrateIdx = (b[offset + 2] >> 4) & 0x0f;
+      const srIdx = (b[offset + 2] >> 2) & 0x03;
+      const padding = (b[offset + 2] >> 1) & 0x01;
+
+      if (bitrateIdx === 0 || bitrateIdx === 15 || srIdx === 3) {
+        offset += 1;
+        continue;
+      }
+
+      const brTable = BITRATES[versionIndex]?.[layerIndex];
+      const srTable = SAMPLERATES[versionIndex];
+      if (!brTable || !srTable) {
+        offset += 1;
+        continue;
+      }
+
+      const bitrateKbps = brTable[bitrateIdx];
+      const sr = srTable[srIdx];
+      if (!bitrateKbps || !sr) {
+        offset += 1;
+        continue;
+      }
+      sampleRate = sr;
+
+      let samplesPerFrame;
+      if (layerIndex === 3) samplesPerFrame = 384;
+      else if (layerIndex === 2) samplesPerFrame = 1152;
+      else samplesPerFrame = versionIndex === 3 ? 1152 : 576;
+
+      let frameLen;
+      if (layerIndex === 3) {
+        frameLen = Math.floor((12 * (bitrateKbps * 1000) / sr + padding) * 4);
+      } else {
+        const coef = layerIndex === 1 && versionIndex !== 3 ? 72 : 144;
+        frameLen = Math.floor((coef * (bitrateKbps * 1000)) / sr + padding);
+      }
+
+      if (!Number.isFinite(frameLen) || frameLen <= 0) {
+        offset += 1;
+        continue;
+      }
+
+      totalSamples += samplesPerFrame;
+      offset += frameLen;
+    }
+
+    if (totalSamples <= 0 || !sampleRate) return 0;
+    return totalSamples / sampleRate;
+  } catch {
+    return 0;
+  }
+}
+
+/* ----------------- ✅ FULL buildModifications() ----------------- */
+
 async function buildModifications(body) {
-  // ==========================================================
-  // ✅ knobs you’ll actually tweak
-  // ==========================================================
+  // knobs
   const GAP_BETWEEN_TITLE_AND_SCRIPT = 0.70;
   const CARD_EXTRA_AFTER_TITLE = 0.25;
   const END_PAD = 0.55;
 
-  // ✅ extra tail so last syllable never gets clipped
-  const AUDIO_TAIL_PAD = 0.35;
-
-  // ==========================================================
-  // MP3 duration helper (buffer -> seconds)
-  // ==========================================================
-  function mp3DurationSeconds(buf) {
-    try {
-      const b = Buffer.isBuffer(buf) ? buf : Buffer.from(buf);
-      let offset = 0;
-
-      if (b.length >= 10 && b.toString("utf8", 0, 3) === "ID3") {
-        const size =
-          ((b[6] & 0x7f) << 21) |
-          ((b[7] & 0x7f) << 14) |
-          ((b[8] & 0x7f) << 7) |
-          (b[9] & 0x7f);
-        offset = 10 + size;
-      }
-
-      const BITRATES = {
-        3: {
-          3: [0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448],
-          2: [0, 32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384],
-          1: [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320],
-        },
-        2: {
-          3: [0, 32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256],
-          2: [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160],
-          1: [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160],
-        },
-        0: {
-          3: [0, 32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256],
-          2: [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160],
-          1: [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160],
-        },
-      };
-
-      const SAMPLERATES = {
-        3: [44100, 48000, 32000],
-        2: [22050, 24000, 16000],
-        0: [11025, 12000, 8000],
-      };
-
-      let totalSamples = 0;
-      let sampleRate = 44100;
-
-      let guard = 0;
-      while (offset + 4 < b.length && guard++ < 200000) {
-        if (b[offset] !== 0xff || (b[offset + 1] & 0xe0) !== 0xe0) {
-          offset += 1;
-          continue;
-        }
-
-        const verBits = (b[offset + 1] >> 3) & 0x03;
-        const layerBits = (b[offset + 1] >> 1) & 0x03;
-        if (verBits === 1 || layerBits === 0) {
-          offset += 1;
-          continue;
-        }
-
-        const versionIndex = verBits === 3 ? 3 : verBits === 2 ? 2 : 0;
-        const layerIndex = layerBits === 3 ? 3 : layerBits === 2 ? 2 : 1;
-
-        const bitrateIdx = (b[offset + 2] >> 4) & 0x0f;
-        const srIdx = (b[offset + 2] >> 2) & 0x03;
-        const padding = (b[offset + 2] >> 1) & 0x01;
-
-        if (bitrateIdx === 0 || bitrateIdx === 15 || srIdx === 3) {
-          offset += 1;
-          continue;
-        }
-
-        const brTable = BITRATES[versionIndex]?.[layerIndex];
-        const srTable = SAMPLERATES[versionIndex];
-        if (!brTable || !srTable) {
-          offset += 1;
-          continue;
-        }
-
-        const bitrateKbps = brTable[bitrateIdx];
-        const sr = srTable[srIdx];
-        if (!bitrateKbps || !sr) {
-          offset += 1;
-          continue;
-        }
-        sampleRate = sr;
-
-        let samplesPerFrame;
-        if (layerIndex === 3) samplesPerFrame = 384;
-        else if (layerIndex === 2) samplesPerFrame = 1152;
-        else samplesPerFrame = versionIndex === 3 ? 1152 : 576;
-
-        let frameLen;
-        if (layerIndex === 3) {
-          frameLen = Math.floor((12 * (bitrateKbps * 1000) / sr + padding) * 4);
-        } else {
-          const coef = layerIndex === 1 && versionIndex !== 3 ? 72 : 144;
-          frameLen = Math.floor((coef * (bitrateKbps * 1000)) / sr + padding);
-        }
-
-        if (!Number.isFinite(frameLen) || frameLen <= 0) {
-          offset += 1;
-          continue;
-        }
-
-        totalSamples += samplesPerFrame;
-        offset += frameLen;
-      }
-
-      if (totalSamples <= 0 || !sampleRate) return 0;
-      return totalSamples / sampleRate;
-    } catch {
-      return 0;
-    }
-  }
-
-  // ==========================================================
-  // ✅ Voice speed/volume helpers (these are what your UI sends)
-  // ==========================================================
-  function clampNum(n, a, b, fallback) {
-    n = Number(n);
-    if (!Number.isFinite(n)) return fallback;
-    return Math.max(a, Math.min(b, n));
-  }
-
-  function toPct01(v01) {
-    const n = clampNum(v01, 0, 2, 1);
-    return `${Math.round(n * 100)}%`;
-  }
-
+  // voice params from UI
   const postVoiceSpeed = clampNum(body.postVoiceSpeed, 0.5, 2.0, 1.0);
   const postVoiceVolume = clampNum(body.postVoiceVolume, 0.0, 1.5, 1.0);
 
   const scriptVoiceSpeed = clampNum(body.scriptVoiceSpeed, 0.5, 2.0, 1.0);
   const scriptVoiceVolume = clampNum(body.scriptVoiceVolume, 0.0, 1.5, 1.0);
 
-  // ==========================================================
-  // your existing setup
-  // ==========================================================
   const mode = normalizeMode(body.mode);
   const showLight = mode === "light";
   const showDark = mode === "dark";
@@ -384,7 +427,7 @@ async function buildModifications(body) {
   const pfpUrl = ensurePublicHttpUrl(body.pfpUrl, "pfpUrl");
   const bgUrl = ensurePublicHttpUrl(body.backgroundVideoUrl, "backgroundVideoUrl");
 
-  // --- your existing layout math (unchanged) ---
+  // --- your layout math (unchanged) ---
   const BG_WIDTH = 75;
   const BG_CENTER_X = 50;
   const cardRight = BG_CENTER_X + BG_WIDTH / 2;
@@ -551,86 +594,66 @@ async function buildModifications(body) {
     m["Video.fit"] = "cover";
   }
 
-  // ==========================================================
-  // ✅ AUDIO (robust: never cut off)
-  // ==========================================================
+  // ✅ AUDIO (bake speed into MP3 via ffmpeg)
   const postVoiceId = normalizeElevenVoiceId(body.postVoice) || DEFAULT_ELEVEN_VOICE_ID;
   const scriptVoiceId = normalizeElevenVoiceId(body.scriptVoice) || DEFAULT_ELEVEN_VOICE_ID;
   const scriptText = safeStr(body.script, "");
 
-  // ---- post voice ----
-  let postDurRaw = 0;
-  let postDurEff = 0;
+  // POST audio
+  const postMp3Raw = await elevenlabsTtsToMp3Buffer(postText, postVoiceId);
+  const postMp3 = await transformMp3WithFfmpeg(postMp3Raw, postVoiceSpeed, postVoiceVolume);
 
-  {
-    const postMp3 = await elevenlabsTtsToMp3Buffer(postText, postVoiceId);
-    const postPath = `reddit/${Date.now()}_${randId()}_post.mp3`;
-    const postUrl = await uploadMp3ToSupabasePublic(postMp3, postPath);
+  const postPath = `reddit/${Date.now()}_${randId()}_post.mp3`;
+  const postUrl = await uploadMp3ToSupabasePublic(postMp3, postPath);
+  m["post_voice.source"] = postUrl;
 
-    m["post_voice.source"] = postUrl;
+  let postDur = mp3DurationSeconds(postMp3) || 0;
+  postDur = Math.max(0.6, postDur);
 
-    postDurRaw = mp3DurationSeconds(postMp3) || 0;
-    postDurRaw = Math.max(0.6, postDurRaw);
+  m["post_voice.time"] = 0;
+  m["post_voice.duration"] = postDur;
 
-    // what it WOULD be if playback_rate is honored
-    postDurEff = Math.max(0.6, postDurRaw / postVoiceSpeed);
+  // IMPORTANT: now keep Creatomate at 1x (already baked)
+  m["post_voice.playback_rate"] = 1;
 
-    m["post_voice.time"] = 0;
-
-    // ✅ IMPORTANT: keep duration long enough even if playback_rate is ignored
-    m["post_voice.duration"] = postDurRaw + AUDIO_TAIL_PAD;
-
-    m["post_voice.playback_rate"] = postVoiceSpeed;
-    m["post_voice.volume"] = toPct01(postVoiceVolume);
-  }
-
-  // ---- script voice ----
-  let scriptDurRaw = 0;
-  let scriptDurEff = 0;
-
-  const scriptStart = postDurEff + GAP_BETWEEN_TITLE_AND_SCRIPT;
+  // SCRIPT audio
+  let scriptDur = 0;
+  const scriptStart = postDur + GAP_BETWEEN_TITLE_AND_SCRIPT;
 
   if (scriptText) {
-    const scriptMp3 = await elevenlabsTtsToMp3Buffer(scriptText, scriptVoiceId);
+    const scriptMp3Raw = await elevenlabsTtsToMp3Buffer(scriptText, scriptVoiceId);
+    const scriptMp3 = await transformMp3WithFfmpeg(scriptMp3Raw, scriptVoiceSpeed, scriptVoiceVolume);
+
     const scriptPath = `reddit/${Date.now()}_${randId()}_script.mp3`;
     const scriptUrl = await uploadMp3ToSupabasePublic(scriptMp3, scriptPath);
 
     m["script_voice.source"] = scriptUrl;
 
-    scriptDurRaw = mp3DurationSeconds(scriptMp3) || 0;
-    scriptDurRaw = Math.max(0.6, scriptDurRaw);
-
-    scriptDurEff = Math.max(0.6, scriptDurRaw / scriptVoiceSpeed);
+    scriptDur = mp3DurationSeconds(scriptMp3) || 0;
+    scriptDur = Math.max(0.6, scriptDur);
 
     m["script_voice.time"] = scriptStart;
+    m["script_voice.duration"] = scriptDur;
 
-    // ✅ IMPORTANT: keep duration long enough even if playback_rate is ignored
-    m["script_voice.duration"] = scriptDurRaw + AUDIO_TAIL_PAD;
-
-    m["script_voice.playback_rate"] = scriptVoiceSpeed;
-    m["script_voice.volume"] = toPct01(scriptVoiceVolume);
+    // baked, keep at 1
+    m["script_voice.playback_rate"] = 1;
   }
 
-  // Card should stay up for the title segment (post voice)
-  const cardSecs = Math.max(0.35, postDurEff + CARD_EXTRA_AFTER_TITLE);
+  // Card stays for post segment
+  const cardSecs = Math.max(0.35, postDur + CARD_EXTRA_AFTER_TITLE);
   m["post_card_light.time"] = 0;
   m["post_card_light.duration"] = cardSecs;
   m["post_card_dark.time"] = 0;
   m["post_card_dark.duration"] = cardSecs;
 
-  // ✅ Video duration must cover BOTH:
-  // - if playback_rate works (effective)
-  // - if playback_rate is ignored (raw)
-  const audioEndEff = scriptText ? scriptStart + scriptDurEff : postDurEff;
-  const audioEndRaw = scriptText ? (scriptStart + scriptDurRaw + AUDIO_TAIL_PAD) : (postDurRaw + AUDIO_TAIL_PAD);
-
-  const totalTimelineSecs = Math.max(0.9, Math.max(audioEndEff, audioEndRaw) + END_PAD);
+  const audioEnd = scriptText ? scriptStart + scriptDur : postDur;
+  const totalTimelineSecs = Math.max(0.9, audioEnd + END_PAD);
 
   m["Video.time"] = 0;
   m["Video.duration"] = totalTimelineSecs;
 
   // ==========================================================
-  // ✅ CAPTIONS (unchanged)
+  // ✅ CAPTIONS (keep your existing block)
   // ==========================================================
   const captionsEnabled =
     body.captionsEnabled === true ||
