@@ -229,9 +229,9 @@ async function buildModifications(body) {
   // ==========================================================
   // ✅ knobs you’ll actually tweak
   // ==========================================================
-  const GAP_BETWEEN_TITLE_AND_SCRIPT = 0.65;
+  const GAP_BETWEEN_TITLE_AND_SCRIPT = 0.70;
   const CARD_EXTRA_AFTER_TITLE = 0.25;
-  const END_PAD = 0.12;
+  const END_PAD = 0.55;
 
   // ==========================================================
   // MP3 duration helper (buffer -> seconds)
