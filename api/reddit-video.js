@@ -136,8 +136,6 @@ function randId(len = 10) {
   return out;
 }
 
-// ✅ Now accepts optional { speed, volume } but we APPLY those in Creatomate,
-// not ElevenLabs (ElevenLabs “voice_settings” doesn’t do playback rate).
 async function elevenlabsTtsToMp3Buffer(text, voiceId) {
   if (!ELEVENLABS_API_KEY) throw new Error("Missing ELEVENLABS_API_KEY");
   if (!voiceId) throw new Error("Missing ElevenLabs voiceId");
@@ -223,7 +221,7 @@ function normalizeElevenVoiceId(v) {
 
 // =====================================
 // ✅ FULL UPDATED buildModifications()
-// (voice speed/volume ACTUALLY affect the timeline now)
+// (robust: never cuts audio if playback_rate is ignored)
 // =====================================
 async function buildModifications(body) {
   // ==========================================================
@@ -232,6 +230,9 @@ async function buildModifications(body) {
   const GAP_BETWEEN_TITLE_AND_SCRIPT = 0.70;
   const CARD_EXTRA_AFTER_TITLE = 0.25;
   const END_PAD = 0.55;
+
+  // ✅ extra tail so last syllable never gets clipped
+  const AUDIO_TAIL_PAD = 0.35;
 
   // ==========================================================
   // MP3 duration helper (buffer -> seconds)
@@ -357,7 +358,6 @@ async function buildModifications(body) {
   }
 
   function toPct01(v01) {
-    // Creatomate accepts e.g. "100%"
     const n = clampNum(v01, 0, 2, 1);
     return `${Math.round(n * 100)}%`;
   }
@@ -367,7 +367,6 @@ async function buildModifications(body) {
 
   const scriptVoiceSpeed = clampNum(body.scriptVoiceSpeed, 0.5, 2.0, 1.0);
   const scriptVoiceVolume = clampNum(body.scriptVoiceVolume, 0.0, 1.5, 1.0);
-
 
   // ==========================================================
   // your existing setup
@@ -553,15 +552,13 @@ async function buildModifications(body) {
   }
 
   // ==========================================================
-  // ✅ AUDIO:
-  // IMPORTANT FIX:
-  // If you set playback_rate, you MUST also shorten the layer duration
-  // (otherwise the clip can still behave like “1x” in timing).
+  // ✅ AUDIO (robust: never cut off)
   // ==========================================================
   const postVoiceId = normalizeElevenVoiceId(body.postVoice) || DEFAULT_ELEVEN_VOICE_ID;
   const scriptVoiceId = normalizeElevenVoiceId(body.scriptVoice) || DEFAULT_ELEVEN_VOICE_ID;
   const scriptText = safeStr(body.script, "");
 
+  // ---- post voice ----
   let postDurRaw = 0;
   let postDurEff = 0;
 
@@ -575,20 +572,23 @@ async function buildModifications(body) {
     postDurRaw = mp3DurationSeconds(postMp3) || 0;
     postDurRaw = Math.max(0.6, postDurRaw);
 
-    // ✅ effective time after playback_rate
+    // what it WOULD be if playback_rate is honored
     postDurEff = Math.max(0.6, postDurRaw / postVoiceSpeed);
 
     m["post_voice.time"] = 0;
-    m["post_voice.duration"] = postDurEff;
 
-    // ✅ NEW: speed + volume applied here
+    // ✅ IMPORTANT: keep duration long enough even if playback_rate is ignored
+    m["post_voice.duration"] = postDurRaw + AUDIO_TAIL_PAD;
+
     m["post_voice.playback_rate"] = postVoiceSpeed;
     m["post_voice.volume"] = toPct01(postVoiceVolume);
   }
 
+  // ---- script voice ----
   let scriptDurRaw = 0;
   let scriptDurEff = 0;
-  let scriptStart = postDurEff + GAP_BETWEEN_TITLE_AND_SCRIPT;
+
+  const scriptStart = postDurEff + GAP_BETWEEN_TITLE_AND_SCRIPT;
 
   if (scriptText) {
     const scriptMp3 = await elevenlabsTtsToMp3Buffer(scriptText, scriptVoiceId);
@@ -600,13 +600,13 @@ async function buildModifications(body) {
     scriptDurRaw = mp3DurationSeconds(scriptMp3) || 0;
     scriptDurRaw = Math.max(0.6, scriptDurRaw);
 
-    // ✅ effective time after playback_rate
     scriptDurEff = Math.max(0.6, scriptDurRaw / scriptVoiceSpeed);
 
     m["script_voice.time"] = scriptStart;
-    m["script_voice.duration"] = scriptDurEff;
 
-    // ✅ NEW: speed + volume applied here
+    // ✅ IMPORTANT: keep duration long enough even if playback_rate is ignored
+    m["script_voice.duration"] = scriptDurRaw + AUDIO_TAIL_PAD;
+
     m["script_voice.playback_rate"] = scriptVoiceSpeed;
     m["script_voice.volume"] = toPct01(scriptVoiceVolume);
   }
@@ -618,14 +618,19 @@ async function buildModifications(body) {
   m["post_card_dark.time"] = 0;
   m["post_card_dark.duration"] = cardSecs;
 
-  const audioEnd = scriptText ? scriptStart + scriptDurEff : postDurEff;
-  const totalTimelineSecs = Math.max(0.9, audioEnd + END_PAD);
+  // ✅ Video duration must cover BOTH:
+  // - if playback_rate works (effective)
+  // - if playback_rate is ignored (raw)
+  const audioEndEff = scriptText ? scriptStart + scriptDurEff : postDurEff;
+  const audioEndRaw = scriptText ? (scriptStart + scriptDurRaw + AUDIO_TAIL_PAD) : (postDurRaw + AUDIO_TAIL_PAD);
+
+  const totalTimelineSecs = Math.max(0.9, Math.max(audioEndEff, audioEndRaw) + END_PAD);
 
   m["Video.time"] = 0;
   m["Video.duration"] = totalTimelineSecs;
 
   // ==========================================================
-  // ✅ CAPTIONS (your existing block kept)
+  // ✅ CAPTIONS (unchanged)
   // ==========================================================
   const captionsEnabled =
     body.captionsEnabled === true ||
@@ -674,7 +679,6 @@ async function buildModifications(body) {
     m[`${layerName}.transcription`] = false;
     m[`${layerName}.transcription.enabled`] = false;
 
-    // ✅ also clear any sticky effects on hidden layers
     m[`${layerName}.background_color`] = "transparent";
     m[`${layerName}.shadow_color`] = "transparent";
     m[`${layerName}.shadow_blur`] = 0;
@@ -689,7 +693,6 @@ async function buildModifications(body) {
   }
 
   function applyCaptionSettings(layerName, styleKey, s) {
-    // ✅ HARD RESET (ALWAYS)
     m[`${layerName}.background_color`] = "transparent";
     m[`${layerName}.shadow_color`] = "transparent";
     m[`${layerName}.shadow_blur`] = 0;
