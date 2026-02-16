@@ -56,6 +56,7 @@
     { name: "Dan", id: "Ioq2c1GJee5RyqeoBIH3", desc: "Casual male voice with natural pauses." },
     { name: "Natasha", id: "7lcjd4bgTyPW2qqLhV1Q", desc: "Clear female voice with confident delivery." },
     { name: "Rahul", id: "WtIqwF5CWCkaZSGmvsm1", desc: "Warm male voice with natural conversational tone." },
+    { name: "Antoni", id: "ErXwobaYiN019PkySvjV", desc: "Popular young male voice." },
   ];
 
   const PREVIEW_BASE = "https://pub-178d4bb2cbf54f3f92bc03819410134c.r2.dev";
