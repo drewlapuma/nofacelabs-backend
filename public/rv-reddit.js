@@ -363,6 +363,111 @@
       document.head.appendChild(s);
     })();
 
+    // ✅ ADD ONLY: voice picker CSS (from v13_full)
+    (function injectVoiceCss() {
+      const id = "nfVoicePickerCssV4";
+      if (document.getElementById(id)) return;
+      const s = document.createElement("style");
+      s.id = id;
+      s.textContent = `
+        .nf-voiceTabs{
+          display:flex;
+          gap:8px;
+          margin: 2px 0 12px;
+        }
+        .nf-voiceTab{
+          border:1px solid rgba(255,255,255,.14);
+          background: rgba(255,255,255,.06);
+          color: rgba(255,255,255,.85);
+          border-radius: 999px;
+          padding: 7px 12px;
+          font-size: 12px;
+          font-weight: 900;
+          cursor: pointer;
+          line-height: 1;
+        }
+        .nf-voiceTab.active{
+          border-color: rgba(90,193,255,.45);
+          background: rgba(90,193,255,.18);
+          color: rgba(90,193,255,1);
+        }
+
+        .nf-voiceGrid{
+          display:grid;
+          grid-template-columns: repeat(3, 1fr);
+          gap:14px;
+        }
+        @media (max-width: 900px){ .nf-voiceGrid{ grid-template-columns: repeat(2, 1fr);} }
+        @media (max-width: 620px){ .nf-voiceGrid{ grid-template-columns: 1fr;} }
+
+        .nf-voiceCard{
+          border:1px solid rgba(255,255,255,.12);
+          background: rgba(255,255,255,.05);
+          border-radius:18px;
+          padding:18px;
+          display:flex;
+          flex-direction:column;
+          gap:14px;
+          min-height: 148px;
+          transition:border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease;
+          position: relative;
+        }
+        .nf-voiceCard:hover{
+          border-color: rgba(90,193,255,.45);
+          box-shadow: 0 0 0 1px rgba(90,193,255,.18) inset;
+          transform: translateY(-1px);
+        }
+        .nf-voiceSelected{
+          border-color: rgba(90,193,255,.65) !important;
+          box-shadow: 0 0 0 1px rgba(90,193,255,.22) inset;
+        }
+
+        .nf-voiceName{ font-weight:950; font-size:16px; margin-bottom:6px; }
+        .nf-voiceDesc{
+          font-size:13px;
+          color: rgba(255,255,255,.68);
+          line-height:1.35;
+          white-space: normal;
+          word-break: break-word;
+        }
+
+        .nf-voiceBtnsRow{
+          margin-top:auto;
+          display:flex;
+          gap:14px;
+        }
+
+        .nf-voiceBtnMini{
+          flex:1 1 0;
+          border:1px solid rgba(255,255,255,.16);
+          background: rgba(255,255,255,.08);
+          color: rgba(255,255,255,.92);
+          border-radius: 18px;
+          height: 44px;
+          padding: 0 14px;
+          font-size: 14px;
+          font-weight: 900;
+          display:flex;
+          align-items:center;
+          justify-content:center;
+          line-height: 1;
+          cursor:pointer;
+          white-space:nowrap;
+          text-align:center;
+        }
+        .nf-voiceBtnMini:disabled{ opacity:.72; cursor:not-allowed; }
+
+        .nf-voiceBtnUse{
+          border-color: rgba(90,193,255,.35);
+          background: rgba(90,193,255,.16);
+          color: rgba(90,193,255,1);
+        }
+
+        #rvPostVoiceLabel, #rvScriptVoiceLabel{ display:none !important; }
+      `;
+      document.head.appendChild(s);
+    })();
+
     // icons
     const PATH_LIKE = `M 50 100 L 7.5578 50.9275 C 2.6844 45.2929 0 37.8006 0 29.833 C 0 21.8641 2.6844 14.3731 7.5578 8.7384 C 12.4311 3.1038 18.91 0 25.8022 0 C 32.6944 0 39.1733 3.1038 44.0467 8.7384 L 50 15.6218 L 55.9533 8.7384 C 60.8267 3.1038 67.3067 0 74.1978 0 C 81.09 0 87.5689 3.1038 92.4422 8.7384 C 97.3167 14.3731 100 21.8641 100 29.833 C 100 37.8019 97.3167 45.2929 92.4422 50.9275 L 50 100 Z M 25.8022 5.1387 C 20.0978 5.1387 14.7344 7.7081 10.7 12.3715 C 6.6656 17.0349 4.4444 23.2374 4.4444 29.833 C 4.4444 36.4286 6.6667 42.6298 10.7 47.2945 L 50 92.7338 L 89.3 47.2945 C 93.3344 42.6298 95.5556 36.4286 95.5556 29.833 C 95.5556 23.2374 93.3344 17.0362 89.3 12.3715 C 85.2656 7.7081 79.9033 5.1387 74.1978 5.1387 C 68.4933 5.1387 63.13 7.7081 59.0956 12.3715 L 50 22.8893 L 40.9033 12.3715 C 36.87 7.7081 31.5067 5.1387 25.8022 5.1387 Z`;
     const PATH_COMMENT = `M 94.2357 72.6204 C 97.8532 65.5833 99.7431 57.786 99.7491 49.8735 C 99.7491 22.3751 77.3736 0 49.8745 0 C 22.3755 0 0 22.3751 0 49.8735 C 0 77.372 22.3755 99.7471 49.8745 99.7471 C 57.7729 99.7471 65.5986 97.8473 72.6264 94.2383 L 94.1178 99.611 C 95.662 100 97.2969 99.5469 98.4206 98.4186 C 99.5473 97.2921 100 95.6569 99.6131 94.1114 L 94.2357 72.6204 Z M 85.018 73.1191 L 88.9807 88.9789 L 73.1206 85.0117 C 71.9994 84.7349 70.8149 84.8937 69.8062 85.456 C 63.7193 88.8753 56.8561 90.6738 49.8745 90.6792 C 27.3721 90.6792 9.0681 72.371 9.0681 49.8735 C 9.0681 27.376 27.3721 9.0679 49.8745 9.0679 C 72.377 9.0679 90.681 27.376 90.681 49.8735 C 90.6748 56.8528 88.8779 63.7138 85.4623 69.8003 C 84.8939 70.8086 84.7348 71.9968 85.018 73.1191 Z`;
