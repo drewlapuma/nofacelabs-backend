@@ -315,53 +315,146 @@
 
     // ---------- inject CSS ----------
     (function injectCss() {
-      const id = "nfRvCssV11";
-      if (document.getElementById(id)) return;
-      const s = document.createElement("style");
-      s.id = id;
-      s.textContent = `
-        .nf-rvWrap{ position:absolute; inset:0; z-index:5000; display:block; pointer-events:none; }
-        .nf-rvCard{ pointer-events:none; }
-        .nf-rvDemoVideo{ pointer-events:auto; }
-        .nf-rvDemoVideo{ position:absolute; inset:0; width:100%; height:100%; object-fit:cover; object-position:center; background:#000; display:block; }
-        .nf-rvCard{
-          position:absolute; left:50%; top:50%; transform:translate(-50%,-50%);
-          width: var(--cardW);
-          height:auto; min-height: var(--cardMinH); max-height: var(--cardMaxH);
-          border-radius: calc(30px * var(--scale));
-          overflow:hidden;
-          box-shadow: 0 18px 55px rgba(0,0,0,.35);
-          font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial;
-          box-sizing:border-box;
-          display:grid; grid-template-rows: auto 1fr auto;
-          padding: calc(24px * var(--scale));
-          gap: calc(12px * var(--scale));
-        }
-        .nf-rvCard.light{ background:#fff; color:#0A0E1A; }
-        .nf-rvCard.dark{ background:#000; color:#fff; }
-        .nf-rvHeader{ display:flex; gap: calc(18px * var(--scale)); align-items:flex-start; min-width:0; }
-        .nf-rvPfp{ width: calc(72px * var(--scale)); height: calc(72px * var(--scale)); border-radius:999vmin; overflow:hidden; flex:0 0 auto; background:#ddd; }
-        .nf-rvPfp img{ width:100%; height:100%; object-fit:cover; display:block; }
-        .nf-rvHeaderText{ flex:1 1 auto; min-width:0; }
-        .nf-rvUsername{ font-weight:600; font-size: calc(34px * var(--scale)); line-height:1.05; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-        .nf-rvFlairs{ margin-top: calc(6px * var(--scale)); display:flex; gap: calc(6px * var(--scale)); align-items:center; flex-wrap:nowrap; overflow:hidden; }
-        .nf-rvFlairs img{ height: calc(24px * var(--scale)); width:auto; display:block; }
-        .nf-rvBody{ font-weight:600; font-size: calc(29.7px * var(--scale)); line-height:1.35; white-space:pre-wrap; overflow:hidden; word-break: break-word; }
-        .nf-rvFooter{
-          display:flex; align-items:flex-end; justify-content:space-between;
-          gap: calc(14px * var(--scale));
-          color: rgba(180,176,176,1);
-          padding-top: calc(2px * var(--scale)); padding-bottom: 0;
-        }
-        .nf-rvLeftActions{ display:flex; align-items:center; gap: calc(22px * var(--scale)); }
-        .nf-rvAction{ display:flex; align-items:center; gap: calc(10px * var(--scale)); font-weight:400; font-size: calc(31px * var(--scale)); line-height:1; white-space:nowrap; }
-        .nf-rvIcon{ width: calc(24px * var(--scale)); height: calc(24px * var(--scale)); display:block; opacity:0.95; }
-        .nf-rvShare{ display:flex; align-items:center; gap: calc(10px * var(--scale)); font-weight:500; font-size: calc(29px * var(--scale)); white-space:nowrap; }
-        .nf-rvIconHeart{ stroke: currentColor; stroke-width: 6; fill: none; stroke-linejoin: round; }
-        .nf-rvOverlayHideText{ color: transparent !important; }
-      `;
-      document.head.appendChild(s);
-    })();
+  const id = "nfRvCssV11";
+  if (document.getElementById(id)) return;
+  const s = document.createElement("style");
+  s.id = id;
+  s.textContent = `
+    .nf-rvWrap{ position:absolute; inset:0; z-index:5000; display:block; pointer-events:none; }
+    .nf-rvCard{ pointer-events:none; }
+    .nf-rvDemoVideo{ pointer-events:auto; }
+    .nf-rvDemoVideo{ position:absolute; inset:0; width:100%; height:100%; object-fit:cover; object-position:center; background:#000; display:block; }
+
+    /* ↓ CARD SLIGHTLY SMALLER */
+    .nf-rvCard{
+      position:absolute; left:50%; top:50%; transform:translate(-50%,-50%);
+      width: calc(var(--cardW) * 0.92); /* smaller */
+      height:auto; min-height: var(--cardMinH); max-height: var(--cardMaxH);
+      border-radius: calc(26px * var(--scale)); /* slightly smaller radius */
+      overflow:hidden;
+      box-shadow: 0 16px 45px rgba(0,0,0,.32);
+      font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial;
+      box-sizing:border-box;
+      display:grid; grid-template-rows: auto 1fr auto;
+      padding: calc(20px * var(--scale)); /* slightly tighter padding */
+      gap: calc(10px * var(--scale));
+    }
+
+    .nf-rvCard.light{ background:#fff; color:#0A0E1A; }
+    .nf-rvCard.dark{ background:#000; color:#fff; }
+
+    .nf-rvHeader{
+      display:flex;
+      gap: calc(16px * var(--scale)); /* slightly tighter */
+      align-items:flex-start;
+      min-width:0;
+    }
+
+    .nf-rvPfp{
+      width: calc(68px * var(--scale));
+      height: calc(68px * var(--scale));
+      border-radius:999vmin;
+      overflow:hidden;
+      flex:0 0 auto;
+      background:#ddd;
+    }
+
+    .nf-rvPfp img{ width:100%; height:100%; object-fit:cover; display:block; }
+
+    .nf-rvHeaderText{ flex:1 1 auto; min-width:0; }
+
+    /* ↓ LIGHTER USERNAME */
+    .nf-rvUsername{
+      font-weight:500; /* was 600 */
+      font-size: calc(32px * var(--scale));
+      line-height:1.05;
+      white-space:nowrap;
+      overflow:hidden;
+      text-overflow:ellipsis;
+    }
+
+    /* ↓ FLARES BIGGER + TIGHTER */
+    .nf-rvFlairs{
+      margin-top: calc(5px * var(--scale));
+      display:flex;
+      gap: calc(3px * var(--scale)); /* tighter spacing */
+      align-items:center;
+      flex-wrap:nowrap;
+      overflow:hidden;
+    }
+
+    .nf-rvFlairs img{
+      height: calc(28px * var(--scale)); /* bigger */
+      width:auto;
+      display:block;
+    }
+
+    /* ↓ LIGHTER BODY TEXT */
+    .nf-rvBody{
+      font-weight:500; /* was 600 */
+      font-size: calc(27px * var(--scale)); /* slightly smaller */
+      line-height:1.4;
+      white-space:pre-wrap;
+      overflow:hidden;
+      word-break: break-word;
+    }
+
+    .nf-rvFooter{
+      display:flex;
+      align-items:flex-end;
+      justify-content:space-between;
+      gap: calc(12px * var(--scale));
+      color: rgba(180,176,176,1);
+      padding-top: calc(2px * var(--scale));
+      padding-bottom: 0;
+    }
+
+    .nf-rvLeftActions{
+      display:flex;
+      align-items:center;
+      gap: calc(20px * var(--scale));
+    }
+
+    .nf-rvAction{
+      display:flex;
+      align-items:center;
+      gap: calc(8px * var(--scale));
+      font-weight:400;
+      font-size: calc(29px * var(--scale));
+      line-height:1;
+      white-space:nowrap;
+    }
+
+    .nf-rvIcon{
+      width: calc(22px * var(--scale));
+      height: calc(22px * var(--scale));
+      display:block;
+      opacity:0.95;
+    }
+
+    .nf-rvShare{
+      display:flex;
+      align-items:center;
+      gap: calc(8px * var(--scale));
+      font-weight:400;
+      font-size: calc(27px * var(--scale));
+      white-space:nowrap;
+    }
+
+    .nf-rvIconHeart{
+      stroke: currentColor;
+      stroke-width: 6;
+      fill: none;
+      stroke-linejoin: round;
+    }
+
+    .nf-rvOverlayHideText{
+      color: transparent !important;
+    }
+  `;
+  document.head.appendChild(s);
+})();
+
 
     // ✅ ADD ONLY: voice picker CSS (from v13_full)
     (function injectVoiceCss() {
