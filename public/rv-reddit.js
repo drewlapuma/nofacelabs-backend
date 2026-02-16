@@ -188,6 +188,21 @@
       if (typeof el.value === "string") return el.value;
       return el.textContent || "";
     }
+    async function getMemberstackToken() {
+  // Memberstack DOM package (most common in Webflow)
+  if (window.$memberstackDom?.getToken) {
+    const { data } = await window.$memberstackDom.getToken();
+    return data?.token || "";
+  }
+
+  // Fallbacks (depending on your Memberstack install/version)
+  if (window.MemberStack?.getToken) {
+    const t = await window.MemberStack.getToken();
+    return t || "";
+  }
+
+  return "";
+}
 
     function findPreviewHost() {
       if (!videoEl) return null;
@@ -213,11 +228,17 @@
         contentType: file.type || "application/octet-stream",
       };
 
-      const res = await fetch(SIGNED_UPLOAD_ENDPOINT, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
+      const token = await getMemberstackToken();
+if (!token) throw new Error("Not logged in (missing Memberstack token). Please refresh + log in again.");
+
+const res = await fetch(API_BASE + "/api/reddit-video", {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    "Authorization": "Bearer " + token,
+  },
+  body: JSON.stringify(payload),
+});
 
       const raw = await res.text();
       let j = {};
