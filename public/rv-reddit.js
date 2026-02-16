@@ -325,132 +325,105 @@
     .nf-rvDemoVideo{ pointer-events:auto; }
     .nf-rvDemoVideo{ position:absolute; inset:0; width:100%; height:100%; object-fit:cover; object-position:center; background:#000; display:block; }
 
-    /* ↓ CARD SLIGHTLY SMALLER */
     .nf-rvCard{
       position:absolute; left:50%; top:50%; transform:translate(-50%,-50%);
-      width: calc(var(--cardW) * 0.92); /* smaller */
+      width: var(--cardW);
       height:auto; min-height: var(--cardMinH); max-height: var(--cardMaxH);
-      border-radius: calc(26px * var(--scale)); /* slightly smaller radius */
+      border-radius: calc(28px * var(--scale));
       overflow:hidden;
-      box-shadow: 0 16px 45px rgba(0,0,0,.32);
+      box-shadow: 0 18px 55px rgba(0,0,0,.35);
       font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial;
       box-sizing:border-box;
       display:grid; grid-template-rows: auto 1fr auto;
-      padding: calc(20px * var(--scale)); /* slightly tighter padding */
-      gap: calc(10px * var(--scale));
-    }
 
+      /* tighter like screenshot #2 */
+      padding: calc(20px * var(--scale));
+      gap: calc(8px * var(--scale));
+    }
     .nf-rvCard.light{ background:#fff; color:#0A0E1A; }
     .nf-rvCard.dark{ background:#000; color:#fff; }
 
     .nf-rvHeader{
       display:flex;
-      gap: calc(16px * var(--scale)); /* slightly tighter */
+      gap: calc(14px * var(--scale));
       align-items:flex-start;
       min-width:0;
     }
-
     .nf-rvPfp{
-      width: calc(68px * var(--scale));
-      height: calc(68px * var(--scale));
+      width: calc(72px * var(--scale));
+      height: calc(72px * var(--scale));
       border-radius:999vmin;
       overflow:hidden;
       flex:0 0 auto;
       background:#ddd;
     }
-
     .nf-rvPfp img{ width:100%; height:100%; object-fit:cover; display:block; }
 
     .nf-rvHeaderText{ flex:1 1 auto; min-width:0; }
 
-    /* ↓ LIGHTER USERNAME */
+    /* Inter + slightly heavier like screenshot #2 */
     .nf-rvUsername{
-      font-weight:500; /* was 600 */
-      font-size: calc(32px * var(--scale));
+      font-weight: 800;
+      font-size: calc(34px * var(--scale));
       line-height:1.05;
       white-space:nowrap;
       overflow:hidden;
       text-overflow:ellipsis;
     }
 
-    /* ↓ FLARES BIGGER + TIGHTER */
+    /* bigger flairs + less spacing */
     .nf-rvFlairs{
-      margin-top: calc(5px * var(--scale));
+      margin-top: calc(6px * var(--scale));
       display:flex;
-      gap: calc(3px * var(--scale)); /* tighter spacing */
+      gap: calc(3px * var(--scale));
       align-items:center;
       flex-wrap:nowrap;
       overflow:hidden;
     }
-
     .nf-rvFlairs img{
-      height: calc(28px * var(--scale)); /* bigger */
+      height: calc(28px * var(--scale));
       width:auto;
       display:block;
     }
 
-    /* ↓ LIGHTER BODY TEXT */
+    /* slightly heavier body, but not super bold */
     .nf-rvBody{
-      font-weight:500; /* was 600 */
-      font-size: calc(27px * var(--scale)); /* slightly smaller */
-      line-height:1.4;
+      font-weight: 650;
+      font-size: calc(29.7px * var(--scale));
+      line-height:1.35;
       white-space:pre-wrap;
       overflow:hidden;
       word-break: break-word;
+
+      /* tighten space to footer */
+      margin-bottom: calc(-4px * var(--scale));
     }
 
+    /* reduce the gap between body and footer */
     .nf-rvFooter{
       display:flex;
       align-items:flex-end;
       justify-content:space-between;
       gap: calc(12px * var(--scale));
       color: rgba(180,176,176,1);
-      padding-top: calc(2px * var(--scale));
+      padding-top: 0;
       padding-bottom: 0;
     }
 
-    .nf-rvLeftActions{
-      display:flex;
-      align-items:center;
-      gap: calc(20px * var(--scale));
-    }
-
+    .nf-rvLeftActions{ display:flex; align-items:center; gap: calc(20px * var(--scale)); }
     .nf-rvAction{
       display:flex;
       align-items:center;
-      gap: calc(8px * var(--scale));
+      gap: calc(10px * var(--scale));
       font-weight:400;
-      font-size: calc(29px * var(--scale));
+      font-size: calc(31px * var(--scale));
       line-height:1;
       white-space:nowrap;
     }
-
-    .nf-rvIcon{
-      width: calc(22px * var(--scale));
-      height: calc(22px * var(--scale));
-      display:block;
-      opacity:0.95;
-    }
-
-    .nf-rvShare{
-      display:flex;
-      align-items:center;
-      gap: calc(8px * var(--scale));
-      font-weight:400;
-      font-size: calc(27px * var(--scale));
-      white-space:nowrap;
-    }
-
-    .nf-rvIconHeart{
-      stroke: currentColor;
-      stroke-width: 6;
-      fill: none;
-      stroke-linejoin: round;
-    }
-
-    .nf-rvOverlayHideText{
-      color: transparent !important;
-    }
+    .nf-rvIcon{ width: calc(24px * var(--scale)); height: calc(24px * var(--scale)); display:block; opacity:0.95; }
+    .nf-rvShare{ display:flex; align-items:center; gap: calc(10px * var(--scale)); font-weight:500; font-size: calc(29px * var(--scale)); white-space:nowrap; }
+    .nf-rvIconHeart{ stroke: currentColor; stroke-width: 6; fill: none; stroke-linejoin: round; }
+    .nf-rvOverlayHideText{ color: transparent !important; }
   `;
   document.head.appendChild(s);
 })();
@@ -676,25 +649,27 @@
     }
 
     function resizeCard() {
-      const host = findPreviewHost();
-      if (!host || !card) return;
+  const host = findPreviewHost();
+  if (!host || !card) return;
 
-      const frameW = host.clientWidth || 1;
-      const frameH = host.clientHeight || 1;
+  const frameW = host.clientWidth || 1;
+  const frameH = host.clientHeight || 1;
 
-      const cardW = Math.round(frameW * 0.8);
-      const minH = Math.round(frameH * 0.215);
-      const maxH = Math.round(frameH * 0.62);
+  // slightly smaller than before
+  const cardW = Math.round(frameW * 0.74);
+  const minH = Math.round(frameH * 0.20);
+  const maxH = Math.round(frameH * 0.58);
 
-      const scaleW = cardW / (REF_CARD_W || 1);
-      let scale = scaleW * 0.9;
-      scale = Math.max(0.45, Math.min(1.25, scale));
+  const scaleW = cardW / (REF_CARD_W || 1);
+  let scale = scaleW * 0.86; // tighter overall sizing
+  scale = Math.max(0.45, Math.min(1.25, scale));
 
-      card.style.setProperty("--cardW", cardW + "px");
-      card.style.setProperty("--cardMinH", minH + "px");
-      card.style.setProperty("--cardMaxH", maxH + "px");
-      card.style.setProperty("--scale", String(scale));
-    }
+  card.style.setProperty("--cardW", cardW + "px");
+  card.style.setProperty("--cardMinH", minH + "px");
+  card.style.setProperty("--cardMaxH", maxH + "px");
+  card.style.setProperty("--scale", String(scale));
+}
+
 
     let __t = null;
     window.addEventListener("resize", () => {
