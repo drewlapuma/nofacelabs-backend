@@ -119,8 +119,8 @@
     const toneHidden = document.getElementById("rvTone");
     const lenHidden = document.getElementById("rvLen");
 
-    // ✅ Script generator modal (UPDATED wiring + main button "Generating...")
-    const genScriptBtn = document.getElementById("rvGenScriptBtn"); // main page button
+    // ✅ Script generator modal
+    const genScriptBtn = document.getElementById("rvGenScriptBtn");
     const scriptModal = document.getElementById("rvScriptModal");
     const scriptClose = document.getElementById("rvScriptClose");
     const scriptGenerate = document.getElementById("rvScriptGenerate");
@@ -144,11 +144,8 @@
     let bgLibraryUrl = "";
     let bgLibraryName = "";
 
-    let wrap = null,
-      demoVid = null,
-      card = null;
-    let lastRenderDl = "",
-      lastRenderName = "reddit-video";
+    let wrap = null, demoVid = null, card = null;
+    let lastRenderDl = "", lastRenderName = "reddit-video";
 
     const REF_W = 1080;
     const REF_CARD_W = REF_W * 0.75; // 810
@@ -188,21 +185,73 @@
       if (typeof el.value === "string") return el.value;
       return el.textContent || "";
     }
-    async function getMemberstackToken() {
-  // Memberstack DOM package (most common in Webflow)
-  if (window.$memberstackDom?.getToken) {
-    const { data } = await window.$memberstackDom.getToken();
-    return data?.token || "";
-  }
 
-  // Fallbacks (depending on your Memberstack install/version)
-  if (window.MemberStack?.getToken) {
-    const t = await window.MemberStack.getToken();
-    return t || "";
-  }
+    // ==========================================================
+    // ✅ AUTH (Memberstack token) + auth fetch helpers
+    // ==========================================================
+    let __nfTokenCache = { token: "", at: 0 };
 
-  return "";
-}
+    async function nfGetMsToken() {
+      try {
+        if (__nfTokenCache.token && Date.now() - __nfTokenCache.at < 30_000) {
+          return __nfTokenCache.token;
+        }
+      } catch {}
+
+      // Memberstack v2 DOM package (common in Webflow)
+      try {
+        if (window.$memberstackDom?.getToken) {
+          const { data } = await window.$memberstackDom.getToken();
+          const t = String(data?.token || "").trim();
+          __nfTokenCache = { token: t, at: Date.now() };
+          return t;
+        }
+      } catch {}
+
+      // Memberstack fallback
+      try {
+        if (window.MemberStack?.getToken) {
+          const t = String((await window.MemberStack.getToken()) || "").trim();
+          __nfTokenCache = { token: t, at: Date.now() };
+          return t;
+        }
+      } catch {}
+
+      // last ditch (varies by install)
+      try {
+        const keys = Object.keys(localStorage || {});
+        const hit = keys.find((k) => k.toLowerCase().includes("memberstack") && k.toLowerCase().includes("token"));
+        if (hit) {
+          const raw = String(localStorage.getItem(hit) || "").trim();
+          try {
+            const j = JSON.parse(raw);
+            const t = String(j?.token || j?.accessToken || raw || "").trim();
+            __nfTokenCache = { token: t, at: Date.now() };
+            return t;
+          } catch {
+            __nfTokenCache = { token: raw, at: Date.now() };
+            return raw;
+          }
+        }
+      } catch {}
+
+      return "";
+    }
+
+    async function nfAuthHeaders(extra) {
+      const h = Object.assign({}, extra || {});
+      const token = await nfGetMsToken();
+      if (token) h.Authorization = "Bearer " + token;
+      return h;
+    }
+
+    async function nfFetchJson(url, opts) {
+      const res = await fetch(url, opts);
+      const raw = await res.text().catch(() => "");
+      let j = {};
+      try { j = JSON.parse(raw); } catch { j = { raw }; }
+      return { res, raw, json: j };
+    }
 
     function findPreviewHost() {
       if (!videoEl) return null;
@@ -228,35 +277,23 @@
         contentType: file.type || "application/octet-stream",
       };
 
-      const token = await getMemberstackToken();
-if (!token) throw new Error("Not logged in (missing Memberstack token). Please refresh + log in again.");
+      const token = await nfGetMsToken();
+      if (!token) throw new Error("Not logged in (missing Memberstack token). Please refresh + log in again.");
 
-const res = await fetch(API_BASE + "/api/reddit-video", {
-  method: "POST",
-  headers: {
-    "Content-Type": "application/json",
-    "Authorization": "Bearer " + token,
-  },
-  body: JSON.stringify(payload),
-});
+      // ✅ FIXED: call SIGNED_UPLOAD_ENDPOINT (NOT /api/reddit-video)
+      const { res, json } = await nfFetchJson(SIGNED_UPLOAD_ENDPOINT, {
+        method: "POST",
+        headers: await nfAuthHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify(payload),
+      });
 
-      const raw = await res.text();
-      let j = {};
-      try {
-        j = JSON.parse(raw);
-      } catch {
-        j = { raw };
+      if (!res.ok || json?.error) {
+        throw new Error(json?.error || json?.message || json?.raw || "Signed upload failed (HTTP " + res.status + ")");
       }
-
-      if (!res.ok || j?.error) {
-        throw new Error(j?.error || j?.message || j?.raw || "Signed upload failed (HTTP " + res.status + ")");
-      }
-
-      if (!j?.signedUrl || !j?.bucket || !j?.path) {
+      if (!json?.signedUrl || !json?.bucket || !json?.path) {
         throw new Error("Signed upload response missing signedUrl/bucket/path.");
       }
-
-      return j; // { bucket, path, signedUrl }
+      return json; // { bucket, path, signedUrl }
     }
 
     async function putFileToSignedUrl(signedUrl, file) {
@@ -375,11 +412,7 @@ const res = await fetch(API_BASE + "/api/reddit-video", {
       const s = document.createElement("style");
       s.id = id;
       s.textContent = `
-        .nf-voiceTabs{
-          display:flex;
-          gap:8px;
-          margin: 2px 0 12px;
-        }
+        .nf-voiceTabs{ display:flex; gap:8px; margin: 2px 0 12px; }
         .nf-voiceTab{
           border:1px solid rgba(255,255,255,.14);
           background: rgba(255,255,255,.06);
@@ -396,15 +429,9 @@ const res = await fetch(API_BASE + "/api/reddit-video", {
           background: rgba(90,193,255,.18);
           color: rgba(90,193,255,1);
         }
-
-        .nf-voiceGrid{
-          display:grid;
-          grid-template-columns: repeat(3, 1fr);
-          gap:14px;
-        }
+        .nf-voiceGrid{ display:grid; grid-template-columns: repeat(3, 1fr); gap:14px; }
         @media (max-width: 900px){ .nf-voiceGrid{ grid-template-columns: repeat(2, 1fr);} }
         @media (max-width: 620px){ .nf-voiceGrid{ grid-template-columns: 1fr;} }
-
         .nf-voiceCard{
           border:1px solid rgba(255,255,255,.12);
           background: rgba(255,255,255,.05);
@@ -415,7 +442,7 @@ const res = await fetch(API_BASE + "/api/reddit-video", {
           gap:14px;
           min-height: 148px;
           transition:border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease;
-          position: relative; /* ✅ so the options button can sit in the top right */
+          position: relative;
         }
         .nf-voiceCard:hover{
           border-color: rgba(90,193,255,.45);
@@ -426,7 +453,6 @@ const res = await fetch(API_BASE + "/api/reddit-video", {
           border-color: rgba(90,193,255,.65) !important;
           box-shadow: 0 0 0 1px rgba(90,193,255,.22) inset;
         }
-
         .nf-voiceName{ font-weight:950; font-size:16px; margin-bottom:6px; }
         .nf-voiceDesc{
           font-size:13px;
@@ -435,13 +461,7 @@ const res = await fetch(API_BASE + "/api/reddit-video", {
           white-space: normal;
           word-break: break-word;
         }
-
-        .nf-voiceBtnsRow{
-          margin-top:auto;
-          display:flex;
-          gap:14px;
-        }
-
+        .nf-voiceBtnsRow{ margin-top:auto; display:flex; gap:14px; }
         .nf-voiceBtnMini{
           flex:1 1 0;
           border:1px solid rgba(255,255,255,.16);
@@ -452,24 +472,20 @@ const res = await fetch(API_BASE + "/api/reddit-video", {
           padding: 0 14px;
           font-size: 14px;
           font-weight: 900;
-
           display:flex;
           align-items:center;
           justify-content:center;
-
           line-height: 1;
           cursor:pointer;
           white-space:nowrap;
           text-align:center;
         }
         .nf-voiceBtnMini:disabled{ opacity:.72; cursor:not-allowed; }
-
         .nf-voiceBtnUse{
           border-color: rgba(90,193,255,.35);
           background: rgba(90,193,255,.16);
           color: rgba(90,193,255,1);
         }
-
         #rvPostVoiceLabel, #rvScriptVoiceLabel{ display:none !important; }
       `;
       document.head.appendChild(s);
@@ -510,7 +526,7 @@ const res = await fetch(API_BASE + "/api/reddit-video", {
         if (!raw) return { speed: NF_DEFAULT_SPEED, volume: NF_DEFAULT_VOL };
         const o = JSON.parse(raw);
         return {
-          speed: nfClamp(o.speed ?? NF_DEFAULT_SPEED, 0.5, 2.0),   // ✅ UPDATED
+          speed: nfClamp(o.speed ?? NF_DEFAULT_SPEED, 0.5, 2.0),
           volume: nfClamp(o.volume ?? NF_DEFAULT_VOL, 0.0, 1.5),
         };
       } catch {
@@ -518,7 +534,6 @@ const res = await fetch(API_BASE + "/api/reddit-video", {
       }
     }
 
-    // ✅ expose a single shared getter (prevents any other file using an old clamp like 0.7–1.3)
     window.nfGetVoiceOpts = window.nfGetVoiceOpts || nfGetVoiceOpts;
 
     function ensureNodes() {
@@ -698,9 +713,7 @@ const res = await fetch(API_BASE + "/api/reddit-video", {
       if (videoEl) {
         videoEl.classList.add("nf-hide");
         videoEl.style.display = "none";
-        try {
-          videoEl.pause?.();
-        } catch {}
+        try { videoEl.pause?.(); } catch {}
       }
     }
     function hideDemo() {
@@ -753,11 +766,10 @@ const res = await fetch(API_BASE + "/api/reddit-video", {
       });
     }
 
-    // ✅ Only mode segmented stays on page
     setupSeg(modeSeg, modeTrack, modeHidden, "mode");
 
     // ==========================
-    // ✅ SCRIPT GENERATOR MODAL (UPDATED)
+    // ✅ SCRIPT GENERATOR MODAL
     // ==========================
     function setupModalSeg(segEl, trackEl, hiddenEl, dataKey) {
       if (!segEl) return;
@@ -789,15 +801,11 @@ const res = await fetch(API_BASE + "/api/reddit-video", {
 
     function openScriptModal() {
       if (!scriptModal) return;
-
-      // default prompt = post title if empty
       const title = String(readAnyText(postTitleEl) || "").trim();
       if (scriptPromptEl && !String(scriptPromptEl.value || "").trim()) {
         scriptPromptEl.value = title;
       }
-
       scriptModal.classList.add("open");
-
       setTimeout(() => {
         try {
           scriptPromptEl?.focus?.();
@@ -828,14 +836,12 @@ const res = await fetch(API_BASE + "/api/reddit-video", {
 
     if (genScriptBtn) genScriptBtn.addEventListener("click", openScriptModal);
     if (scriptClose) scriptClose.addEventListener("click", closeScriptModal);
-
     if (scriptModal) {
       scriptModal.addEventListener("click", (e) => {
         if (e.target === scriptModal) closeScriptModal();
       });
     }
 
-    // enter-to-generate (Ctrl/Cmd+Enter)
     if (scriptPromptEl) {
       scriptPromptEl.addEventListener("keydown", (e) => {
         const isMac = /Mac|iPhone|iPad|iPod/i.test(navigator.platform);
@@ -854,32 +860,22 @@ const res = await fetch(API_BASE + "/api/reddit-video", {
 
       if (!topic) throw new Error("Please enter a prompt.");
 
-      // ✅ close modal immediately + set main button loading
       closeScriptModal();
       setMainScriptBtnLoading(true);
-
-      // ✅ lock modal button too (in case it still exists in DOM)
       if (scriptGenerate) scriptGenerate.disabled = true;
 
-      const res = await fetch(SCRIPT_ENDPOINT, {
+      // ✅ include auth if available (safe even if backend doesn't require it)
+      const { res, json } = await nfFetchJson(SCRIPT_ENDPOINT, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: await nfAuthHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({ topic, tone, seconds }),
       });
 
-      const raw = await res.text();
-      let j = {};
-      try {
-        j = JSON.parse(raw);
-      } catch {
-        j = { raw };
+      if (!res.ok || json?.ok === false) {
+        throw new Error(json?.error || json?.message || json?.raw || "HTTP " + res.status);
       }
 
-      if (!res.ok || j?.ok === false) {
-        throw new Error(j?.error || j?.message || j?.raw || "HTTP " + res.status);
-      }
-
-      const out = String(j?.script || "").trim();
+      const out = String(json?.script || "").trim();
       if (!out) throw new Error("No script returned.");
 
       if (scriptEl) scriptEl.value = out;
@@ -893,8 +889,6 @@ const res = await fetch(API_BASE + "/api/reddit-video", {
         } catch (e) {
           console.error("[rv] script gen failed =>", e);
           alert("Script generation failed: " + (e?.message || e));
-
-          // optional: re-open so they can edit quickly
           openScriptModal();
         } finally {
           if (scriptGenerate) scriptGenerate.disabled = false;
@@ -913,9 +907,7 @@ const res = await fetch(API_BASE + "/api/reddit-video", {
         if (!file) return;
 
         if (localPfpObjectUrl) {
-          try {
-            URL.revokeObjectURL(localPfpObjectUrl);
-          } catch {}
+          try { URL.revokeObjectURL(localPfpObjectUrl); } catch {}
         }
         localPfpObjectUrl = URL.createObjectURL(file);
         updateCard();
@@ -925,9 +917,7 @@ const res = await fetch(API_BASE + "/api/reddit-video", {
           const up = await uploadAndGetPublicUrl(file);
           if (pfpUrlEl) pfpUrlEl.value = up.url;
 
-          try {
-            URL.revokeObjectURL(localPfpObjectUrl);
-          } catch {}
+          try { URL.revokeObjectURL(localPfpObjectUrl); } catch {}
           localPfpObjectUrl = "";
 
           setStatus("Profile picture uploaded ✓");
@@ -964,9 +954,7 @@ const res = await fetch(API_BASE + "/api/reddit-video", {
         if (!file) return;
 
         if (localBgObjectUrl) {
-          try {
-            URL.revokeObjectURL(localBgObjectUrl);
-          } catch {}
+          try { URL.revokeObjectURL(localBgObjectUrl); } catch {}
         }
         localBgObjectUrl = URL.createObjectURL(file);
         demoBgUrl = localBgObjectUrl;
@@ -1038,13 +1026,13 @@ const res = await fetch(API_BASE + "/api/reddit-video", {
     [usernameEl, postTitleEl, postTextEl, likesEl, commentsEl, shareTextEl, modeHidden].forEach(bindRealtime);
 
     // ==========================================================
-    // ✅ VOICE PICKER (ONE BUTTON + TABS + INSTANT PREHOSTED PREVIEW)
+    // ✅ VOICE PICKER (unchanged)
     // ==========================================================
-    let voiceTarget = "post"; // "post" | "script"
+    let voiceTarget = "post";
     let previewAudio = null;
     let previewingVoiceId = "";
 
-    const PREVIEW_AUDIO_CACHE = new Map(); // voiceId -> HTMLAudioElement
+    const PREVIEW_AUDIO_CACHE = new Map();
 
     function previewUrlFor(voiceId) {
       return PREVIEW_BASE
@@ -1069,9 +1057,7 @@ const res = await fetch(API_BASE + "/api/reddit-video", {
 
     function warmPreviews() {
       if (!PREVIEW_BASE) return;
-
       VOICES.slice(0, 10).forEach((v) => preloadPreview(v.id));
-
       const curPost = String(postVoiceEl?.value || "").trim();
       const curScr = String(scriptVoiceEl?.value || "").trim();
       if (curPost && curPost !== "default") preloadPreview(curPost);
@@ -1096,10 +1082,7 @@ const res = await fetch(API_BASE + "/api/reddit-video", {
 
     function stopPreview() {
       if (previewAudio) {
-        try {
-          previewAudio.pause();
-          previewAudio.currentTime = 0;
-        } catch {}
+        try { previewAudio.pause(); previewAudio.currentTime = 0; } catch {}
       }
       previewingVoiceId = "";
       previewAudio = null;
@@ -1128,28 +1111,21 @@ const res = await fetch(API_BASE + "/api/reddit-video", {
     }
 
     function setActiveTab(tab) {
-  voiceTarget = tab === "script" ? "script" : "post";
+      voiceTarget = tab === "script" ? "script" : "post";
+      window.__NF_ACTIVE_VOICE_MODE__ = voiceTarget;
+      stopPreview();
+      renderVoiceGrid(String(voiceSearch?.value || "").trim());
 
-  // ✅ tell the options portal which tab is active
-  window.__NF_ACTIVE_VOICE_MODE__ = voiceTarget;
+      if (voiceTitle) voiceTitle.textContent = voiceTarget === "post" ? "Choose Post Voice" : "Choose Script Voice";
 
-  stopPreview();
-  renderVoiceGrid(String(voiceSearch?.value || "").trim());
-
-  if (voiceTitle) voiceTitle.textContent = voiceTarget === "post" ? "Choose Post Voice" : "Choose Script Voice";
-
-  const postBtn = voiceTabs?.querySelector('[data-tab="post"]');
-  const scrBtn = voiceTabs?.querySelector('[data-tab="script"]');
-  if (postBtn) postBtn.classList.toggle("active", voiceTarget === "post");
-  if (scrBtn) scrBtn.classList.toggle("active", voiceTarget === "script");
-}
-
-
-    
+      const postBtn = voiceTabs?.querySelector('[data-tab="post"]');
+      const scrBtn = voiceTabs?.querySelector('[data-tab="script"]');
+      if (postBtn) postBtn.classList.toggle("active", voiceTarget === "post");
+      if (scrBtn) scrBtn.classList.toggle("active", voiceTarget === "script");
+    }
 
     async function previewVoice(voice) {
       stopPreview();
-
       const voiceId = String(voice?.id || "").trim();
       if (!voiceId) return alert("Missing voice id");
 
@@ -1166,9 +1142,7 @@ const res = await fetch(API_BASE + "/api/reddit-video", {
       }
 
       previewAudio = a;
-      try {
-        previewAudio.currentTime = 0;
-      } catch {}
+      try { previewAudio.currentTime = 0; } catch {}
 
       previewAudio.onended = () => {
         stopPreview();
@@ -1236,14 +1210,13 @@ const res = await fetch(API_BASE + "/api/reddit-video", {
     }
 
     function openVoiceModal() {
-  window.__NF_ACTIVE_VOICE_MODE__ = voiceTarget; // ✅ initial tab
-  if (voiceSearch) voiceSearch.value = "";
-  if (voiceModal) voiceModal.classList.add("open");
-  setActiveTab(voiceTarget);
-  renderVoiceGrid("");
-  warmPreviews();
-}
-
+      window.__NF_ACTIVE_VOICE_MODE__ = voiceTarget;
+      if (voiceSearch) voiceSearch.value = "";
+      if (voiceModal) voiceModal.classList.add("open");
+      setActiveTab(voiceTarget);
+      renderVoiceGrid("");
+      warmPreviews();
+    }
 
     function closeVoiceModal() {
       if (voiceModal) voiceModal.classList.remove("open");
@@ -1296,27 +1269,31 @@ const res = await fetch(API_BASE + "/api/reddit-video", {
     })();
 
     // ==========================================================
-    // ✅ Render polling + payload + generate
+    // ✅ Render polling + payload + generate (AUTH ADDED)
     // ==========================================================
     async function pollReddit(renderId) {
       for (;;) {
         await new Promise((r) => setTimeout(r, 2500));
-        const res = await fetch(API_BASE + "/api/reddit-video?id=" + encodeURIComponent(renderId));
-        const j = await res.json().catch(() => ({}));
-        const st = String(j?.status || "").toLowerCase();
-        if ((st.includes("succeed") || st === "completed") && j?.url) return j.url;
-        if (st.includes("fail")) throw new Error(j?.error || "Render failed");
+
+        // ✅ include auth if backend protects status endpoint too
+        const { res, json } = await nfFetchJson(API_BASE + "/api/reddit-video?id=" + encodeURIComponent(renderId), {
+          method: "GET",
+          headers: await nfAuthHeaders({}),
+        });
+
+        const st = String(json?.status || "").toLowerCase();
+        if ((st.includes("succeed") || st === "completed") && json?.url) return json.url;
+        if (st.includes("fail")) throw new Error(json?.error || "Render failed");
+
+        // handle auth expiry mid-poll
+        if (res.status === 401) throw new Error("Session expired (401). Please refresh and log in again.");
+
         const cur = Number((barEl?.style?.width || "55%").replace("%", "")) || 55;
         setProgress(Math.min(92, cur + 4));
       }
     }
 
-    // ==============================
-    // ✅ FULL UPDATED buildPayload()
-    // ✅ UPDATED: uses window.nfGetVoiceOpts (single source of truth)
-    // ==============================
     function buildPayload() {
-      // --- captions (unchanged) ---
       const capEnabledEl = document.getElementById("caption-enabled-value");
       const capStyleEl = document.getElementById("caption-style-value");
       const capSettingsEl = document.getElementById("caption-settings-value");
@@ -1330,7 +1307,6 @@ const res = await fetch(API_BASE + "/api/reddit-video", {
         try { captionSettings = JSON.parse(captionSettingsRaw); } catch { captionSettings = null; }
       }
 
-      // --- ✅ pull saved voice options for the SELECTED voice IDs ---
       const postVoiceId = String(postVoiceEl?.value || "default").trim();
       const scriptVoiceId = String(scriptVoiceEl?.value || "default").trim();
 
@@ -1356,14 +1332,12 @@ const res = await fetch(API_BASE + "/api/reddit-video", {
         backgroundVideoUrl: bgLibraryUrl,
         backgroundVideoName: bgLibraryName,
 
-        // ✅ voice params (now real)
         postVoiceSpeed: postOpts.speed,
         postVoiceVolume: postOpts.volume,
         scriptVoiceSpeed: scriptOpts.speed,
         scriptVoiceVolume: scriptOpts.volume,
       };
 
-      // Only send caption fields if enabled + valid
       if (captionsEnabled && captionStyle && captionSettings) {
         payload.captionsEnabled = true;
         payload.captionStyle = captionStyle;
@@ -1387,6 +1361,12 @@ const res = await fetch(API_BASE + "/api/reddit-video", {
             throw new Error("Profile picture is still preview-only. Wait for upload to finish.");
           }
 
+          const token = await nfGetMsToken();
+          console.log("[rv] ms token?", token ? `yes (${token.length} chars)` : "NO");
+          if (!token) {
+            throw new Error("Not logged in (Memberstack token missing). Refresh, log in, and try again.");
+          }
+
           hideDemo();
           if (overlayEl) {
             overlayEl.classList.remove("nf-hide");
@@ -1398,41 +1378,32 @@ const res = await fetch(API_BASE + "/api/reddit-video", {
 
           const payload = buildPayload();
 
-          // ✅ helpful debug (remove later)
           console.log("[rv] voice opts check =>", {
             postVoice: payload.postVoice,
             postVoiceSpeed: payload.postVoiceSpeed,
             scriptVoice: payload.scriptVoice,
             scriptVoiceSpeed: payload.scriptVoiceSpeed,
           });
-
           console.log("[rv] payload =>", payload);
 
-          const res = await fetch(API_BASE + "/api/reddit-video", {
+          // ✅ AUTH ADDED HERE (this is what fixes the 401/MISSING_AUTH)
+          const { res, json } = await nfFetchJson(API_BASE + "/api/reddit-video", {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: await nfAuthHeaders({ "Content-Type": "application/json" }),
             body: JSON.stringify(payload),
           });
 
-          const raw = await res.text();
-          let j = {};
-          try {
-            j = JSON.parse(raw);
-          } catch {
-            j = { raw };
+          if (!res.ok || json?.ok === false) {
+            console.error("[rv] backend error =>", json);
+            throw new Error(json?.error || json?.message || json?.raw || "HTTP " + res.status);
           }
 
-          if (!res.ok || j?.ok === false) {
-            console.error("[rv] backend error =>", j);
-            throw new Error(j?.error || j?.message || j?.raw || "HTTP " + res.status);
-          }
-
-          if (!j?.renderId) throw new Error("Missing renderId from backend.");
+          if (!json?.renderId) throw new Error("Missing renderId from backend.");
 
           setStatus("Rendering…");
           setProgress(55);
 
-          const url = await pollReddit(j.renderId);
+          const url = await pollReddit(json.renderId);
 
           setProgress(100);
           setStatus("Done ✓");
@@ -1468,8 +1439,6 @@ const res = await fetch(API_BASE + "/api/reddit-video", {
     // start
     showDemo();
     updateCard();
-
-    // ✅ preload right away too
     warmPreviews();
   }
 
