@@ -396,7 +396,7 @@
       word-break: break-word;
 
       /* tighten space to footer */
-      margin-bottom: calc(-4px * var(--scale));
+      margin-bottom: calc(-7px * var(--scale));
     }
 
     /* reduce the gap between body and footer */
