@@ -1,4 +1,8 @@
 // api/user-video-upload-url.js (CommonJS, Node 18+)
+// ✅ Signed upload URL for Supabase Storage (client PUTs to signedUrl)
+// ✅ CORS updated to allow X-NF-Member-Id / X-NF-Member-Email (fixes your preflight error)
+// ✅ NO JWT required: uses x-nf-member-id header to (optionally) scope uploads per user
+
 const { createClient } = require("@supabase/supabase-js");
 
 const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || "*")
@@ -17,7 +21,12 @@ function setCors(req, res) {
   }
 
   res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+
+  // ✅ FIX: allow your custom headers in preflight
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization, X-NF-Member-Id, X-NF-Member-Email"
+  );
 }
 
 async function readJson(req) {
@@ -48,11 +57,16 @@ function safeName(name) {
     .slice(0, 120);
 }
 
+// ✅ use header member id (no JWT)
+function getMemberId(req) {
+  const id = String(req.headers["x-nf-member-id"] || "").trim();
+  return id || "";
+}
+
 module.exports = async function handler(req, res) {
   setCors(req, res);
 
   if (req.method === "OPTIONS") {
-    // Preflight
     return json(res, 200, { ok: true });
   }
 
@@ -68,6 +82,16 @@ module.exports = async function handler(req, res) {
 
   if (!fileName || !fileSize) {
     return json(res, 400, { error: "fileName and fileSize are required" });
+  }
+
+  // ✅ Optional: enforce "logged in" via header
+  // If you want uploads to be allowed even for logged-out users, delete this block.
+  const memberId = getMemberId(req);
+  if (!memberId) {
+    return json(res, 401, {
+      error: "MISSING_MEMBER_ID",
+      message: "Missing x-nf-member-id header",
+    });
   }
 
   // ✅ Server-only env vars
@@ -90,16 +114,18 @@ module.exports = async function handler(req, res) {
     auth: { persistSession: false },
   });
 
-  // Path in bucket
+  // Path in bucket (scoped per member)
   const safe = safeName(fileName);
   const ext = (safe.split(".").pop() || "mp4").toLowerCase();
   const base = safe.replace(/\.[^/.]+$/, "");
-  const path = `uploads/${Date.now()}_${base}.${ext}`;
+
+  // ✅ keep folders tidy + unique
+  const filePath = `uploads/${memberId}/${Date.now()}_${base}.${ext}`;
 
   // ✅ Create signed upload URL (client will PUT to signedUrl)
   const { data, error } = await supabaseAdmin.storage
     .from(BUCKET)
-    .createSignedUploadUrl(path);
+    .createSignedUploadUrl(filePath);
 
   if (error || !data?.signedUrl) {
     return json(res, 500, {
@@ -108,10 +134,9 @@ module.exports = async function handler(req, res) {
     });
   }
 
-  // IMPORTANT: client uses PUT to signedUrl, so return signedUrl
   return json(res, 200, {
     bucket: BUCKET,
-    path,
+    path: filePath,
     signedUrl: data.signedUrl,
     contentType: contentType || "video/mp4",
   });
