@@ -410,7 +410,7 @@
       padding-bottom: 0;
     }
 
-    .nf-rvLeftActions{ display:flex; align-items:center; gap: calc(20px * var(--scale)); }
+    .nf-rvLeftActions{ display:flex; align-items:center; gap: calc(16px * var(--scale)); }
     .nf-rvAction{
       display:flex;
       align-items:center;
