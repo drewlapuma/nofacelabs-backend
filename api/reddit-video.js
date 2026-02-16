@@ -1,11 +1,10 @@
 // api/reddit-video.js (CommonJS, Node 18+)
-// ✅ Writes to Supabase "renders" table so Reddit videos appear in /myvideos
-// Flow:
-// 1) Identify member (Authorization Bearer token OR x-nf-member-id header fallback)
-// 2) Insert row into renders (status=rendering, kind=reddit)
-// 3) Start Creatomate with webhook => /api/creatomate-webhook?id=<dbId>&kind=main
-// 4) Update row with render_id
-// 5) Webhook updates video_url when done
+// ✅ Writes to Supabase "renders" so Reddit videos appear in /my-videos
+// ✅ Fixes your current CORS issue (allows x-nf-member-id header)
+// ✅ Uses your EXISTING buildModifications() (pasted in full below)
+// ✅ Supports auth either via:
+//    - Authorization: Bearer <memberstack_token>  (recommended), OR
+//    - x-nf-member-id: <member_id>               (NOT secure — use only for internal/testing)
 
 const https = require("https");
 const fs = require("fs");
@@ -45,11 +44,11 @@ function setCors(req, res) {
     res.setHeader("Vary", "Origin");
   }
 
+  // ✅ Include x-nf-member-id (this is the error you’re seeing)
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  // ✅ IMPORTANT: allow your fallback header (fixes your current CORS error)
   res.setHeader(
     "Access-Control-Allow-Headers",
-    "Content-Type, Authorization, x-nf-member-id"
+    "Content-Type, Authorization, X-NF-Member-Id, x-nf-member-id"
   );
 }
 
@@ -72,7 +71,7 @@ async function readBody(req) {
   }
 }
 
-// -------------------- Memberstack auth (Bearer OR x-nf-member-id fallback) --------------------
+// -------------------- Memberstack auth --------------------
 const MEMBERSTACK_SECRET_KEY = process.env.MEMBERSTACK_SECRET_KEY;
 const ms = MEMBERSTACK_SECRET_KEY ? memberstackAdmin.init(MEMBERSTACK_SECRET_KEY) : null;
 
@@ -80,12 +79,6 @@ function getBearerToken(req) {
   const h = req.headers.authorization || req.headers.Authorization || "";
   const m = String(h).match(/^Bearer\s+(.+)$/i);
   return m ? m[1].trim() : null;
-}
-
-function getHeader(req, name) {
-  const v = req.headers[name] || req.headers[name.toLowerCase()];
-  if (Array.isArray(v)) return v[0];
-  return v;
 }
 
 function isExpiredJwtError(err) {
@@ -98,9 +91,12 @@ function isExpiredJwtError(err) {
   return false;
 }
 
-async function requireMemberId(req) {
-  // 1) Prefer Bearer token if present
+// ✅ Best-effort member id:
+// - Try Authorization Bearer token + verifyToken
+// - Fallback to x-nf-member-id (NOT secure — only for internal/testing)
+async function getMemberId(req) {
   const token = getBearerToken(req);
+
   if (token) {
     if (!ms) {
       const e = new Error("MISSING_MEMBERSTACK_SECRET_KEY");
@@ -126,9 +122,13 @@ async function requireMemberId(req) {
     }
   }
 
-  // 2) Fallback: accept a member id header from your Webflow page (no JWT needed)
-  const headerId = String(getHeader(req, "x-nf-member-id") || "").trim();
-  if (headerId) return headerId;
+  // fallback header
+  const headerId =
+    req.headers["x-nf-member-id"] ||
+    req.headers["X-NF-Member-Id"] ||
+    req.headers["x-nf-member-id".toLowerCase()];
+
+  if (headerId) return String(headerId);
 
   const e = new Error("MISSING_AUTH");
   e.code = "MISSING_AUTH";
@@ -136,7 +136,7 @@ async function requireMemberId(req) {
 }
 
 // -------------------- Creatomate --------------------
-function creatomateRequest(pathname, method, payload) {
+function creatomateRequest(path, method, payload) {
   return new Promise((resolve, reject) => {
     if (!CREATOMATE_API_KEY) return reject(new Error("Missing CREATOMATE_API_KEY"));
 
@@ -144,7 +144,7 @@ function creatomateRequest(pathname, method, payload) {
     const req = https.request(
       {
         hostname: "api.creatomate.com",
-        path: pathname,
+        path,
         method,
         headers: {
           Authorization: `Bearer ${CREATOMATE_API_KEY}`,
@@ -331,7 +331,19 @@ async function transformMp3WithFfmpeg(mp3Buffer, speed, volume) {
   // volume is linear multiplier.
   const afilter = `atempo=${sp},volume=${vol}`;
 
-  const args = ["-y", "-i", tmpIn, "-vn", "-af", afilter, "-codec:a", "libmp3lame", "-b:a", "192k", tmpOut];
+  const args = [
+    "-y",
+    "-i",
+    tmpIn,
+    "-vn",
+    "-af",
+    afilter,
+    "-codec:a",
+    "libmp3lame",
+    "-b:a",
+    "192k",
+    tmpOut,
+  ];
 
   await new Promise((resolve, reject) => {
     const p = spawn(ffmpegPath, args);
@@ -466,7 +478,7 @@ function mp3DurationSeconds(buf) {
   }
 }
 
-/* ----------------- ✅ FULL buildModifications() (your existing) ----------------- */
+/* ----------------- ✅ FULL buildModifications() (from your existing code) ----------------- */
 
 async function buildModifications(body) {
   // knobs
@@ -680,7 +692,7 @@ async function buildModifications(body) {
   m["post_voice.time"] = 0;
   m["post_voice.duration"] = postDur;
 
-  // baked -> 1x
+  // baked => keep at 1x
   m["post_voice.playback_rate"] = 1;
 
   // SCRIPT audio
@@ -702,7 +714,7 @@ async function buildModifications(body) {
     m["script_voice.time"] = scriptStart;
     m["script_voice.duration"] = scriptDur;
 
-    // baked -> 1x
+    // baked => keep at 1x
     m["script_voice.playback_rate"] = 1;
   }
 
@@ -720,7 +732,7 @@ async function buildModifications(body) {
   m["Video.duration"] = totalTimelineSecs;
 
   // ==========================================================
-  // ✅ CAPTIONS (keep your existing block)
+  // ✅ CAPTIONS (your existing block)
   // ==========================================================
   const captionsEnabled =
     body.captionsEnabled === true ||
@@ -836,17 +848,37 @@ async function buildModifications(body) {
   return m;
 }
 
+// -------------------- Helper to label bg source (library vs upload) --------------------
+function detectBackgroundSource(body) {
+  const explicit =
+    String(body.backgroundVideoSource || body.backgroundSource || "").toLowerCase().trim();
+
+  if (explicit === "library" || explicit === "upload") return explicit;
+
+  if (body.backgroundVideoUploaded === true) return "upload";
+  if (body.backgroundVideoUploadPath) return "upload";
+
+  // heuristic: if they picked from library you usually have a name
+  if (safeStr(body.backgroundVideoName)) return "library";
+
+  return "unknown";
+}
+
 /* ----------------- MAIN handler ----------------- */
 
 module.exports = async function handler(req, res) {
   setCors(req, res);
 
-  if (req.method === "OPTIONS") return res.status(200).end();
+  if (req.method === "OPTIONS") {
+    res.statusCode = 200;
+    res.end();
+    return;
+  }
 
   try {
     if (!TEMPLATE_ID) return json(res, 500, { ok: false, error: "Missing CREATOMATE_TEMPLATE_ID_REDDIT" });
 
-    // GET: optional polling helper
+    // GET = optional polling helper
     if (req.method === "GET") {
       const url = new URL(req.url, "http://localhost");
       const id = url.searchParams.get("id");
@@ -862,10 +894,6 @@ module.exports = async function handler(req, res) {
 
     const body = await readBody(req);
 
-    // ✅ Identify member (Bearer token OR x-nf-member-id)
-    const member_id = await requireMemberId(req);
-    const sb = getAdminSupabase();
-
     const username = safeStr(body.username);
     const postText = safeStr(body.postText || body.postTitle);
     const postTitle = safeStr(body.postTitle || "");
@@ -876,16 +904,72 @@ module.exports = async function handler(req, res) {
     if (!postText) return json(res, 400, { ok: false, error: "Missing postText" });
     if (!backgroundVideoUrl) return json(res, 400, { ok: false, error: "Missing backgroundVideoUrl" });
 
-    // validate URLs now (fail early)
+    // validate URLs (fail early)
+    ensurePublicHttpUrl(pfpUrl, "pfpUrl");
     ensurePublicHttpUrl(backgroundVideoUrl, "backgroundVideoUrl");
-    if (pfpUrl) ensurePublicHttpUrl(pfpUrl, "pfpUrl");
 
-    // ✅ 1) Insert row into renders FIRST so /api/renders will list it
+    // ✅ must be logged in (token OR x-nf-member-id)
+    const member_id = await getMemberId(req);
+
+    const sb = getAdminSupabase();
+
+    // ✅ Store a good name
     const video_name =
       safeStr(body.video_name || body.videoName || "").trim() ||
       safeStr(postTitle).slice(0, 80) ||
+      safeStr(postText).slice(0, 80) ||
       "Reddit video";
 
+    // ✅ Build modifications first (so you know it won’t fail after insert, optional)
+    const modifications = await buildModifications(body);
+
+    // ✅ Save Reddit-specific details so your modal can show them
+    const bgSource = detectBackgroundSource(body);
+
+    const choices = {
+      kind: "reddit",
+
+      // profile + post
+      username,
+      postTitle: postTitle || null,
+      postText,
+      pfpUrl: pfpUrl || null,
+      mode: normalizeMode(body.mode),
+
+      // script
+      script: safeStr(body.script || ""),
+      scriptEnabled: Boolean(safeStr(body.script || "")),
+
+      // voices (store both id + display name if you send it)
+      postVoiceId: safeStr(body.postVoice || ""),
+      postVoiceName: safeStr(body.postVoiceName || body.postVoiceLabel || ""),
+      postVoiceSpeed: clampNum(body.postVoiceSpeed, 0.5, 2.0, 1.0),
+      postVoiceVolume: clampNum(body.postVoiceVolume, 0.0, 1.5, 1.0),
+
+      scriptVoiceId: safeStr(body.scriptVoice || ""),
+      scriptVoiceName: safeStr(body.scriptVoiceName || body.scriptVoiceLabel || ""),
+      scriptVoiceSpeed: clampNum(body.scriptVoiceSpeed, 0.5, 2.0, 1.0),
+      scriptVoiceVolume: clampNum(body.scriptVoiceVolume, 0.0, 1.5, 1.0),
+
+      // engagement
+      likes: safeStr(body.likes, "99+"),
+      comments: safeStr(body.comments, "99+"),
+      shareText: safeStr(body.shareText, "share"),
+
+      // background
+      backgroundVideoUrl,
+      backgroundVideoName: safeStr(body.backgroundVideoName || ""),
+      backgroundSource: bgSource, // "library" | "upload" | "unknown"
+      backgroundUploadPath: safeStr(body.backgroundVideoUploadPath || body.uploadPath || ""),
+      backgroundBucket: safeStr(body.backgroundVideoBucket || ""),
+
+      // captions
+      captionsEnabled: Boolean(body.captionsEnabled),
+      captionStyle: safeStr(body.captionStyle || ""),
+      captionSettings: body.captionSettings || null,
+    };
+
+    // ✅ 1) Insert renders FIRST so /api/renders will list it immediately
     const { data: inserted, error: insErr } = await sb
       .from("renders")
       .insert({
@@ -896,44 +980,21 @@ module.exports = async function handler(req, res) {
         error: null,
         kind: "reddit",
         video_name,
-        choices: {
-          kind: "reddit",
-          mode: normalizeMode(body.mode),
-          username,
-          postTitle: postTitle || null,
-          postText,
-          pfpUrl,
-          backgroundVideoUrl,
-          backgroundVideoName: safeStr(body.backgroundVideoName || ""),
-          captionsEnabled: Boolean(body.captionsEnabled),
-          captionStyle: safeStr(body.captionStyle || ""),
-          postVoice: safeStr(body.postVoice || ""),
-          scriptVoice: safeStr(body.scriptVoice || ""),
-          postVoiceSpeed: body.postVoiceSpeed ?? null,
-          postVoiceVolume: body.postVoiceVolume ?? null,
-          scriptVoiceSpeed: body.scriptVoiceSpeed ?? null,
-          scriptVoiceVolume: body.scriptVoiceVolume ?? null,
-        },
+        choices,
       })
       .select("*")
       .single();
 
     if (insErr || !inserted?.id) {
       console.error("[reddit-video] renders insert failed", insErr);
-      return json(res, 500, { ok: false, error: "RENDERS_INSERT_FAILED", details: insErr?.message || insErr });
+      return json(res, 500, { ok: false, error: "RENDERS_INSERT_FAILED", details: insErr });
     }
 
     const dbId = inserted.id;
 
-    // ✅ 2) Build modifications (your existing function)
-    const modifications = await buildModifications(body);
-
-    // ✅ 3) Start Creatomate render WITH webhook pointing to db row id
-    const publicBaseUrl =
-      (process.env.API_BASE || "").trim() ||
-      `https://${req.headers.host}`;
-
-    const webhook_url = `${publicBaseUrl}/api/creatomate-webhook?id=${encodeURIComponent(dbId)}&kind=main`;
+    // ✅ 2) Start Creatomate render WITH webhook pointing to db row id
+    const publicBaseUrl = (process.env.API_BASE || "").trim() || `https://${req.headers.host}`;
+    const webhook_url = `${publicBaseUrl}/api/creatomate-webhook?id=${encodeURIComponent(dbId)}&kind=reddit`;
 
     const startResp = await creatomateRequest("/v1/renders", "POST", {
       template_id: TEMPLATE_ID,
@@ -958,7 +1019,7 @@ module.exports = async function handler(req, res) {
       return json(res, 502, { ok: false, error: "Creatomate did not return render id", raw: startResp });
     }
 
-    // ✅ 4) Store Creatomate render_id on the DB row
+    // ✅ 3) Store Creatomate render_id on the DB row
     await sb
       .from("renders")
       .update({
@@ -970,8 +1031,8 @@ module.exports = async function handler(req, res) {
 
     return json(res, 200, {
       ok: true,
-      id: dbId,     // renders.id
-      renderId,     // creatomate render id
+      id: dbId, // renders.id
+      renderId, // creatomate render id
       status: start?.status || "queued",
     });
   } catch (err) {
@@ -982,11 +1043,7 @@ module.exports = async function handler(req, res) {
       return json(res, 401, { ok: false, error: "TOKEN_EXPIRED", message: "Session expired. Refresh and try again." });
     }
     if (code === "MISSING_AUTH" || msg.includes("MISSING_AUTH")) {
-      return json(res, 401, {
-        ok: false,
-        error: "MISSING_AUTH",
-        message: "Send Authorization: Bearer <token> OR x-nf-member-id header.",
-      });
+      return json(res, 401, { ok: false, error: "MISSING_AUTH" });
     }
     if (code === "INVALID_MEMBER_TOKEN" || msg.includes("INVALID_MEMBER")) {
       return json(res, 401, { ok: false, error: "INVALID_MEMBER_TOKEN" });
