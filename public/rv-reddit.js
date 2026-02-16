@@ -64,8 +64,183 @@
   // ✅ Pre-hosted MP3s (voiceId.mp3)
   const PREVIEW_BASE = "https://pub-178d4bb2cbf54f3f92bc03819410134c.r2.dev";
 
-  function boot() {
+  // ==========================================================
+  // ✅ AUTH (Memberstack token) + helpers (FIXED + WAIT)
+  // ==========================================================
+  let __nfTokenCache = { token: "", at: 0 };
+
+  function __nfIsJwtLike(t) {
+    if (!t) return false;
+    const s = String(t).trim();
+    return s.split(".").length === 3 && s.length > 40;
+  }
+
+  async function __nfWaitForMemberstack(maxMs = 4000) {
+    const start = Date.now();
+    while (Date.now() - start < maxMs) {
+      if (window.$memberstackDom || window.$memberstack || window.MemberStack) return true;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    return false;
+  }
+
+  async function nfGetMsToken() {
+    try {
+      if (__nfTokenCache.token && Date.now() - __nfTokenCache.at < 30_000) {
+        return __nfTokenCache.token;
+      }
+    } catch {}
+
+    await __nfWaitForMemberstack(4000);
+
+    // 1) $memberstackDom (MS v2 DOM)
+    try {
+      const msd = window.$memberstackDom;
+      if (msd) {
+        if (typeof msd?.onReady === "function") {
+          // some versions: onReady is a promise
+          try {
+            await msd.onReady;
+          } catch {}
+        }
+
+        if (typeof msd.getToken === "function") {
+          const { data } = await msd.getToken();
+          const t = String(data?.token || "").trim();
+          if (t) {
+            __nfTokenCache = { token: t, at: Date.now() };
+            return t;
+          }
+        }
+
+        if (typeof msd.getMemberToken === "function") {
+          const { data } = await msd.getMemberToken();
+          const t = String(data?.token || data?.accessToken || "").trim();
+          if (t) {
+            __nfTokenCache = { token: t, at: Date.now() };
+            return t;
+          }
+        }
+
+        if (typeof msd.getAuthToken === "function") {
+          const { data } = await msd.getAuthToken();
+          const t = String(data?.token || data?.accessToken || "").trim();
+          if (t) {
+            __nfTokenCache = { token: t, at: Date.now() };
+            return t;
+          }
+        }
+
+        if (typeof msd.getCurrentMember === "function") {
+          const { data } = await msd.getCurrentMember();
+          const maybe = String(data?.token || data?.accessToken || "").trim();
+          if (maybe && __nfIsJwtLike(maybe)) {
+            __nfTokenCache = { token: maybe, at: Date.now() };
+            return maybe;
+          }
+        }
+      }
+    } catch {}
+
+    // 2) $memberstack (older/global)
+    try {
+      const ms = window.$memberstack;
+      if (ms) {
+        if (typeof ms.getToken === "function") {
+          const r = await ms.getToken();
+          const t = String(r?.data?.token || r?.token || "").trim();
+          if (t) {
+            __nfTokenCache = { token: t, at: Date.now() };
+            return t;
+          }
+        }
+        if (typeof ms.getMemberToken === "function") {
+          const r = await ms.getMemberToken();
+          const t = String(r?.data?.token || r?.data?.accessToken || r?.token || "").trim();
+          if (t) {
+            __nfTokenCache = { token: t, at: Date.now() };
+            return t;
+          }
+        }
+      }
+    } catch {}
+
+    // 3) MemberStack fallback
+    try {
+      const MS = window.MemberStack;
+      if (MS) {
+        if (typeof MS.onReady === "function") {
+          await new Promise((resolve) => MS.onReady(resolve));
+        }
+        if (typeof MS.getToken === "function") {
+          const t = String((await MS.getToken()) || "").trim();
+          if (t) {
+            __nfTokenCache = { token: t, at: Date.now() };
+            return t;
+          }
+        }
+      }
+    } catch {}
+
+    // 4) localStorage JWT-like fallback
+    try {
+      const keys = Object.keys(localStorage || {});
+      const preferred = keys.filter((k) => {
+        const s = k.toLowerCase();
+        return s.includes("memberstack") || s.includes("ms_") || s.includes("token") || s.includes("auth");
+      });
+      const scan = preferred.length ? preferred : keys;
+
+      for (const k of scan) {
+        const raw = localStorage.getItem(k);
+        if (!raw) continue;
+
+        try {
+          const j = JSON.parse(raw);
+          const cand = String(j?.token || j?.accessToken || j?.idToken || "").trim();
+          if (cand && __nfIsJwtLike(cand)) {
+            __nfTokenCache = { token: cand, at: Date.now() };
+            return cand;
+          }
+        } catch {
+          const cand = String(raw || "").trim();
+          if (cand && __nfIsJwtLike(cand)) {
+            __nfTokenCache = { token: cand, at: Date.now() };
+            return cand;
+          }
+        }
+      }
+    } catch {}
+
+    return "";
+  }
+
+  async function nfAuthHeaders(extra) {
+    const h = Object.assign({}, extra || {});
+    const token = await nfGetMsToken();
+    if (token) h.Authorization = "Bearer " + token;
+    return h;
+  }
+
+  async function nfFetchJson(url, opts) {
+    const res = await fetch(url, opts);
+    const raw = await res.text().catch(() => "");
+    let j = {};
+    try {
+      j = JSON.parse(raw);
+    } catch {
+      j = { raw };
+    }
+    return { res, raw, json: j };
+  }
+
+  // ==========================================================
+  // ✅ MAIN
+  // ==========================================================
+  async function boot() {
+    // ✅ wait a moment so Memberstack is ready (fixes "ms token? NO" while logged in)
     await __nfWaitForMemberstack(1500);
+
     // ---------- DOM ----------
     const msgEl = document.getElementById("rvMsg");
     const statusEl = document.getElementById("rvStatus");
@@ -145,8 +320,11 @@
     let bgLibraryUrl = "";
     let bgLibraryName = "";
 
-    let wrap = null, demoVid = null, card = null;
-    let lastRenderDl = "", lastRenderName = "reddit-video";
+    let wrap = null,
+      demoVid = null,
+      card = null;
+    let lastRenderDl = "",
+      lastRenderName = "reddit-video";
 
     const REF_W = 1080;
     const REF_CARD_W = REF_W * 0.75; // 810
@@ -186,201 +364,6 @@
       if (typeof el.value === "string") return el.value;
       return el.textContent || "";
     }
-
-    // ==========================================================
-// ✅ AUTH (Memberstack token) + auth fetch helpers (FIXED)
-// - waits for Memberstack to be ready
-// - supports $memberstackDom, $memberstack, MemberStack
-// - falls back to localStorage JWT-like tokens
-// ==========================================================
-let __nfTokenCache = { token: "", at: 0 };
-
-function __nfIsJwtLike(t) {
-  if (!t) return false;
-  const s = String(t).trim();
-  // rough JWT check: 3 dot-separated parts, each base64-ish
-  return s.split(".").length === 3 && s.length > 40;
-}
-
-async function __nfWaitForMemberstack(maxMs = 4000) {
-  const start = Date.now();
-  while (Date.now() - start < maxMs) {
-    if (window.$memberstackDom || window.$memberstack || window.MemberStack) return true;
-    await new Promise((r) => setTimeout(r, 50));
-  }
-  return false;
-}
-
-async function nfGetMsToken() {
-  try {
-    if (__nfTokenCache.token && Date.now() - __nfTokenCache.at < 30_000) {
-      return __nfTokenCache.token;
-    }
-  } catch {}
-
-  // wait briefly for Memberstack to load
-  await __nfWaitForMemberstack(4000);
-
-  // --------------------------
-  // 1) $memberstackDom (MS v2 DOM)
-  // --------------------------
-  try {
-    const msd = window.$memberstackDom;
-    if (msd) {
-      // Sometimes MS requires readiness
-      if (typeof msd?.onReady === "function") {
-        await msd.onReady;
-      }
-
-      if (typeof msd.getToken === "function") {
-        const { data } = await msd.getToken();
-        const t = String(data?.token || "").trim();
-        if (t) {
-          __nfTokenCache = { token: t, at: Date.now() };
-          return t;
-        }
-      }
-
-      // some installs expose getMemberToken / getAuthToken
-      if (typeof msd.getMemberToken === "function") {
-        const { data } = await msd.getMemberToken();
-        const t = String(data?.token || data?.accessToken || "").trim();
-        if (t) {
-          __nfTokenCache = { token: t, at: Date.now() };
-          return t;
-        }
-      }
-
-      if (typeof msd.getAuthToken === "function") {
-        const { data } = await msd.getAuthToken();
-        const t = String(data?.token || data?.accessToken || "").trim();
-        if (t) {
-          __nfTokenCache = { token: t, at: Date.now() };
-          return t;
-        }
-      }
-
-      // if current member is available, some versions store token on it
-      if (typeof msd.getCurrentMember === "function") {
-        const { data } = await msd.getCurrentMember();
-        const maybe = String(data?.token || data?.accessToken || "").trim();
-        if (maybe && __nfIsJwtLike(maybe)) {
-          __nfTokenCache = { token: maybe, at: Date.now() };
-          return maybe;
-        }
-      }
-    }
-  } catch (e) {
-    // swallow; we'll try other paths
-  }
-
-  // --------------------------
-  // 2) $memberstack (older/global)
-  // --------------------------
-  try {
-    const ms = window.$memberstack;
-    if (ms) {
-      if (typeof ms.getToken === "function") {
-        const r = await ms.getToken();
-        const t = String(r?.data?.token || r?.token || "").trim();
-        if (t) {
-          __nfTokenCache = { token: t, at: Date.now() };
-          return t;
-        }
-      }
-
-      if (typeof ms.getMemberToken === "function") {
-        const r = await ms.getMemberToken();
-        const t = String(r?.data?.token || r?.data?.accessToken || r?.token || "").trim();
-        if (t) {
-          __nfTokenCache = { token: t, at: Date.now() };
-          return t;
-        }
-      }
-    }
-  } catch {}
-
-  // --------------------------
-  // 3) MemberStack (fallback)
-  // --------------------------
-  try {
-    const MS = window.MemberStack;
-    if (MS) {
-      // Some versions are callback-based
-      if (typeof MS.onReady === "function") {
-        await new Promise((resolve) => MS.onReady(resolve));
-      }
-      if (typeof MS.getToken === "function") {
-        const t = String((await MS.getToken()) || "").trim();
-        if (t) {
-          __nfTokenCache = { token: t, at: Date.now() };
-          return t;
-        }
-      }
-    }
-  } catch {}
-
-  // --------------------------
-  // 4) localStorage fallback (last resort)
-  // --------------------------
-  try {
-    const keys = Object.keys(localStorage || {});
-    // prioritize likely keys first
-    const preferred = keys.filter((k) => {
-      const s = k.toLowerCase();
-      return (
-        s.includes("memberstack") ||
-        s.includes("ms_") ||
-        s.includes("ms-token") ||
-        s.includes("token") ||
-        s.includes("auth")
-      );
-    });
-
-    const scan = preferred.length ? preferred : keys;
-
-    for (const k of scan) {
-      const raw = localStorage.getItem(k);
-      if (!raw) continue;
-
-      // if it's JSON, parse and look for token fields
-      try {
-        const j = JSON.parse(raw);
-        const cand = String(j?.token || j?.accessToken || j?.idToken || "").trim();
-        if (cand && __nfIsJwtLike(cand)) {
-          __nfTokenCache = { token: cand, at: Date.now() };
-          return cand;
-        }
-      } catch {
-        // raw string token
-        const cand = String(raw || "").trim();
-        if (cand && __nfIsJwtLike(cand)) {
-          __nfTokenCache = { token: cand, at: Date.now() };
-          return cand;
-        }
-      }
-    }
-  } catch {}
-
-  return "";
-}
-
-async function nfAuthHeaders(extra) {
-  const h = Object.assign({}, extra || {});
-  const token = await nfGetMsToken();
-  if (token) h.Authorization = "Bearer " + token;
-  return h;
-}
-
-async function nfFetchJson(url, opts) {
-  const res = await fetch(url, opts);
-  const raw = await res.text().catch(() => "");
-  let j = {};
-  try { j = JSON.parse(raw); } catch { j = { raw }; }
-  return { res, raw, json: j };
-}
-
-    
 
     function findPreviewHost() {
       if (!videoEl) return null;
@@ -627,8 +610,6 @@ async function nfFetchJson(url, opts) {
 
     // ==========================================================
     // ✅ Voice options helpers (READ from localStorage)
-    // ✅ UPDATED: speed clamp is now 0.50 -> 2.00
-    // ✅ UPDATED: also exposes window.nfGetVoiceOpts so EVERY script uses same getter
     // ==========================================================
     const NF_DEFAULT_SPEED = 1.0;
     const NF_DEFAULT_VOL = 1.0;
@@ -639,7 +620,7 @@ async function nfFetchJson(url, opts) {
       return Math.max(a, Math.min(b, n));
     }
 
-    function nfNormalizeMode(m){
+    function nfNormalizeMode(m) {
       const s = String(m || "").toLowerCase().trim();
       return s === "script" ? "script" : "post";
     }
@@ -842,7 +823,9 @@ async function nfFetchJson(url, opts) {
       if (videoEl) {
         videoEl.classList.add("nf-hide");
         videoEl.style.display = "none";
-        try { videoEl.pause?.(); } catch {}
+        try {
+          videoEl.pause?.();
+        } catch {}
       }
     }
     function hideDemo() {
@@ -993,7 +976,6 @@ async function nfFetchJson(url, opts) {
       setMainScriptBtnLoading(true);
       if (scriptGenerate) scriptGenerate.disabled = true;
 
-      // ✅ include auth if available (safe even if backend doesn't require it)
       const { res, json } = await nfFetchJson(SCRIPT_ENDPOINT, {
         method: "POST",
         headers: await nfAuthHeaders({ "Content-Type": "application/json" }),
@@ -1036,7 +1018,9 @@ async function nfFetchJson(url, opts) {
         if (!file) return;
 
         if (localPfpObjectUrl) {
-          try { URL.revokeObjectURL(localPfpObjectUrl); } catch {}
+          try {
+            URL.revokeObjectURL(localPfpObjectUrl);
+          } catch {}
         }
         localPfpObjectUrl = URL.createObjectURL(file);
         updateCard();
@@ -1046,7 +1030,9 @@ async function nfFetchJson(url, opts) {
           const up = await uploadAndGetPublicUrl(file);
           if (pfpUrlEl) pfpUrlEl.value = up.url;
 
-          try { URL.revokeObjectURL(localPfpObjectUrl); } catch {}
+          try {
+            URL.revokeObjectURL(localPfpObjectUrl);
+          } catch {}
           localPfpObjectUrl = "";
 
           setStatus("Profile picture uploaded ✓");
@@ -1083,7 +1069,9 @@ async function nfFetchJson(url, opts) {
         if (!file) return;
 
         if (localBgObjectUrl) {
-          try { URL.revokeObjectURL(localBgObjectUrl); } catch {}
+          try {
+            URL.revokeObjectURL(localBgObjectUrl);
+          } catch {}
         }
         localBgObjectUrl = URL.createObjectURL(file);
         demoBgUrl = localBgObjectUrl;
@@ -1211,7 +1199,10 @@ async function nfFetchJson(url, opts) {
 
     function stopPreview() {
       if (previewAudio) {
-        try { previewAudio.pause(); previewAudio.currentTime = 0; } catch {}
+        try {
+          previewAudio.pause();
+          previewAudio.currentTime = 0;
+        } catch {}
       }
       previewingVoiceId = "";
       previewAudio = null;
@@ -1271,7 +1262,9 @@ async function nfFetchJson(url, opts) {
       }
 
       previewAudio = a;
-      try { previewAudio.currentTime = 0; } catch {}
+      try {
+        previewAudio.currentTime = 0;
+      } catch {}
 
       previewAudio.onended = () => {
         stopPreview();
@@ -1285,7 +1278,7 @@ async function nfFetchJson(url, opts) {
       });
     }
 
-    function escAttr(s){
+    function escAttr(s) {
       return String(s ?? "")
         .replaceAll("&", "&amp;")
         .replaceAll('"', "&quot;")
@@ -1404,7 +1397,6 @@ async function nfFetchJson(url, opts) {
       for (;;) {
         await new Promise((r) => setTimeout(r, 2500));
 
-        // ✅ include auth if backend protects status endpoint too
         const { res, json } = await nfFetchJson(API_BASE + "/api/reddit-video?id=" + encodeURIComponent(renderId), {
           method: "GET",
           headers: await nfAuthHeaders({}),
@@ -1414,7 +1406,6 @@ async function nfFetchJson(url, opts) {
         if ((st.includes("succeed") || st === "completed") && json?.url) return json.url;
         if (st.includes("fail")) throw new Error(json?.error || "Render failed");
 
-        // handle auth expiry mid-poll
         if (res.status === 401) throw new Error("Session expired (401). Please refresh and log in again.");
 
         const cur = Number((barEl?.style?.width || "55%").replace("%", "")) || 55;
@@ -1433,7 +1424,11 @@ async function nfFetchJson(url, opts) {
 
       let captionSettings = null;
       if (captionsEnabled && captionSettingsRaw) {
-        try { captionSettings = JSON.parse(captionSettingsRaw); } catch { captionSettings = null; }
+        try {
+          captionSettings = JSON.parse(captionSettingsRaw);
+        } catch {
+          captionSettings = null;
+        }
       }
 
       const postVoiceId = String(postVoiceEl?.value || "default").trim();
@@ -1515,7 +1510,6 @@ async function nfFetchJson(url, opts) {
           });
           console.log("[rv] payload =>", payload);
 
-          // ✅ AUTH ADDED HERE (this is what fixes the 401/MISSING_AUTH)
           const { res, json } = await nfFetchJson(API_BASE + "/api/reddit-video", {
             method: "POST",
             headers: await nfAuthHeaders({ "Content-Type": "application/json" }),
@@ -1572,8 +1566,8 @@ async function nfFetchJson(url, opts) {
   }
 
   if (document.readyState === "loading") {
-  document.addEventListener("DOMContentLoaded", () => boot());
-} else {
-  boot();
-}
+    document.addEventListener("DOMContentLoaded", () => boot());
+  } else {
+    boot();
+  }
 })();
