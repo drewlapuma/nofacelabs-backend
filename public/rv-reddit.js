@@ -1107,17 +1107,24 @@
     }
 
     function setActiveTab(tab) {
-      voiceTarget = tab === "script" ? "script" : "post";
-      stopPreview();
-      renderVoiceGrid(String(voiceSearch?.value || "").trim());
+  voiceTarget = tab === "script" ? "script" : "post";
 
-      if (voiceTitle) voiceTitle.textContent = voiceTarget === "post" ? "Choose Post Voice" : "Choose Script Voice";
+  // ✅ tell the options portal which tab is active
+  window.__NF_ACTIVE_VOICE_MODE__ = voiceTarget;
 
-      const postBtn = voiceTabs?.querySelector('[data-tab="post"]');
-      const scrBtn = voiceTabs?.querySelector('[data-tab="script"]');
-      if (postBtn) postBtn.classList.toggle("active", voiceTarget === "post");
-      if (scrBtn) scrBtn.classList.toggle("active", voiceTarget === "script");
-    }
+  stopPreview();
+  renderVoiceGrid(String(voiceSearch?.value || "").trim());
+
+  if (voiceTitle) voiceTitle.textContent = voiceTarget === "post" ? "Choose Post Voice" : "Choose Script Voice";
+
+  const postBtn = voiceTabs?.querySelector('[data-tab="post"]');
+  const scrBtn = voiceTabs?.querySelector('[data-tab="script"]');
+  if (postBtn) postBtn.classList.toggle("active", voiceTarget === "post");
+  if (scrBtn) scrBtn.classList.toggle("active", voiceTarget === "script");
+}
+
+
+    
 
     async function previewVoice(voice) {
       stopPreview();
@@ -1208,12 +1215,14 @@
     }
 
     function openVoiceModal() {
-      if (voiceSearch) voiceSearch.value = "";
-      if (voiceModal) voiceModal.classList.add("open");
-      setActiveTab(voiceTarget);
-      renderVoiceGrid("");
-      warmPreviews();
-    }
+  window.__NF_ACTIVE_VOICE_MODE__ = voiceTarget; // ✅ initial tab
+  if (voiceSearch) voiceSearch.value = "";
+  if (voiceModal) voiceModal.classList.add("open");
+  setActiveTab(voiceTarget);
+  renderVoiceGrid("");
+  warmPreviews();
+}
+
 
     function closeVoiceModal() {
       if (voiceModal) voiceModal.classList.remove("open");
