@@ -1,10 +1,7 @@
 // api/reddit-video.js (CommonJS, Node 18+)
 // ✅ Writes to Supabase "renders" table so Reddit videos appear in /myvideos
-// ✅ CORS updated to allow X-NF-Member-Id / X-NF-Member-Email (fixes your preflight error)
-// ✅ Auth updated: accepts x-nf-member-id header FIRST (no JWT required), falls back to Bearer token if present
-//
 // Flow:
-// 1) Identify member_id (x-nf-member-id OR Authorization: Bearer <token>)
+// 1) Identify member (Authorization Bearer token OR x-nf-member-id header fallback)
 // 2) Insert row into renders (status=rendering, kind=reddit)
 // 3) Start Creatomate with webhook => /api/creatomate-webhook?id=<dbId>&kind=main
 // 4) Update row with render_id
@@ -49,11 +46,10 @@ function setCors(req, res) {
   }
 
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-
-  // ✅ FIX: allow your custom headers in preflight
+  // ✅ IMPORTANT: allow your fallback header (fixes your current CORS error)
   res.setHeader(
     "Access-Control-Allow-Headers",
-    "Content-Type, Authorization, X-NF-Member-Id, X-NF-Member-Email"
+    "Content-Type, Authorization, x-nf-member-id"
   );
 }
 
@@ -76,7 +72,7 @@ async function readBody(req) {
   }
 }
 
-// -------------------- Memberstack auth --------------------
+// -------------------- Memberstack auth (Bearer OR x-nf-member-id fallback) --------------------
 const MEMBERSTACK_SECRET_KEY = process.env.MEMBERSTACK_SECRET_KEY;
 const ms = MEMBERSTACK_SECRET_KEY ? memberstackAdmin.init(MEMBERSTACK_SECRET_KEY) : null;
 
@@ -84,6 +80,12 @@ function getBearerToken(req) {
   const h = req.headers.authorization || req.headers.Authorization || "";
   const m = String(h).match(/^Bearer\s+(.+)$/i);
   return m ? m[1].trim() : null;
+}
+
+function getHeader(req, name) {
+  const v = req.headers[name] || req.headers[name.toLowerCase()];
+  if (Array.isArray(v)) return v[0];
+  return v;
 }
 
 function isExpiredJwtError(err) {
@@ -96,54 +98,45 @@ function isExpiredJwtError(err) {
   return false;
 }
 
-function getHeader(req, name) {
-  // Node lowercases header keys
-  const key = String(name || "").toLowerCase();
-  return req.headers[key];
-}
-
 async function requireMemberId(req) {
-  // ✅ NO-JWT path: accept member id from header if provided
-  const headerId = getHeader(req, "x-nf-member-id");
-  if (headerId) {
-    const id = String(headerId).trim();
-    if (id) return id;
-  }
-
-  // ✅ fallback (optional): Bearer token verification if you enable it later
+  // 1) Prefer Bearer token if present
   const token = getBearerToken(req);
-  if (!token) {
-    const e = new Error("MISSING_AUTH");
-    e.code = "MISSING_AUTH";
-    throw e;
-  }
-  if (!ms) {
-    const e = new Error("MISSING_MEMBERSTACK_SECRET_KEY");
-    e.code = "MISSING_MEMBERSTACK_SECRET_KEY";
-    throw e;
+  if (token) {
+    if (!ms) {
+      const e = new Error("MISSING_MEMBERSTACK_SECRET_KEY");
+      e.code = "MISSING_MEMBERSTACK_SECRET_KEY";
+      throw e;
+    }
+    try {
+      const out = await ms.verifyToken({ token });
+      const id = out?.id;
+      if (!id) {
+        const e = new Error("INVALID_MEMBER_TOKEN");
+        e.code = "INVALID_MEMBER_TOKEN";
+        throw e;
+      }
+      return String(id);
+    } catch (err) {
+      if (isExpiredJwtError(err)) {
+        const e = new Error("TOKEN_EXPIRED");
+        e.code = "TOKEN_EXPIRED";
+        throw e;
+      }
+      throw err;
+    }
   }
 
-  try {
-    const out = await ms.verifyToken({ token });
-    const id = out?.id;
-    if (!id) {
-      const e = new Error("INVALID_MEMBER_TOKEN");
-      e.code = "INVALID_MEMBER_TOKEN";
-      throw e;
-    }
-    return String(id);
-  } catch (err) {
-    if (isExpiredJwtError(err)) {
-      const e = new Error("TOKEN_EXPIRED");
-      e.code = "TOKEN_EXPIRED";
-      throw e;
-    }
-    throw err;
-  }
+  // 2) Fallback: accept a member id header from your Webflow page (no JWT needed)
+  const headerId = String(getHeader(req, "x-nf-member-id") || "").trim();
+  if (headerId) return headerId;
+
+  const e = new Error("MISSING_AUTH");
+  e.code = "MISSING_AUTH";
+  throw e;
 }
 
 // -------------------- Creatomate --------------------
-function creatomateRequest(path, method, payload) {
+function creatomateRequest(pathname, method, payload) {
   return new Promise((resolve, reject) => {
     if (!CREATOMATE_API_KEY) return reject(new Error("Missing CREATOMATE_API_KEY"));
 
@@ -151,7 +144,7 @@ function creatomateRequest(path, method, payload) {
     const req = https.request(
       {
         hostname: "api.creatomate.com",
-        path,
+        path: pathname,
         method,
         headers: {
           Authorization: `Bearer ${CREATOMATE_API_KEY}`,
@@ -210,6 +203,9 @@ function ensurePublicHttpUrl(url, label) {
   return u;
 }
 
+/**
+ * Writes the same value to multiple modification paths.
+ */
 function setMulti(m, paths, value) {
   for (const p of paths) m[p] = value;
 }
@@ -297,6 +293,8 @@ async function uploadMp3ToSupabasePublic(mp3Buffer, filePath) {
   return `${SUPABASE_URL}/storage/v1/object/public/${VOICE_BUCKET}/${filePath}`;
 }
 
+// UI sends real ElevenLabs voice IDs in option value.
+// If empty/"default", return "".
 function normalizeElevenVoiceId(v) {
   const s = String(v || "").trim();
   if (!s) return "";
@@ -313,9 +311,11 @@ function clampNum(n, a, b, fallback) {
 }
 
 async function transformMp3WithFfmpeg(mp3Buffer, speed, volume) {
+  // speed: 0.5–2.0, volume: 0–1.5 (linear)
   const sp = clampNum(speed, 0.5, 2.0, 1.0);
   const vol = clampNum(volume, 0.0, 1.5, 1.0);
 
+  // If nothing to do, return original
   if (Math.abs(sp - 1.0) < 0.001 && Math.abs(vol - 1.0) < 0.001) {
     return mp3Buffer;
   }
@@ -327,7 +327,10 @@ async function transformMp3WithFfmpeg(mp3Buffer, speed, volume) {
 
   fs.writeFileSync(tmpIn, mp3Buffer);
 
+  // atempo supports 0.5–2.0; your UI clamps to that range.
+  // volume is linear multiplier.
   const afilter = `atempo=${sp},volume=${vol}`;
+
   const args = ["-y", "-i", tmpIn, "-vn", "-af", afilter, "-codec:a", "libmp3lame", "-b:a", "192k", tmpOut];
 
   await new Promise((resolve, reject) => {
@@ -343,6 +346,7 @@ async function transformMp3WithFfmpeg(mp3Buffer, speed, volume) {
 
   const outBuf = fs.readFileSync(tmpOut);
 
+  // cleanup
   try { fs.unlinkSync(tmpIn); } catch {}
   try { fs.unlinkSync(tmpOut); } catch {}
 
@@ -462,11 +466,374 @@ function mp3DurationSeconds(buf) {
   }
 }
 
-/* ----------------- ✅ buildModifications() ----------------- */
-// KEEP your working function body here (unchanged)
+/* ----------------- ✅ FULL buildModifications() (your existing) ----------------- */
+
 async function buildModifications(body) {
-  // ... KEEP YOUR EXISTING buildModifications CONTENT ...
-  throw new Error("buildModifications() placeholder — paste your existing function body here unchanged.");
+  // knobs
+  const GAP_BETWEEN_TITLE_AND_SCRIPT = 0.70;
+  const CARD_EXTRA_AFTER_TITLE = 0.25;
+  const END_PAD = 0.55;
+
+  // voice params from UI
+  const postVoiceSpeed = clampNum(body.postVoiceSpeed, 0.5, 2.0, 1.0);
+  const postVoiceVolume = clampNum(body.postVoiceVolume, 0.0, 1.5, 1.0);
+
+  const scriptVoiceSpeed = clampNum(body.scriptVoiceSpeed, 0.5, 2.0, 1.0);
+  const scriptVoiceVolume = clampNum(body.scriptVoiceVolume, 0.0, 1.5, 1.0);
+
+  const mode = normalizeMode(body.mode);
+  const showLight = mode === "light";
+  const showDark = mode === "dark";
+
+  const username = safeStr(body.username, "Nofacelabs.ai");
+  const postText = safeStr(body.postText || body.postTitle, "—");
+  const likes = safeStr(body.likes, "99+");
+  const comments = safeStr(body.comments, "99+");
+  const shareText = safeStr(body.shareText, "share");
+
+  const pfpUrl = ensurePublicHttpUrl(body.pfpUrl, "pfpUrl");
+  const bgUrl = ensurePublicHttpUrl(body.backgroundVideoUrl, "backgroundVideoUrl");
+
+  // --- your layout math (unchanged) ---
+  const BG_WIDTH = 75;
+  const BG_CENTER_X = 50;
+  const cardRight = BG_CENTER_X + BG_WIDTH / 2;
+
+  const charsPerLine = 36;
+  const lineCount = Math.max(1, Math.ceil(postText.length / charsPerLine));
+  const extraLines = Math.max(0, lineCount - 2);
+
+  const baseBgH = 18;
+  const baseBgY = 24.2746;
+  const addPerLine = 2.8;
+
+  let bgH = clamp(baseBgH + extraLines * addPerLine, baseBgH, 45);
+  const deltaH = bgH - baseBgH;
+
+  let bgY = baseBgY + deltaH / 2;
+
+  const footerPadUp = clamp(deltaH * 0.22, 0, 1.5);
+  bgH = clamp(bgH - footerPadUp * 2, baseBgH, 45);
+  bgY = bgY - footerPadUp;
+
+  const BASE_Y = {
+    like_count_y: 30.3637,
+    comment_count_y: 30.3637,
+    share_text_y: 30.5096,
+    icon_like_y: 31.6571,
+    icon_comment_y: 31.66,
+    icon_share_y: 31.66,
+  };
+
+  const baseBottom = baseBgY + baseBgH / 2;
+  const currentBottom = bgY + bgH / 2;
+
+  const likeY = currentBottom - (baseBottom - BASE_Y.like_count_y);
+  const commentY = currentBottom - (baseBottom - BASE_Y.comment_count_y);
+  const shareTextY = currentBottom - (baseBottom - BASE_Y.share_text_y);
+  const iconLikeY = currentBottom - (baseBottom - BASE_Y.icon_like_y);
+  const iconCommentY = currentBottom - (baseBottom - BASE_Y.icon_comment_y);
+  const iconShareY = currentBottom - (baseBottom - BASE_Y.icon_share_y);
+
+  const BASE_LIKE_TEXT_X = 19.0572;
+  const BASE_COMMENT_ICON_X = 29.0172;
+  const BASE_COMMENT_TEXT_X = 31.6676;
+  const BASE_SHARE_ICON_X = 71.279;
+  const BASE_SHARE_TEXT_X = 74.5318;
+
+  const likeLen = String(likes || "").length;
+  const shareLen = String(shareText || "").length;
+
+  const likeLong = likeLen > 4;
+  const shareLong = shareLen > 6;
+
+  let shareTextX = BASE_SHARE_TEXT_X;
+  let shareIconX = BASE_SHARE_ICON_X;
+
+  if (shareLong) {
+    const RIGHT_PAD = 3.2;
+    const shareRightX = cardRight - RIGHT_PAD;
+    const estShareTextW = clamp(shareLen * 1.7, 6, 42);
+    const SHARE_ICON_GAP = 5.5;
+    shareTextX = shareRightX;
+    shareIconX = shareTextX - estShareTextW - SHARE_ICON_GAP;
+  }
+
+  let commentTextX = BASE_COMMENT_TEXT_X;
+  let commentIconX = BASE_COMMENT_ICON_X;
+
+  if (likeLong) {
+    const likeExtra = Math.max(0, likeLen - 3);
+    const likeShift = clamp(likeExtra * 1.35, 0, 22);
+
+    commentTextX = BASE_COMMENT_TEXT_X + likeShift;
+    commentIconX = commentTextX - (BASE_COMMENT_TEXT_X - BASE_COMMENT_ICON_X);
+
+    const estLikeTextW = clamp(likeLen * 1.7, 6, 42);
+    const LIKE_CLEAR_GAP = 7.5;
+    const minCommentIconX = BASE_LIKE_TEXT_X + estLikeTextW + LIKE_CLEAR_GAP;
+
+    if (commentIconX < minCommentIconX) {
+      commentIconX = minCommentIconX;
+      commentTextX = commentIconX + (BASE_COMMENT_TEXT_X - BASE_COMMENT_ICON_X);
+    }
+
+    const maxCommentTextX = shareLong ? shareIconX - 7.0 : BASE_SHARE_ICON_X - 6.0;
+    if (commentTextX > maxCommentTextX) {
+      commentTextX = maxCommentTextX;
+      commentIconX = commentTextX - (BASE_COMMENT_TEXT_X - BASE_COMMENT_ICON_X);
+    }
+  }
+
+  const OP_ON = "100%";
+  const OP_OFF = "0%";
+  const m = {};
+
+  // show/hide light/dark
+  m["post_card_light.hidden"] = !showLight;
+  m["post_card_light.opacity"] = showLight ? OP_ON : OP_OFF;
+
+  m["post_card_dark.hidden"] = !showDark;
+  m["post_card_dark.opacity"] = showDark ? OP_ON : OP_OFF;
+
+  // bg sizing
+  setMulti(m, ["post_bg_light.y", "post_card_light.post_bg_light.y"], pct(bgY));
+  setMulti(m, ["post_bg_light.height", "post_card_light.post_bg_light.height"], pct(bgH));
+  setMulti(m, ["post_bg_dark.y", "post_card_dark.post_bg_dark.y"], pct(bgY));
+  setMulti(m, ["post_bg_dark.height", "post_card_dark.post_bg_dark.height"], pct(bgH));
+
+  // texts
+  setMulti(m, ["username_light.text", "post_card_light.username_light.text"], username);
+  setMulti(m, ["username_dark.text", "post_card_dark.username_dark.text"], username);
+
+  setMulti(m, ["post_text_light.text", "post_card_light.post_text_light.text"], postText);
+  setMulti(m, ["post_text_dark.text", "post_card_dark.post_text_dark.text"], postText);
+
+  setMulti(m, ["like_count_light.text", "post_card_light.like_count_light.text"], likes);
+  setMulti(m, ["like_count_dark.text", "post_card_dark.like_count_dark.text"], likes);
+
+  setMulti(m, ["comment_count_light.text", "post_card_light.comment_count_light.text"], comments);
+  setMulti(m, ["comment_count_dark.text", "post_card_dark.comment_count_dark.text"], comments);
+
+  setMulti(m, ["share_light.text", "post_card_light.share_light.text"], shareText);
+  setMulti(m, ["share_dark.text", "post_card_dark.share_dark.text"], shareText);
+
+  // footer Y
+  setMulti(m, ["like_count_light.y", "post_card_light.like_count_light.y"], pct(likeY));
+  setMulti(m, ["like_count_dark.y", "post_card_dark.like_count_dark.y"], pct(likeY));
+
+  setMulti(m, ["comment_count_light.y", "post_card_light.comment_count_light.y"], pct(commentY));
+  setMulti(m, ["comment_count_dark.y", "post_card_dark.comment_count_dark.y"], pct(commentY));
+
+  setMulti(m, ["share_light.y", "post_card_light.share_light.y"], pct(shareTextY));
+  setMulti(m, ["share_dark.y", "post_card_dark.share_light.y"], pct(shareTextY));
+
+  setMulti(m, ["icon_like.y", "post_card_light.icon_like.y", "post_card_dark.icon_like.y"], pct(iconLikeY));
+  setMulti(m, ["icon_comment.y", "post_card_light.icon_comment.y", "post_card_dark.icon_comment.y"], pct(iconCommentY));
+  setMulti(m, ["icon_share.y", "post_card_light.icon_share.y", "post_card_dark.icon_share.y"], pct(iconShareY));
+
+  // comment X
+  setMulti(m, ["icon_comment.x", "post_card_light.icon_comment.x", "post_card_dark.icon_comment.x"], pct(commentIconX));
+  setMulti(m, ["comment_count_light.x", "post_card_light.comment_count_light.x"], pct(commentTextX));
+  setMulti(m, ["comment_count_dark.x", "post_card_dark.comment_count_dark.x"], pct(commentTextX));
+
+  // share anchor + X
+  if (shareLong) {
+    setMulti(m, ["share_light.x_anchor", "post_card_light.share_light.x_anchor"], "100%");
+    setMulti(m, ["share_dark.x_anchor", "post_card_dark.share_dark.x_anchor"], "100%");
+  } else {
+    setMulti(m, ["share_light.x_anchor", "post_card_light.share_light.x_anchor"], "0%");
+    setMulti(m, ["share_dark.x_anchor", "post_card_dark.share_dark.x_anchor"], "0%");
+  }
+
+  setMulti(m, ["share_light.x", "post_card_light.share_light.x"], pct(shareTextX));
+  setMulti(m, ["share_dark.x", "post_card_dark.share_dark.x"], pct(shareTextX));
+  setMulti(m, ["icon_share.x", "post_card_light.icon_share.x", "post_card_dark.icon_share.x"], pct(shareIconX));
+
+  // sources
+  if (pfpUrl) {
+    setMulti(m, ["pfp_light.source", "post_card_light.pfp_light.source"], pfpUrl);
+    setMulti(m, ["pfp_dark.source", "post_card_dark.pfp_dark.source"], pfpUrl);
+  }
+
+  if (bgUrl) {
+    m["Video.source"] = bgUrl;
+    m["Video.fit"] = "cover";
+  }
+
+  // ✅ AUDIO (bake speed into MP3 via ffmpeg)
+  const postVoiceId = normalizeElevenVoiceId(body.postVoice) || DEFAULT_ELEVEN_VOICE_ID;
+  const scriptVoiceId = normalizeElevenVoiceId(body.scriptVoice) || DEFAULT_ELEVEN_VOICE_ID;
+  const scriptText = safeStr(body.script, "");
+
+  // POST audio
+  const postMp3Raw = await elevenlabsTtsToMp3Buffer(postText, postVoiceId);
+  const postMp3 = await transformMp3WithFfmpeg(postMp3Raw, postVoiceSpeed, postVoiceVolume);
+
+  const postPath = `reddit/${Date.now()}_${randId()}_post.mp3`;
+  const postUrl = await uploadMp3ToSupabasePublic(postMp3, postPath);
+  m["post_voice.source"] = postUrl;
+
+  let postDur = mp3DurationSeconds(postMp3) || 0;
+  postDur = Math.max(0.6, postDur);
+
+  m["post_voice.time"] = 0;
+  m["post_voice.duration"] = postDur;
+
+  // baked -> 1x
+  m["post_voice.playback_rate"] = 1;
+
+  // SCRIPT audio
+  let scriptDur = 0;
+  const scriptStart = postDur + GAP_BETWEEN_TITLE_AND_SCRIPT;
+
+  if (scriptText) {
+    const scriptMp3Raw = await elevenlabsTtsToMp3Buffer(scriptText, scriptVoiceId);
+    const scriptMp3 = await transformMp3WithFfmpeg(scriptMp3Raw, scriptVoiceSpeed, scriptVoiceVolume);
+
+    const scriptPath = `reddit/${Date.now()}_${randId()}_script.mp3`;
+    const scriptUrl = await uploadMp3ToSupabasePublic(scriptMp3, scriptPath);
+
+    m["script_voice.source"] = scriptUrl;
+
+    scriptDur = mp3DurationSeconds(scriptMp3) || 0;
+    scriptDur = Math.max(0.6, scriptDur);
+
+    m["script_voice.time"] = scriptStart;
+    m["script_voice.duration"] = scriptDur;
+
+    // baked -> 1x
+    m["script_voice.playback_rate"] = 1;
+  }
+
+  // Card stays for post segment
+  const cardSecs = Math.max(0.35, postDur + CARD_EXTRA_AFTER_TITLE);
+  m["post_card_light.time"] = 0;
+  m["post_card_light.duration"] = cardSecs;
+  m["post_card_dark.time"] = 0;
+  m["post_card_dark.duration"] = cardSecs;
+
+  const audioEnd = scriptText ? scriptStart + scriptDur : postDur;
+  const totalTimelineSecs = Math.max(0.9, audioEnd + END_PAD);
+
+  m["Video.time"] = 0;
+  m["Video.duration"] = totalTimelineSecs;
+
+  // ==========================================================
+  // ✅ CAPTIONS (keep your existing block)
+  // ==========================================================
+  const captionsEnabled =
+    body.captionsEnabled === true ||
+    String(body.captionsEnabled || "").toLowerCase() === "true" ||
+    String(body.captionsEnabled || "") === "1";
+
+  const styleRaw = String(body.captionStyle || "").trim().toLowerCase();
+  const style = styleRaw === "karoke" ? "karaoke" : styleRaw;
+
+  const captionSettings =
+    body.captionSettings && typeof body.captionSettings === "object"
+      ? body.captionSettings
+      : (() => {
+          try {
+            return JSON.parse(String(body.captionSettings || ""));
+          } catch {
+            return null;
+          }
+        })();
+
+  const STYLE_TO_LAYER = {
+    sentence: "Subtitles_Sentence",
+    karaoke: "Subtitles_Karaoke",
+    word: "Subtitles_Word",
+    boldwhite: "Subtitles_BoldWhite",
+    yellowpop: "Subtitles_YellowPop",
+    minttag: "Subtitles_MintTag",
+    outlinepunch: "Subtitles_OutlinePunch",
+    blackbar: "Subtitles_BlackBar",
+    highlighter: "Subtitles_Highlighter",
+    neonglow: "Subtitles_NeonGlow",
+    purplepop: "Subtitles_PurplePop",
+    compactlowerthird: "Subtitles_CompactLowerThird",
+    bouncepop: "Subtitles_BouncePop",
+    redalert: "Subtitles_RedAlert",
+    redtag: "Subtitles_RedTag",
+  };
+
+  const ALL_SUBTITLE_LAYERS = Object.values(STYLE_TO_LAYER);
+
+  function forceHideLayer(layerName) {
+    m[`${layerName}.hidden`] = true;
+    m[`${layerName}.opacity`] = "0%";
+    m[`${layerName}.visible`] = false;
+    m[`${layerName}.enabled`] = false;
+    m[`${layerName}.transcription`] = false;
+    m[`${layerName}.transcription.enabled`] = false;
+
+    m[`${layerName}.background_color`] = "transparent";
+    m[`${layerName}.shadow_color`] = "transparent";
+    m[`${layerName}.shadow_blur`] = 0;
+    m[`${layerName}.shadow_distance`] = 0;
+  }
+
+  function forceShowLayer(layerName) {
+    m[`${layerName}.hidden`] = false;
+    m[`${layerName}.opacity`] = "100%";
+    m[`${layerName}.visible`] = true;
+    m[`${layerName}.enabled`] = true;
+  }
+
+  function applyCaptionSettings(layerName, styleKey, s) {
+    m[`${layerName}.background_color`] = "transparent";
+    m[`${layerName}.shadow_color`] = "transparent";
+    m[`${layerName}.shadow_blur`] = 0;
+    m[`${layerName}.shadow_distance`] = 0;
+
+    if (!s || typeof s !== "object") return;
+
+    if (s.x != null) m[`${layerName}.x`] = pct(Number(s.x));
+    if (s.y != null) m[`${layerName}.y`] = pct(Number(s.y));
+
+    if (s.fontFamily) m[`${layerName}.font_family`] = String(s.fontFamily);
+    if (s.fontSize != null) m[`${layerName}.font_size`] = Number(s.fontSize);
+    if (s.fontWeight != null) m[`${layerName}.font_weight`] = Number(s.fontWeight);
+
+    if (s.fillColor) m[`${layerName}.fill_color`] = String(s.fillColor);
+    if (s.strokeColor) m[`${layerName}.stroke_color`] = String(s.strokeColor);
+    if (s.strokeWidth != null) m[`${layerName}.stroke_width`] = Number(s.strokeWidth);
+
+    if (s.textTransform) m[`${layerName}.text_transform`] = String(s.textTransform);
+
+    if (styleKey === "blackbar" && s.backgroundColor) {
+      m[`${layerName}.background_color`] = String(s.backgroundColor);
+    }
+
+    if (styleKey === "neonglow" && s.shadowColor) {
+      m[`${layerName}.shadow_color`] = String(s.shadowColor);
+      if (s.shadowBlur != null) m[`${layerName}.shadow_blur`] = Number(s.shadowBlur);
+      if (s.shadowDistance != null) m[`${layerName}.shadow_distance`] = Number(s.shadowDistance);
+    }
+  }
+
+  for (const layer of ALL_SUBTITLE_LAYERS) forceHideLayer(layer);
+
+  if (captionsEnabled && scriptText) {
+    const chosenLayer = STYLE_TO_LAYER[style] || STYLE_TO_LAYER.sentence;
+
+    forceShowLayer(chosenLayer);
+
+    m[`${chosenLayer}.dynamic`] = true;
+    m[`${chosenLayer}.transcription`] = true;
+    m[`${chosenLayer}.transcription.enabled`] = true;
+    m[`${chosenLayer}.transcription.source`] = "script_voice";
+    m[`${chosenLayer}.transcription_source`] = "script_voice";
+
+    m[`${chosenLayer}.time`] = scriptStart;
+    m[`${chosenLayer}.duration`] = Math.max(0.1, totalTimelineSecs - scriptStart);
+
+    applyCaptionSettings(chosenLayer, style, captionSettings);
+  }
+
+  return m;
 }
 
 /* ----------------- MAIN handler ----------------- */
@@ -479,7 +846,7 @@ module.exports = async function handler(req, res) {
   try {
     if (!TEMPLATE_ID) return json(res, 500, { ok: false, error: "Missing CREATOMATE_TEMPLATE_ID_REDDIT" });
 
-    // NOTE: GET stays as your polling helper (optional)
+    // GET: optional polling helper
     if (req.method === "GET") {
       const url = new URL(req.url, "http://localhost");
       const id = url.searchParams.get("id");
@@ -493,11 +860,11 @@ module.exports = async function handler(req, res) {
 
     if (req.method !== "POST") return json(res, 405, { ok: false, error: "Use POST or GET" });
 
-    // ✅ must be logged in (header member id OR bearer token)
+    const body = await readBody(req);
+
+    // ✅ Identify member (Bearer token OR x-nf-member-id)
     const member_id = await requireMemberId(req);
     const sb = getAdminSupabase();
-
-    const body = await readBody(req);
 
     const username = safeStr(body.username);
     const postText = safeStr(body.postText || body.postTitle);
@@ -509,9 +876,9 @@ module.exports = async function handler(req, res) {
     if (!postText) return json(res, 400, { ok: false, error: "Missing postText" });
     if (!backgroundVideoUrl) return json(res, 400, { ok: false, error: "Missing backgroundVideoUrl" });
 
-    // ✅ validate URLs now (fail early)
-    ensurePublicHttpUrl(pfpUrl, "pfpUrl");
+    // validate URLs now (fail early)
     ensurePublicHttpUrl(backgroundVideoUrl, "backgroundVideoUrl");
+    if (pfpUrl) ensurePublicHttpUrl(pfpUrl, "pfpUrl");
 
     // ✅ 1) Insert row into renders FIRST so /api/renders will list it
     const video_name =
@@ -529,7 +896,6 @@ module.exports = async function handler(req, res) {
         error: null,
         kind: "reddit",
         video_name,
-        // keep anything useful for later display/filtering
         choices: {
           kind: "reddit",
           mode: normalizeMode(body.mode),
@@ -541,6 +907,12 @@ module.exports = async function handler(req, res) {
           backgroundVideoName: safeStr(body.backgroundVideoName || ""),
           captionsEnabled: Boolean(body.captionsEnabled),
           captionStyle: safeStr(body.captionStyle || ""),
+          postVoice: safeStr(body.postVoice || ""),
+          scriptVoice: safeStr(body.scriptVoice || ""),
+          postVoiceSpeed: body.postVoiceSpeed ?? null,
+          postVoiceVolume: body.postVoiceVolume ?? null,
+          scriptVoiceSpeed: body.scriptVoiceSpeed ?? null,
+          scriptVoiceVolume: body.scriptVoiceVolume ?? null,
         },
       })
       .select("*")
@@ -548,7 +920,7 @@ module.exports = async function handler(req, res) {
 
     if (insErr || !inserted?.id) {
       console.error("[reddit-video] renders insert failed", insErr);
-      return json(res, 500, { ok: false, error: "RENDERS_INSERT_FAILED", details: insErr });
+      return json(res, 500, { ok: false, error: "RENDERS_INSERT_FAILED", details: insErr?.message || insErr });
     }
 
     const dbId = inserted.id;
@@ -575,7 +947,6 @@ module.exports = async function handler(req, res) {
     const renderId = start?.id;
 
     if (!renderId) {
-      // mark row failed (so user sees it + error)
       await sb
         .from("renders")
         .update({
@@ -599,7 +970,7 @@ module.exports = async function handler(req, res) {
 
     return json(res, 200, {
       ok: true,
-      id: dbId,     // renders.id (uuid)
+      id: dbId,     // renders.id
       renderId,     // creatomate render id
       status: start?.status || "queued",
     });
@@ -611,7 +982,11 @@ module.exports = async function handler(req, res) {
       return json(res, 401, { ok: false, error: "TOKEN_EXPIRED", message: "Session expired. Refresh and try again." });
     }
     if (code === "MISSING_AUTH" || msg.includes("MISSING_AUTH")) {
-      return json(res, 401, { ok: false, error: "MISSING_AUTH" });
+      return json(res, 401, {
+        ok: false,
+        error: "MISSING_AUTH",
+        message: "Send Authorization: Bearer <token> OR x-nf-member-id header.",
+      });
     }
     if (code === "INVALID_MEMBER_TOKEN" || msg.includes("INVALID_MEMBER")) {
       return json(res, 401, { ok: false, error: "INVALID_MEMBER_TOKEN" });
