@@ -65,6 +65,7 @@
   const PREVIEW_BASE = "https://pub-178d4bb2cbf54f3f92bc03819410134c.r2.dev";
 
   function boot() {
+    await __nfWaitForMemberstack(1500);
     // ---------- DOM ----------
     const msgEl = document.getElementById("rvMsg");
     const statusEl = document.getElementById("rvStatus");
@@ -187,71 +188,199 @@
     }
 
     // ==========================================================
-    // ✅ AUTH (Memberstack token) + auth fetch helpers
-    // ==========================================================
-    let __nfTokenCache = { token: "", at: 0 };
+// ✅ AUTH (Memberstack token) + auth fetch helpers (FIXED)
+// - waits for Memberstack to be ready
+// - supports $memberstackDom, $memberstack, MemberStack
+// - falls back to localStorage JWT-like tokens
+// ==========================================================
+let __nfTokenCache = { token: "", at: 0 };
 
-    async function nfGetMsToken() {
-      try {
-        if (__nfTokenCache.token && Date.now() - __nfTokenCache.at < 30_000) {
-          return __nfTokenCache.token;
-        }
-      } catch {}
+function __nfIsJwtLike(t) {
+  if (!t) return false;
+  const s = String(t).trim();
+  // rough JWT check: 3 dot-separated parts, each base64-ish
+  return s.split(".").length === 3 && s.length > 40;
+}
 
-      // Memberstack v2 DOM package (common in Webflow)
-      try {
-        if (window.$memberstackDom?.getToken) {
-          const { data } = await window.$memberstackDom.getToken();
-          const t = String(data?.token || "").trim();
+async function __nfWaitForMemberstack(maxMs = 4000) {
+  const start = Date.now();
+  while (Date.now() - start < maxMs) {
+    if (window.$memberstackDom || window.$memberstack || window.MemberStack) return true;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return false;
+}
+
+async function nfGetMsToken() {
+  try {
+    if (__nfTokenCache.token && Date.now() - __nfTokenCache.at < 30_000) {
+      return __nfTokenCache.token;
+    }
+  } catch {}
+
+  // wait briefly for Memberstack to load
+  await __nfWaitForMemberstack(4000);
+
+  // --------------------------
+  // 1) $memberstackDom (MS v2 DOM)
+  // --------------------------
+  try {
+    const msd = window.$memberstackDom;
+    if (msd) {
+      // Sometimes MS requires readiness
+      if (typeof msd?.onReady === "function") {
+        await msd.onReady;
+      }
+
+      if (typeof msd.getToken === "function") {
+        const { data } = await msd.getToken();
+        const t = String(data?.token || "").trim();
+        if (t) {
           __nfTokenCache = { token: t, at: Date.now() };
           return t;
         }
-      } catch {}
+      }
 
-      // Memberstack fallback
-      try {
-        if (window.MemberStack?.getToken) {
-          const t = String((await window.MemberStack.getToken()) || "").trim();
+      // some installs expose getMemberToken / getAuthToken
+      if (typeof msd.getMemberToken === "function") {
+        const { data } = await msd.getMemberToken();
+        const t = String(data?.token || data?.accessToken || "").trim();
+        if (t) {
           __nfTokenCache = { token: t, at: Date.now() };
           return t;
         }
-      } catch {}
+      }
 
-      // last ditch (varies by install)
-      try {
-        const keys = Object.keys(localStorage || {});
-        const hit = keys.find((k) => k.toLowerCase().includes("memberstack") && k.toLowerCase().includes("token"));
-        if (hit) {
-          const raw = String(localStorage.getItem(hit) || "").trim();
-          try {
-            const j = JSON.parse(raw);
-            const t = String(j?.token || j?.accessToken || raw || "").trim();
-            __nfTokenCache = { token: t, at: Date.now() };
-            return t;
-          } catch {
-            __nfTokenCache = { token: raw, at: Date.now() };
-            return raw;
-          }
+      if (typeof msd.getAuthToken === "function") {
+        const { data } = await msd.getAuthToken();
+        const t = String(data?.token || data?.accessToken || "").trim();
+        if (t) {
+          __nfTokenCache = { token: t, at: Date.now() };
+          return t;
         }
-      } catch {}
+      }
 
-      return "";
+      // if current member is available, some versions store token on it
+      if (typeof msd.getCurrentMember === "function") {
+        const { data } = await msd.getCurrentMember();
+        const maybe = String(data?.token || data?.accessToken || "").trim();
+        if (maybe && __nfIsJwtLike(maybe)) {
+          __nfTokenCache = { token: maybe, at: Date.now() };
+          return maybe;
+        }
+      }
     }
+  } catch (e) {
+    // swallow; we'll try other paths
+  }
 
-    async function nfAuthHeaders(extra) {
-      const h = Object.assign({}, extra || {});
-      const token = await nfGetMsToken();
-      if (token) h.Authorization = "Bearer " + token;
-      return h;
-    }
+  // --------------------------
+  // 2) $memberstack (older/global)
+  // --------------------------
+  try {
+    const ms = window.$memberstack;
+    if (ms) {
+      if (typeof ms.getToken === "function") {
+        const r = await ms.getToken();
+        const t = String(r?.data?.token || r?.token || "").trim();
+        if (t) {
+          __nfTokenCache = { token: t, at: Date.now() };
+          return t;
+        }
+      }
 
-    async function nfFetchJson(url, opts) {
-      const res = await fetch(url, opts);
-      const raw = await res.text().catch(() => "");
-      let j = {};
-      try { j = JSON.parse(raw); } catch { j = { raw }; }
-      return { res, raw, json: j };
+      if (typeof ms.getMemberToken === "function") {
+        const r = await ms.getMemberToken();
+        const t = String(r?.data?.token || r?.data?.accessToken || r?.token || "").trim();
+        if (t) {
+          __nfTokenCache = { token: t, at: Date.now() };
+          return t;
+        }
+      }
     }
+  } catch {}
+
+  // --------------------------
+  // 3) MemberStack (fallback)
+  // --------------------------
+  try {
+    const MS = window.MemberStack;
+    if (MS) {
+      // Some versions are callback-based
+      if (typeof MS.onReady === "function") {
+        await new Promise((resolve) => MS.onReady(resolve));
+      }
+      if (typeof MS.getToken === "function") {
+        const t = String((await MS.getToken()) || "").trim();
+        if (t) {
+          __nfTokenCache = { token: t, at: Date.now() };
+          return t;
+        }
+      }
+    }
+  } catch {}
+
+  // --------------------------
+  // 4) localStorage fallback (last resort)
+  // --------------------------
+  try {
+    const keys = Object.keys(localStorage || {});
+    // prioritize likely keys first
+    const preferred = keys.filter((k) => {
+      const s = k.toLowerCase();
+      return (
+        s.includes("memberstack") ||
+        s.includes("ms_") ||
+        s.includes("ms-token") ||
+        s.includes("token") ||
+        s.includes("auth")
+      );
+    });
+
+    const scan = preferred.length ? preferred : keys;
+
+    for (const k of scan) {
+      const raw = localStorage.getItem(k);
+      if (!raw) continue;
+
+      // if it's JSON, parse and look for token fields
+      try {
+        const j = JSON.parse(raw);
+        const cand = String(j?.token || j?.accessToken || j?.idToken || "").trim();
+        if (cand && __nfIsJwtLike(cand)) {
+          __nfTokenCache = { token: cand, at: Date.now() };
+          return cand;
+        }
+      } catch {
+        // raw string token
+        const cand = String(raw || "").trim();
+        if (cand && __nfIsJwtLike(cand)) {
+          __nfTokenCache = { token: cand, at: Date.now() };
+          return cand;
+        }
+      }
+    }
+  } catch {}
+
+  return "";
+}
+
+async function nfAuthHeaders(extra) {
+  const h = Object.assign({}, extra || {});
+  const token = await nfGetMsToken();
+  if (token) h.Authorization = "Bearer " + token;
+  return h;
+}
+
+async function nfFetchJson(url, opts) {
+  const res = await fetch(url, opts);
+  const raw = await res.text().catch(() => "");
+  let j = {};
+  try { j = JSON.parse(raw); } catch { j = { raw }; }
+  return { res, raw, json: j };
+}
+
+    
 
     function findPreviewHost() {
       if (!videoEl) return null;
@@ -1443,8 +1572,8 @@
   }
 
   if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", boot);
-  } else {
-    boot();
-  }
+  document.addEventListener("DOMContentLoaded", () => boot());
+} else {
+  boot();
+}
 })();
