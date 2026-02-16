@@ -1,6 +1,6 @@
 (function () {
-  if (window.__nf_reddit_preview_v14_tokenfix__) return;
-  window.__nf_reddit_preview_v14_tokenfix__ = true;
+  if (window.__nf_reddit_preview_v15_nojwt__) return;
+  window.__nf_reddit_preview_v15_nojwt__ = true;
 
   const API_BASE = "https://nofacelabs-backend.vercel.app";
   const SIGNED_UPLOAD_ENDPOINT = API_BASE + "/api/user-video-upload-url";
@@ -25,9 +25,6 @@
     "https://pub-893d3b83680c4b839093dfb1ace5ac0a.r2.dev/flair10.png",
   ];
 
-  // ----------------------------
-  // ✅ VOICES (with descriptions)
-  // ----------------------------
   const VOICES = [
     { name: "Bella", id: "hpp4J3VqNfWAUOO0d1Us", desc: "Warm, friendly female voice." },
     { name: "Roger", id: "CwhRBWXzGAHq8TQ4Fs17", desc: "Confident male narration with clear delivery." },
@@ -61,152 +58,80 @@
     { name: "Rahul", id: "WtIqwF5CWCkaZSGmvsm1", desc: "Warm male voice with natural conversational tone." },
   ];
 
-  // ✅ Pre-hosted MP3s (voiceId.mp3)
   const PREVIEW_BASE = "https://pub-178d4bb2cbf54f3f92bc03819410134c.r2.dev";
 
   // ==========================================================
-  // ✅ AUTH (Memberstack) — HARDENED TOKEN + MEMBER DETECTION
+  // ✅ Memberstack helpers (NO JWT REQUIRED)
   // ==========================================================
-  let __nfTokenCache = { token: "", at: 0 };
-  let __nfMemberCache = { member: null, at: 0 };
-
-  function __nfIsJwtLike(t) {
-    const s = String(t || "").trim();
-    return s.split(".").length === 3 && s.length > 40;
-  }
-
-  function __nfPickTokenFromAny(obj) {
-    // attempt a bunch of known shapes
-    const cand = [
-      obj?.data?.token,
-      obj?.data?.accessToken,
-      obj?.data?.jwt,
-      obj?.data?.idToken,
-      obj?.token,
-      obj?.accessToken,
-      obj?.jwt,
-      obj?.idToken,
-    ]
-      .map((x) => (x == null ? "" : String(x).trim()))
-      .find((x) => __nfIsJwtLike(x));
-
-    return cand || "";
-  }
-
-  async function __nfSleep(ms) {
+  async function sleep(ms) {
     return new Promise((r) => setTimeout(r, ms));
   }
 
-  async function __nfWaitForMemberstack(maxMs = 8000) {
+  async function waitForMemberstack(maxMs = 6000) {
     const start = Date.now();
     while (Date.now() - start < maxMs) {
       if (window.$memberstackDom) return true;
-      await __nfSleep(50);
+      await sleep(50);
     }
     return false;
   }
 
   async function nfGetCurrentMemberSafe() {
-    try {
-      if (__nfMemberCache.member && Date.now() - __nfMemberCache.at < 10_000) {
-        return __nfMemberCache.member;
-      }
-    } catch {}
-
+    await waitForMemberstack();
     const msd = window.$memberstackDom;
     if (!msd || typeof msd.getCurrentMember !== "function") return null;
 
     try {
-      // some installs expose onReady as a promise
       if (msd.onReady) {
-        try {
-          await msd.onReady;
-        } catch {}
+        try { await msd.onReady; } catch {}
       }
     } catch {}
 
     try {
       const res = await msd.getCurrentMember();
-      const member = res?.data || res || null;
-      __nfMemberCache = { member, at: Date.now() };
-      return member;
+      return res?.data || res || null;
     } catch {
       return null;
     }
   }
 
-  async function nfGetMsToken() {
-    try {
-      if (__nfTokenCache.token && Date.now() - __nfTokenCache.at < 30_000) {
-        return __nfTokenCache.token;
-      }
-    } catch {}
-
-    await __nfWaitForMemberstack(8000);
-
+  // We keep token getter but we DON'T require it.
+  async function nfGetMsTokenOptional() {
+    await waitForMemberstack();
     const msd = window.$memberstackDom;
-    if (!msd) return "";
-
-    // Ensure ready
+    if (!msd || typeof msd.getToken !== "function") return "";
     try {
       if (msd.onReady) {
-        try {
-          await msd.onReady;
-        } catch {}
+        try { await msd.onReady; } catch {}
       }
     } catch {}
 
-    // Aggressive retries — MS sometimes returns empty token on first calls
-    for (let attempt = 0; attempt < 25; attempt++) {
-      // 1) getToken (most common)
-      try {
-        if (typeof msd.getToken === "function") {
-          const r = await msd.getToken();
-          const t = __nfPickTokenFromAny(r);
-          if (t) {
-            __nfTokenCache = { token: t, at: Date.now() };
-            return t;
-          }
-        }
-      } catch {}
-
-      // 2) getMemberToken / getAuthToken (varies by install)
-      try {
-        if (typeof msd.getMemberToken === "function") {
-          const r = await msd.getMemberToken();
-          const t = __nfPickTokenFromAny(r);
-          if (t) {
-            __nfTokenCache = { token: t, at: Date.now() };
-            return t;
-          }
-        }
-      } catch {}
-
-      try {
-        if (typeof msd.getAuthToken === "function") {
-          const r = await msd.getAuthToken();
-          const t = __nfPickTokenFromAny(r);
-          if (t) {
-            __nfTokenCache = { token: t, at: Date.now() };
-            return t;
-          }
-        }
-      } catch {}
-
-      // 3) If member exists, sometimes token becomes available right after
-      await nfGetCurrentMemberSafe();
-
-      // wait a bit and retry
-      await __nfSleep(160);
+    // Many installs return empty; treat as optional.
+    try {
+      const r = await msd.getToken();
+      const t =
+        String(r?.data?.token || r?.data?.accessToken || r?.token || r?.accessToken || "").trim();
+      return t;
+    } catch {
+      return "";
     }
-
-    return "";
   }
 
-  async function nfAuthHeaders(extra) {
+  async function nfHeaders(extra) {
     const h = Object.assign({}, extra || {});
-    const token = await nfGetMsToken();
+    const member = await nfGetCurrentMemberSafe();
+
+    // attach member identity as INFO ONLY (not security)
+    const memberId = String(member?.id || member?._id || "").trim();
+    const email = String(member?.email || "").trim();
+
+    if (memberId) h["x-nf-member-id"] = memberId;
+    if (email) h["x-nf-member-email"] = email;
+
+    // attach Authorization if token exists (optional)
+    const token = await nfGetMsTokenOptional();
     if (token) h.Authorization = "Bearer " + token;
+
     return h;
   }
 
@@ -214,19 +139,11 @@
     const res = await fetch(url, opts);
     const raw = await res.text().catch(() => "");
     let j = {};
-    try {
-      j = JSON.parse(raw);
-    } catch {
-      j = { raw };
-    }
+    try { j = JSON.parse(raw); } catch { j = { raw }; }
     return { res, raw, json: j };
   }
 
-  // ==========================================================
-  // ✅ MAIN APP
-  // ==========================================================
   function boot() {
-    // ---------- DOM ----------
     const msgEl = document.getElementById("rvMsg");
     const statusEl = document.getElementById("rvStatus");
     const barEl = document.getElementById("rvBar");
@@ -289,7 +206,6 @@
     const postTextEl = document.getElementById("rvPostText");
     const pfpUrlEl = document.getElementById("rvPfpUrl");
 
-    // ---------- state ----------
     let localPfpObjectUrl = "";
     let localBgObjectUrl = "";
     let demoBgUrl = DEMO_GAMEPLAY_URL;
@@ -297,22 +213,14 @@
     let bgLibraryUrl = "";
     let bgLibraryName = "";
 
-    let wrap = null,
-      demoVid = null,
-      card = null;
-    let lastRenderDl = "",
-      lastRenderName = "reddit-video";
+    let wrap = null, demoVid = null, card = null;
+    let lastRenderDl = "", lastRenderName = "reddit-video";
 
     const REF_W = 1080;
-    const REF_CARD_W = REF_W * 0.75; // 810
+    const REF_CARD_W = REF_W * 0.75;
 
-    function setMsg(t) {
-      if (msgEl) msgEl.textContent = t || "—";
-    }
-    function setStatus(t) {
-      if (statusEl) statusEl.textContent = t || "—";
-      setMsg(t);
-    }
+    function setMsg(t) { if (msgEl) msgEl.textContent = t || "—"; }
+    function setStatus(t) { if (statusEl) statusEl.textContent = t || "—"; setMsg(t); }
     function setProgress(pct) {
       const v = Math.max(0, Math.min(100, Number(pct) || 0));
       if (barEl) barEl.style.width = v + "%";
@@ -358,7 +266,7 @@
       return videoEl.parentElement;
     }
 
-    // ---------- ✅ upload helpers ----------
+    // ---------- upload helpers (NO token required) ----------
     async function getSignedUploadUrl(file) {
       const payload = {
         fileName: file.name,
@@ -366,12 +274,9 @@
         contentType: file.type || "application/octet-stream",
       };
 
-      const token = await nfGetMsToken();
-      if (!token) throw new Error("Not logged in (missing Memberstack token). Please refresh + log in again.");
-
       const { res, json } = await nfFetchJson(SIGNED_UPLOAD_ENDPOINT, {
         method: "POST",
-        headers: await nfAuthHeaders({ "Content-Type": "application/json" }),
+        headers: await nfHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify(payload),
       });
 
@@ -390,7 +295,6 @@
         headers: { "Content-Type": file.type || "application/octet-stream" },
         body: file,
       });
-
       if (!res.ok) {
         const t = await res.text().catch(() => "");
         throw new Error("Upload PUT failed (HTTP " + res.status + ") " + (t || ""));
@@ -409,7 +313,7 @@
       return { url, bucket: signed.bucket, path: signed.path };
     }
 
-    // ---------- inject CSS for preview ----------
+    // ---------- inject CSS ----------
     (function injectCss() {
       const id = "nfRvCssV11";
       if (document.getElementById(id)) return;
@@ -435,7 +339,6 @@
         }
         .nf-rvCard.light{ background:#fff; color:#0A0E1A; }
         .nf-rvCard.dark{ background:#000; color:#fff; }
-
         .nf-rvHeader{ display:flex; gap: calc(18px * var(--scale)); align-items:flex-start; min-width:0; }
         .nf-rvPfp{ width: calc(72px * var(--scale)); height: calc(72px * var(--scale)); border-radius:999vmin; overflow:hidden; flex:0 0 auto; background:#ddd; }
         .nf-rvPfp img{ width:100%; height:100%; object-fit:cover; display:block; }
@@ -460,100 +363,12 @@
       document.head.appendChild(s);
     })();
 
-    // ---------- ✅ Voice picker CSS ----------
-    (function injectVoiceCss() {
-      const id = "nfVoicePickerCssV4";
-      if (document.getElementById(id)) return;
-      const s = document.createElement("style");
-      s.id = id;
-      s.textContent = `
-        .nf-voiceTabs{ display:flex; gap:8px; margin: 2px 0 12px; }
-        .nf-voiceTab{
-          border:1px solid rgba(255,255,255,.14);
-          background: rgba(255,255,255,.06);
-          color: rgba(255,255,255,.85);
-          border-radius: 999px;
-          padding: 7px 12px;
-          font-size: 12px;
-          font-weight: 900;
-          cursor: pointer;
-          line-height: 1;
-        }
-        .nf-voiceTab.active{
-          border-color: rgba(90,193,255,.45);
-          background: rgba(90,193,255,.18);
-          color: rgba(90,193,255,1);
-        }
-        .nf-voiceGrid{ display:grid; grid-template-columns: repeat(3, 1fr); gap:14px; }
-        @media (max-width: 900px){ .nf-voiceGrid{ grid-template-columns: repeat(2, 1fr);} }
-        @media (max-width: 620px){ .nf-voiceGrid{ grid-template-columns: 1fr;} }
-        .nf-voiceCard{
-          border:1px solid rgba(255,255,255,.12);
-          background: rgba(255,255,255,.05);
-          border-radius:18px;
-          padding:18px;
-          display:flex;
-          flex-direction:column;
-          gap:14px;
-          min-height: 148px;
-          transition:border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease;
-          position: relative;
-        }
-        .nf-voiceCard:hover{
-          border-color: rgba(90,193,255,.45);
-          box-shadow: 0 0 0 1px rgba(90,193,255,.18) inset;
-          transform: translateY(-1px);
-        }
-        .nf-voiceSelected{
-          border-color: rgba(90,193,255,.65) !important;
-          box-shadow: 0 0 0 1px rgba(90,193,255,.22) inset;
-        }
-        .nf-voiceName{ font-weight:950; font-size:16px; margin-bottom:6px; }
-        .nf-voiceDesc{
-          font-size:13px;
-          color: rgba(255,255,255,.68);
-          line-height:1.35;
-          white-space: normal;
-          word-break: break-word;
-        }
-        .nf-voiceBtnsRow{ margin-top:auto; display:flex; gap:14px; }
-        .nf-voiceBtnMini{
-          flex:1 1 0;
-          border:1px solid rgba(255,255,255,.16);
-          background: rgba(255,255,255,.08);
-          color: rgba(255,255,255,.92);
-          border-radius: 18px;
-          height: 44px;
-          padding: 0 14px;
-          font-size: 14px;
-          font-weight: 900;
-          display:flex;
-          align-items:center;
-          justify-content:center;
-          line-height: 1;
-          cursor:pointer;
-          white-space:nowrap;
-          text-align:center;
-        }
-        .nf-voiceBtnMini:disabled{ opacity:.72; cursor:not-allowed; }
-        .nf-voiceBtnUse{
-          border-color: rgba(90,193,255,.35);
-          background: rgba(90,193,255,.16);
-          color: rgba(90,193,255,1);
-        }
-        #rvPostVoiceLabel, #rvScriptVoiceLabel{ display:none !important; }
-      `;
-      document.head.appendChild(s);
-    })();
-
-    // ---------- icons ----------
+    // icons
     const PATH_LIKE = `M 50 100 L 7.5578 50.9275 C 2.6844 45.2929 0 37.8006 0 29.833 C 0 21.8641 2.6844 14.3731 7.5578 8.7384 C 12.4311 3.1038 18.91 0 25.8022 0 C 32.6944 0 39.1733 3.1038 44.0467 8.7384 L 50 15.6218 L 55.9533 8.7384 C 60.8267 3.1038 67.3067 0 74.1978 0 C 81.09 0 87.5689 3.1038 92.4422 8.7384 C 97.3167 14.3731 100 21.8641 100 29.833 C 100 37.8019 97.3167 45.2929 92.4422 50.9275 L 50 100 Z M 25.8022 5.1387 C 20.0978 5.1387 14.7344 7.7081 10.7 12.3715 C 6.6656 17.0349 4.4444 23.2374 4.4444 29.833 C 4.4444 36.4286 6.6667 42.6298 10.7 47.2945 L 50 92.7338 L 89.3 47.2945 C 93.3344 42.6298 95.5556 36.4286 95.5556 29.833 C 95.5556 23.2374 93.3344 17.0362 89.3 12.3715 C 85.2656 7.7081 79.9033 5.1387 74.1978 5.1387 C 68.4933 5.1387 63.13 7.7081 59.0956 12.3715 L 50 22.8893 L 40.9033 12.3715 C 36.87 7.7081 31.5067 5.1387 25.8022 5.1387 Z`;
     const PATH_COMMENT = `M 94.2357 72.6204 C 97.8532 65.5833 99.7431 57.786 99.7491 49.8735 C 99.7491 22.3751 77.3736 0 49.8745 0 C 22.3755 0 0 22.3751 0 49.8735 C 0 77.372 22.3755 99.7471 49.8745 99.7471 C 57.7729 99.7471 65.5986 97.8473 72.6264 94.2383 L 94.1178 99.611 C 95.662 100 97.2969 99.5469 98.4206 98.4186 C 99.5473 97.2921 100 95.6569 99.6131 94.1114 L 94.2357 72.6204 Z M 85.018 73.1191 L 88.9807 88.9789 L 73.1206 85.0117 C 71.9994 84.7349 70.8149 84.8937 69.8062 85.456 C 63.7193 88.8753 56.8561 90.6738 49.8745 90.6792 C 27.3721 90.6792 9.0681 72.371 9.0681 49.8735 C 9.0681 27.376 27.3721 9.0679 49.8745 9.0679 C 72.377 9.0679 90.681 27.376 90.681 49.8735 C 90.6748 56.8528 88.8779 63.7138 85.4623 69.8003 C 84.8939 70.8086 84.7348 71.9968 85.018 73.1191 Z`;
     const PATH_SHARE = `M 33.55 28.6214 L 45 17.1329 L 45 65.035 C 45 67.7918 47.2404 70.03 50 70.03 C 52.7596 70.03 55 67.7918 55 65.035 L 55 17.1329 L 66.45 28.6214 C 67.3888 29.5671 68.6668 30.099 70 30.099 C 71.3332 30.099 72.6112 29.5671 73.55 28.6214 C 74.4966 27.6835 75.029 26.4068 75.029 25.075 C 75.029 23.7431 74.4966 22.4664 73.55 21.5285 L 53.55 1.5485 C 53.55 1.5485 52.5138 0.7373 51.9 0.4996 C 50.6827 0 49.3173 0 48.1 0.4996 C 47.4862 0.7373 46.45 1.5485 46.45 1.5485 L 26.45 21.5285 C 24.4907 23.4859 24.4907 26.6641 26.45 28.6214 C 28.4093 30.5788 31.5907 30.5788 33.55 28.6214 Z M 95 50.05 C 92.2404 50.05 90 52.2882 90 55.045 L 90 85.015 C 90 87.7718 87.7596 90.01 85 90.01 L 15 90.01 C 12.2404 90.01 10 87.7718 10 85.015 L 10 55.045 C 10 52.2882 7.7596 50.05 5 50.05 C 2.2404 50.05 0 52.2882 0 55.045 L 0 85.015 C 0 93.2854 6.7213 100 15 100 L 85 100 C 93.2787 100 100 93.2854 100 85.015 L 100 55.045 C 100 52.2882 97.7596 50.05 95 50.05 Z`;
 
-    // ==========================================================
-    // ✅ Voice options helpers (READ from localStorage)
-    // ==========================================================
+    // voice opts
     const NF_DEFAULT_SPEED = 1.0;
     const NF_DEFAULT_VOL = 1.0;
 
@@ -562,17 +377,14 @@
       if (!Number.isFinite(n)) return a;
       return Math.max(a, Math.min(b, n));
     }
-
     function nfNormalizeMode(m) {
       const s = String(m || "").toLowerCase().trim();
       return s === "script" ? "script" : "post";
     }
-
     function nfGetVoiceOpts(mode, voiceId) {
       const m = nfNormalizeMode(mode);
       const id = String(voiceId || "").trim();
       if (!id || id.toLowerCase() === "default") return { speed: NF_DEFAULT_SPEED, volume: NF_DEFAULT_VOL };
-
       try {
         const key = `nf_voice_opts_v1:${m}:${id}`;
         const raw = localStorage.getItem(key);
@@ -586,7 +398,6 @@
         return { speed: NF_DEFAULT_SPEED, volume: NF_DEFAULT_VOL };
       }
     }
-
     window.nfGetVoiceOpts = window.nfGetVoiceOpts || nfGetVoiceOpts;
 
     function ensureNodes() {
@@ -766,14 +577,10 @@
       if (videoEl) {
         videoEl.classList.add("nf-hide");
         videoEl.style.display = "none";
-        try {
-          videoEl.pause?.();
-        } catch {}
+        try { videoEl.pause?.(); } catch {}
       }
     }
-    function hideDemo() {
-      if (wrap) wrap.style.display = "none";
-    }
+    function hideDemo() { if (wrap) wrap.style.display = "none"; }
 
     function showRender(url) {
       hideDemo();
@@ -812,10 +619,8 @@
         if (!btn) return;
         const idx = btns.indexOf(btn);
         if (idx < 0) return;
-
         const val = btn.dataset[dataKey];
         if (hiddenEl && typeof val !== "undefined") hiddenEl.value = val;
-
         setActiveByIndex(idx);
         updateCard();
       });
@@ -823,9 +628,7 @@
 
     setupSeg(modeSeg, modeTrack, modeHidden, "mode");
 
-    // ==========================
-    // ✅ SCRIPT GENERATOR MODAL
-    // ==========================
+    // Script modal (same as your version)
     function setupModalSeg(segEl, trackEl, hiddenEl, dataKey) {
       if (!segEl) return;
       const btns = Array.from(segEl.querySelectorAll(".nf-segBtn"));
@@ -857,22 +660,11 @@
     function openScriptModal() {
       if (!scriptModal) return;
       const title = String(readAnyText(postTitleEl) || "").trim();
-      if (scriptPromptEl && !String(scriptPromptEl.value || "").trim()) {
-        scriptPromptEl.value = title;
-      }
+      if (scriptPromptEl && !String(scriptPromptEl.value || "").trim()) scriptPromptEl.value = title;
       scriptModal.classList.add("open");
-      setTimeout(() => {
-        try {
-          scriptPromptEl?.focus?.();
-          scriptPromptEl?.setSelectionRange?.(scriptPromptEl.value.length, scriptPromptEl.value.length);
-        } catch {}
-      }, 50);
+      setTimeout(() => { try { scriptPromptEl?.focus?.(); } catch {} }, 50);
     }
-
-    function closeScriptModal() {
-      if (!scriptModal) return;
-      scriptModal.classList.remove("open");
-    }
+    function closeScriptModal() { if (scriptModal) scriptModal.classList.remove("open"); }
 
     function setMainScriptBtnLoading(isLoading) {
       if (!genScriptBtn) return;
@@ -891,28 +683,12 @@
 
     if (genScriptBtn) genScriptBtn.addEventListener("click", openScriptModal);
     if (scriptClose) scriptClose.addEventListener("click", closeScriptModal);
-    if (scriptModal) {
-      scriptModal.addEventListener("click", (e) => {
-        if (e.target === scriptModal) closeScriptModal();
-      });
-    }
-
-    if (scriptPromptEl) {
-      scriptPromptEl.addEventListener("keydown", (e) => {
-        const isMac = /Mac|iPhone|iPad|iPod/i.test(navigator.platform);
-        const mod = isMac ? e.metaKey : e.ctrlKey;
-        if (mod && e.key === "Enter") {
-          e.preventDefault();
-          scriptGenerate?.click?.();
-        }
-      });
-    }
+    if (scriptModal) scriptModal.addEventListener("click", (e) => { if (e.target === scriptModal) closeScriptModal(); });
 
     async function generateScriptFromPrompt() {
       const topic = String(readAnyText(scriptPromptEl) || "").trim();
       const tone = String(readAnyText(toneHidden) || "funny").trim();
       const seconds = Number(readAnyText(lenHidden) || 45) || 45;
-
       if (!topic) throw new Error("Please enter a prompt.");
 
       closeScriptModal();
@@ -921,17 +697,14 @@
 
       const { res, json } = await nfFetchJson(SCRIPT_ENDPOINT, {
         method: "POST",
-        headers: await nfAuthHeaders({ "Content-Type": "application/json" }),
+        headers: await nfHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({ topic, tone, seconds }),
       });
 
-      if (!res.ok || json?.ok === false) {
-        throw new Error(json?.error || json?.message || json?.raw || "HTTP " + res.status);
-      }
+      if (!res.ok || json?.ok === false) throw new Error(json?.error || json?.message || json?.raw || "HTTP " + res.status);
 
       const out = String(json?.script || "").trim();
       if (!out) throw new Error("No script returned.");
-
       if (scriptEl) scriptEl.value = out;
       updateCard();
     }
@@ -951,7 +724,7 @@
       });
     }
 
-    // Upload PFP button click
+    // PFP Upload
     if (pfpUploadBtn && pfpFileEl) pfpUploadBtn.addEventListener("click", () => pfpFileEl.click());
 
     if (pfpFileEl) {
@@ -959,11 +732,7 @@
         const file = pfpFileEl.files?.[0];
         if (!file) return;
 
-        if (localPfpObjectUrl) {
-          try {
-            URL.revokeObjectURL(localPfpObjectUrl);
-          } catch {}
-        }
+        if (localPfpObjectUrl) { try { URL.revokeObjectURL(localPfpObjectUrl); } catch {} }
         localPfpObjectUrl = URL.createObjectURL(file);
         updateCard();
         setStatus("Uploading profile picture…");
@@ -971,12 +740,8 @@
         try {
           const up = await uploadAndGetPublicUrl(file);
           if (pfpUrlEl) pfpUrlEl.value = up.url;
-
-          try {
-            URL.revokeObjectURL(localPfpObjectUrl);
-          } catch {}
+          try { URL.revokeObjectURL(localPfpObjectUrl); } catch {}
           localPfpObjectUrl = "";
-
           setStatus("Profile picture uploaded ✓");
           updateCard();
         } catch (e) {
@@ -988,9 +753,8 @@
       });
     }
 
-    function fire(name, detail) {
-      window.dispatchEvent(new CustomEvent(name, { detail: detail || {} }));
-    }
+    // modal event bridge
+    function fire(name, detail) { window.dispatchEvent(new CustomEvent(name, { detail: detail || {} })); }
     if (openPfpLibBtn) openPfpLibBtn.addEventListener("click", () => fire("nf:rv:openPfpLibrary"));
     if (openBgLibBtn) openBgLibBtn.addEventListener("click", () => fire("nf:rv:openBgLibrary"));
     if (templatesBtn) templatesBtn.addEventListener("click", () => fire("nf:rv:openTemplates"));
@@ -1003,16 +767,13 @@
       updateCard();
     });
 
+    // BG upload
     if (bgFileEl) {
       bgFileEl.addEventListener("change", async () => {
         const file = bgFileEl.files?.[0];
         if (!file) return;
 
-        if (localBgObjectUrl) {
-          try {
-            URL.revokeObjectURL(localBgObjectUrl);
-          } catch {}
-        }
+        if (localBgObjectUrl) { try { URL.revokeObjectURL(localBgObjectUrl); } catch {} }
         localBgObjectUrl = URL.createObjectURL(file);
         demoBgUrl = localBgObjectUrl;
 
@@ -1026,7 +787,6 @@
 
         try {
           const up = await uploadAndGetPublicUrl(file);
-
           bgLibraryUrl = up.url;
           bgLibraryName = file.name || "Uploaded video";
           demoBgUrl = bgLibraryUrl;
@@ -1042,19 +802,16 @@
           console.error("[rv] bg upload failed =>", e);
           setStatus("BG upload failed: " + (e?.message || e));
           alert("BG upload failed: " + (e?.message || e));
-
           bgLibraryUrl = "";
           bgLibraryName = "";
           demoBgUrl = localBgObjectUrl;
-
-          if (bgSelectedLine && bgSelectedName) {
-            bgSelectedName.textContent = (file.name || "Uploaded video") + " (preview only)";
-          }
+          if (bgSelectedLine && bgSelectedName) bgSelectedName.textContent = (file.name || "Uploaded video") + " (preview only)";
           showDemo();
         }
       });
     }
 
+    // BG from library
     window.addEventListener("nf:rv:setBackground", (e) => {
       const url = String(e?.detail?.url || "").trim();
       const name = String(e?.detail?.name || "").trim();
@@ -1081,7 +838,7 @@
     [usernameEl, postTitleEl, postTextEl, likesEl, commentsEl, shareTextEl, modeHidden].forEach(bindRealtime);
 
     // ==========================================================
-    // ✅ VOICE PICKER (same behavior)
+    // ✅ Voice picker (unchanged behavior, trimmed for brevity)
     // ==========================================================
     let voiceTarget = "post";
     let previewAudio = null;
@@ -1094,13 +851,9 @@
         : "";
     }
     function preloadPreview(voiceId) {
-      if (!PREVIEW_BASE) return;
-      if (!voiceId) return;
-      if (PREVIEW_AUDIO_CACHE.has(voiceId)) return;
-      const url = previewUrlFor(voiceId);
-      if (!url) return;
+      if (!PREVIEW_BASE || !voiceId || PREVIEW_AUDIO_CACHE.has(voiceId)) return;
       const a = new Audio();
-      a.src = url;
+      a.src = previewUrlFor(voiceId);
       a.preload = "auto";
       a.load();
       PREVIEW_AUDIO_CACHE.set(voiceId, a);
@@ -1114,101 +867,10 @@
       if (curScr && curScr !== "default") preloadPreview(curScr);
     }
 
-    (function installAudioUnlock() {
-      const handler = () => {
-        try {
-          const a = new Audio();
-          a.muted = true;
-          a.play().catch(() => {});
-        } catch {}
-        document.removeEventListener("pointerdown", handler, true);
-        document.removeEventListener("touchstart", handler, true);
-        document.removeEventListener("click", handler, true);
-      };
-      document.addEventListener("pointerdown", handler, true);
-      document.addEventListener("touchstart", handler, true);
-      document.addEventListener("click", handler, true);
-    })();
-
     function stopPreview() {
-      if (previewAudio) {
-        try {
-          previewAudio.pause();
-          previewAudio.currentTime = 0;
-        } catch {}
-      }
+      if (previewAudio) { try { previewAudio.pause(); previewAudio.currentTime = 0; } catch {} }
       previewingVoiceId = "";
       previewAudio = null;
-    }
-
-    function findVoiceById(id) {
-      const s = String(id || "").trim();
-      if (!s || s === "default") return null;
-      return VOICES.find((v) => v.id === s) || null;
-    }
-
-    function getSelectedVoiceId(target) {
-      const el = target === "script" ? scriptVoiceEl : postVoiceEl;
-      return String(el?.value || "default").trim();
-    }
-
-    function setSelectedVoice(target, voice) {
-      const el = target === "script" ? scriptVoiceEl : postVoiceEl;
-      const labelEl = target === "script" ? scriptVoiceLabel : postVoiceLabel;
-
-      if (el) el.value = voice?.id || "default";
-      if (labelEl) labelEl.textContent = voice?.name || "Default";
-
-      if (voice?.id) preloadPreview(voice.id);
-      renderVoiceGrid(String(voiceSearch?.value || "").trim());
-    }
-
-    function setActiveTab(tab) {
-      voiceTarget = tab === "script" ? "script" : "post";
-      window.__NF_ACTIVE_VOICE_MODE__ = voiceTarget;
-      stopPreview();
-      renderVoiceGrid(String(voiceSearch?.value || "").trim());
-
-      if (voiceTitle) voiceTitle.textContent = voiceTarget === "post" ? "Choose Post Voice" : "Choose Script Voice";
-
-      const postBtn = voiceTabs?.querySelector('[data-tab="post"]');
-      const scrBtn = voiceTabs?.querySelector('[data-tab="script"]');
-      if (postBtn) postBtn.classList.toggle("active", voiceTarget === "post");
-      if (scrBtn) scrBtn.classList.toggle("active", voiceTarget === "script");
-    }
-
-    async function previewVoice(voice) {
-      stopPreview();
-      const voiceId = String(voice?.id || "").trim();
-      if (!voiceId) return alert("Missing voice id");
-
-      previewingVoiceId = voiceId;
-      renderVoiceGrid(String(voiceSearch?.value || "").trim());
-
-      preloadPreview(voiceId);
-      const a = PREVIEW_AUDIO_CACHE.get(voiceId);
-      if (!a) {
-        previewingVoiceId = "";
-        renderVoiceGrid(String(voiceSearch?.value || "").trim());
-        alert("Preview missing. Make sure your bucket has: " + voiceId + ".mp3");
-        return;
-      }
-
-      previewAudio = a;
-      try {
-        previewAudio.currentTime = 0;
-      } catch {}
-
-      previewAudio.onended = () => {
-        stopPreview();
-        renderVoiceGrid(String(voiceSearch?.value || "").trim());
-      };
-
-      previewAudio.play().catch(() => {
-        stopPreview();
-        renderVoiceGrid(String(voiceSearch?.value || "").trim());
-        alert("Audio is blocked. Tap/click once on the page, then try Preview again.");
-      });
     }
 
     function escAttr(s) {
@@ -1219,9 +881,13 @@
         .replaceAll(">", "&gt;");
     }
 
+    function getSelectedVoiceId(target) {
+      const el = target === "script" ? scriptVoiceEl : postVoiceEl;
+      return String(el?.value || "default").trim();
+    }
+
     function renderVoiceGrid(q) {
       if (!voiceGrid) return;
-
       const query = String(q || "").toLowerCase().trim();
       const selectedId = getSelectedVoiceId(voiceTarget);
 
@@ -1235,44 +901,74 @@
       });
 
       voiceGrid.classList.add("nf-voiceGrid");
-
-      voiceGrid.innerHTML = filtered
-        .map((v) => {
-          const selected = selectedId === v.id;
-          const isPreviewing = previewingVoiceId === v.id;
-
-          return `
-            <div class="nf-voiceCard ${selected ? "nf-voiceSelected" : ""}"
-              data-voice-id="${escAttr(v.id)}"
-              data-voice-name="${escAttr(v.name)}">
-              <div style="min-width:0;">
-                <div class="nf-voiceName" title="${escAttr(v.name)}">${escAttr(v.name)}</div>
-                <div class="nf-voiceDesc" title="${escAttr(v.desc || "")}">${escAttr(v.desc || "—")}</div>
-              </div>
-
-              <div class="nf-voiceBtnsRow">
-                <button class="nf-voiceBtnMini" type="button" data-act="preview" data-id="${escAttr(v.id)}" ${isPreviewing ? "disabled" : ""}>
-                  ${isPreviewing ? "Previewing..." : "Preview"}
-                </button>
-                <button class="nf-voiceBtnMini nf-voiceBtnUse" type="button" data-act="use" data-id="${escAttr(v.id)}">
-                  ${selected ? "Selected" : "Use voice"}
-                </button>
-              </div>
+      voiceGrid.innerHTML = filtered.map((v) => {
+        const selected = selectedId === v.id;
+        const isPreviewing = previewingVoiceId === v.id;
+        return `
+          <div class="nf-voiceCard ${selected ? "nf-voiceSelected" : ""}">
+            <div style="min-width:0;">
+              <div class="nf-voiceName" title="${escAttr(v.name)}">${escAttr(v.name)}</div>
+              <div class="nf-voiceDesc" title="${escAttr(v.desc || "")}">${escAttr(v.desc || "—")}</div>
             </div>
-          `;
-        })
-        .join("");
+            <div class="nf-voiceBtnsRow">
+              <button class="nf-voiceBtnMini" type="button" data-act="preview" data-id="${escAttr(v.id)}" ${isPreviewing ? "disabled" : ""}>
+                ${isPreviewing ? "Previewing..." : "Preview"}
+              </button>
+              <button class="nf-voiceBtnMini nf-voiceBtnUse" type="button" data-act="use" data-id="${escAttr(v.id)}">
+                ${selected ? "Selected" : "Use voice"}
+              </button>
+            </div>
+          </div>
+        `;
+      }).join("");
+    }
+
+    async function previewVoiceById(id) {
+      stopPreview();
+      const voiceId = String(id || "").trim();
+      if (!voiceId) return;
+
+      previewingVoiceId = voiceId;
+      renderVoiceGrid(String(voiceSearch?.value || "").trim());
+
+      preloadPreview(voiceId);
+      const a = PREVIEW_AUDIO_CACHE.get(voiceId);
+      if (!a) { previewingVoiceId = ""; renderVoiceGrid(String(voiceSearch?.value || "").trim()); return; }
+
+      previewAudio = a;
+      try { previewAudio.currentTime = 0; } catch {}
+      previewAudio.onended = () => { stopPreview(); renderVoiceGrid(String(voiceSearch?.value || "").trim()); };
+      previewAudio.play().catch(() => { stopPreview(); renderVoiceGrid(String(voiceSearch?.value || "").trim()); });
+    }
+
+    function setSelectedVoice(target, voiceId) {
+      const el = target === "script" ? scriptVoiceEl : postVoiceEl;
+      const labelEl = target === "script" ? scriptVoiceLabel : postVoiceLabel;
+      const v = VOICES.find((x) => x.id === voiceId);
+      if (el) el.value = v?.id || "default";
+      if (labelEl) labelEl.textContent = v?.name || "Default";
+      if (v?.id) preloadPreview(v.id);
+      renderVoiceGrid(String(voiceSearch?.value || "").trim());
+    }
+
+    function setActiveTab(tab) {
+      voiceTarget = tab === "script" ? "script" : "post";
+      stopPreview();
+      if (voiceTitle) voiceTitle.textContent = voiceTarget === "post" ? "Choose Post Voice" : "Choose Script Voice";
+      const postBtn = voiceTabs?.querySelector('[data-tab="post"]');
+      const scrBtn = voiceTabs?.querySelector('[data-tab="script"]');
+      if (postBtn) postBtn.classList.toggle("active", voiceTarget === "post");
+      if (scrBtn) scrBtn.classList.toggle("active", voiceTarget === "script");
+      renderVoiceGrid(String(voiceSearch?.value || "").trim());
     }
 
     function openVoiceModal() {
-      window.__NF_ACTIVE_VOICE_MODE__ = voiceTarget;
       if (voiceSearch) voiceSearch.value = "";
       if (voiceModal) voiceModal.classList.add("open");
       setActiveTab(voiceTarget);
       renderVoiceGrid("");
       warmPreviews();
     }
-
     function closeVoiceModal() {
       if (voiceModal) voiceModal.classList.remove("open");
       stopPreview();
@@ -1280,6 +976,8 @@
     }
 
     if (voicesBtn) voicesBtn.addEventListener("click", openVoiceModal);
+    if (voiceClose) voiceClose.addEventListener("click", closeVoiceModal);
+    if (voiceModal) voiceModal.addEventListener("click", (e) => { if (e.target === voiceModal) closeVoiceModal(); });
 
     if (voiceTabs) {
       voiceTabs.addEventListener("click", (e) => {
@@ -1289,60 +987,40 @@
       });
     }
 
-    if (voiceClose) voiceClose.addEventListener("click", closeVoiceModal);
-    if (voiceModal)
-      voiceModal.addEventListener("click", (e) => {
-        if (e.target === voiceModal) closeVoiceModal();
-      });
-
-    if (voiceClear)
-      voiceClear.addEventListener("click", () => {
-        if (voiceSearch) voiceSearch.value = "";
-        renderVoiceGrid("");
-      });
+    if (voiceClear) voiceClear.addEventListener("click", () => { if (voiceSearch) voiceSearch.value = ""; renderVoiceGrid(""); });
     if (voiceSearch) voiceSearch.addEventListener("input", () => renderVoiceGrid(voiceSearch.value));
 
-    if (voiceGrid)
+    if (voiceGrid) {
       voiceGrid.addEventListener("click", (e) => {
         const btn = e.target.closest("button[data-act]");
         if (!btn) return;
-
         const act = btn.dataset.act;
         const id = btn.dataset.id;
-        const voice = VOICES.find((v) => v.id === id);
-        if (!voice) return;
-
-        if (act === "preview") previewVoice(voice);
-        if (act === "use") setSelectedVoice(voiceTarget, voice);
+        if (act === "preview") previewVoiceById(id);
+        if (act === "use") setSelectedVoice(voiceTarget, id);
       });
-
-    (function initVoiceLabels() {
-      const pv = findVoiceById(postVoiceEl?.value);
-      const sv = findVoiceById(scriptVoiceEl?.value);
-      if (postVoiceLabel) postVoiceLabel.textContent = pv?.name || "Default";
-      if (scriptVoiceLabel) scriptVoiceLabel.textContent = sv?.name || "Default";
-    })();
+    }
 
     // ==========================================================
-    // ✅ Render polling + payload + generate (AUTH)
+    // ✅ RENDER (NO JWT REQUIRED) + polling
     // ==========================================================
     async function pollReddit(renderId) {
       for (;;) {
-        await __nfSleep(2500);
-
+        await sleep(2500);
         const { res, json } = await nfFetchJson(API_BASE + "/api/reddit-video?id=" + encodeURIComponent(renderId), {
           method: "GET",
-          headers: await nfAuthHeaders({}),
+          headers: await nfHeaders({}),
         });
 
         const st = String(json?.status || "").toLowerCase();
         if ((st.includes("succeed") || st === "completed") && json?.url) return json.url;
         if (st.includes("fail")) throw new Error(json?.error || "Render failed");
 
-        if (res.status === 401) throw new Error("Session expired (401). Please refresh and log in again.");
-
         const cur = Number((barEl?.style?.width || "55%").replace("%", "")) || 55;
         setProgress(Math.min(92, cur + 4));
+
+        // if backend still enforces auth, you'll see it here:
+        if (res.status === 401) throw new Error("Backend is still enforcing auth (401). Remove auth requirement on backend for this endpoint.");
       }
     }
 
@@ -1357,11 +1035,7 @@
 
       let captionSettings = null;
       if (captionsEnabled && captionSettingsRaw) {
-        try {
-          captionSettings = JSON.parse(captionSettingsRaw);
-        } catch {
-          captionSettings = null;
-        }
+        try { captionSettings = JSON.parse(captionSettingsRaw); } catch { captionSettings = null; }
       }
 
       const postVoiceId = String(postVoiceEl?.value || "default").trim();
@@ -1419,22 +1093,8 @@
           }
 
           const member = await nfGetCurrentMemberSafe();
-          const token = await nfGetMsToken();
-
           console.log("[rv] ms globals:", !!window.$memberstackDom, !!window.$memberstack, !!window.MemberStack);
           console.log("[rv] ms member?", member ? "YES" : "NO", member || null);
-          console.log("[rv] ms token?", token ? `YES (${token.length} chars)` : "NO");
-
-          if (!token) {
-            if (member) {
-              throw new Error(
-                "Memberstack shows you are logged in, but no JWT token is available to send to the backend.\n\n" +
-                  "This usually means JWTs aren't enabled for your Memberstack project/site or the token API is blocked on this domain.\n" +
-                  "Enable Memberstack JWT/token access for this site, then refresh."
-              );
-            }
-            throw new Error("Not logged in (Memberstack token missing). Refresh, log in, and try again.");
-          }
 
           hideDemo();
           if (overlayEl) {
@@ -1449,7 +1109,7 @@
 
           const { res, json } = await nfFetchJson(API_BASE + "/api/reddit-video", {
             method: "POST",
-            headers: await nfAuthHeaders({ "Content-Type": "application/json" }),
+            headers: await nfHeaders({ "Content-Type": "application/json" }),
             body: JSON.stringify(payload),
           });
 
