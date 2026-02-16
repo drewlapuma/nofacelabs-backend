@@ -364,7 +364,7 @@
     /* Inter + slightly heavier like screenshot #2 */
     .nf-rvUsername{
       font-weight: 525;
-      font-size: calc(34px * var(--scale));
+      font-size: calc(28px * var(--scale));
       line-height:1.05;
       white-space:nowrap;
       overflow:hidden;
