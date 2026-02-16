@@ -51,7 +51,9 @@ module.exports = async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ ok: false, error: "METHOD_NOT_ALLOWED" });
 
   const dbId = String(req.query?.id || "").trim();
-  const kind = String(req.query?.kind || "").trim().toLowerCase(); // "main" | "caption" | "composite"
+  let kind = String(req.query?.kind || "").trim().toLowerCase(); // "main" | "caption" | "composite" | "reddit"
+  // ✅ alias: reddit renders are your "main" render for the row
+  if (kind === "reddit") kind = "main";
   if (!dbId) return res.status(200).json({ ok: true, skipped: "MISSING_DB_ID" });
 
   const sb = getAdminSupabase();
