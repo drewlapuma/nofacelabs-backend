@@ -1,7 +1,10 @@
 // api/reddit-video.js (CommonJS, Node 18+)
-// ✅ Now writes to Supabase "renders" table so Reddit videos appear in /myvideos
+// ✅ Writes to Supabase "renders" table so Reddit videos appear in /myvideos
+// ✅ CORS updated to allow X-NF-Member-Id / X-NF-Member-Email (fixes your preflight error)
+// ✅ Auth updated: accepts x-nf-member-id header FIRST (no JWT required), falls back to Bearer token if present
+//
 // Flow:
-// 1) Verify Memberstack token (Authorization: Bearer <token>)
+// 1) Identify member_id (x-nf-member-id OR Authorization: Bearer <token>)
 // 2) Insert row into renders (status=rendering, kind=reddit)
 // 3) Start Creatomate with webhook => /api/creatomate-webhook?id=<dbId>&kind=main
 // 4) Update row with render_id
@@ -46,7 +49,12 @@ function setCors(req, res) {
   }
 
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+
+  // ✅ FIX: allow your custom headers in preflight
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization, X-NF-Member-Id, X-NF-Member-Email"
+  );
 }
 
 function json(res, status, body) {
@@ -88,7 +96,21 @@ function isExpiredJwtError(err) {
   return false;
 }
 
+function getHeader(req, name) {
+  // Node lowercases header keys
+  const key = String(name || "").toLowerCase();
+  return req.headers[key];
+}
+
 async function requireMemberId(req) {
+  // ✅ NO-JWT path: accept member id from header if provided
+  const headerId = getHeader(req, "x-nf-member-id");
+  if (headerId) {
+    const id = String(headerId).trim();
+    if (id) return id;
+  }
+
+  // ✅ fallback (optional): Bearer token verification if you enable it later
   const token = getBearerToken(req);
   if (!token) {
     const e = new Error("MISSING_AUTH");
@@ -306,7 +328,6 @@ async function transformMp3WithFfmpeg(mp3Buffer, speed, volume) {
   fs.writeFileSync(tmpIn, mp3Buffer);
 
   const afilter = `atempo=${sp},volume=${vol}`;
-
   const args = ["-y", "-i", tmpIn, "-vn", "-af", afilter, "-codec:a", "libmp3lame", "-b:a", "192k", tmpOut];
 
   await new Promise((resolve, reject) => {
@@ -442,10 +463,9 @@ function mp3DurationSeconds(buf) {
 }
 
 /* ----------------- ✅ buildModifications() ----------------- */
-// (your existing buildModifications is unchanged, kept as-is)
+// KEEP your working function body here (unchanged)
 async function buildModifications(body) {
   // ... KEEP YOUR EXISTING buildModifications CONTENT ...
-  // (I’m not repeating it here to avoid messing with your working modifications logic.)
   throw new Error("buildModifications() placeholder — paste your existing function body here unchanged.");
 }
 
@@ -473,7 +493,7 @@ module.exports = async function handler(req, res) {
 
     if (req.method !== "POST") return json(res, 405, { ok: false, error: "Use POST or GET" });
 
-    // ✅ must be logged in
+    // ✅ must be logged in (header member id OR bearer token)
     const member_id = await requireMemberId(req);
     const sb = getAdminSupabase();
 
@@ -577,11 +597,10 @@ module.exports = async function handler(req, res) {
       })
       .eq("id", dbId);
 
-    // ✅ return dbId so frontend can show “in progress” instantly if you want
     return json(res, 200, {
       ok: true,
-      id: dbId,          // renders.id (uuid)
-      renderId,          // creatomate render id
+      id: dbId,     // renders.id (uuid)
+      renderId,     // creatomate render id
       status: start?.status || "queued",
     });
   } catch (err) {
