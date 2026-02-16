@@ -363,7 +363,7 @@
 
     /* Inter + slightly heavier like screenshot #2 */
     .nf-rvUsername{
-      font-weight: 525;
+      font-weight: 515;
       font-size: calc(30px * var(--scale));
       line-height:1.05;
       white-space:nowrap;
@@ -388,7 +388,7 @@
 
     /* slightly heavier body, but not super bold */
     .nf-rvBody{
-      font-weight: 525;
+      font-weight: 515;
       font-size: calc(27.7px * var(--scale));
       line-height:1.35;
       white-space:pre-wrap;
@@ -396,7 +396,7 @@
       word-break: break-word;
 
       /* tighten space to footer */
-      margin-bottom: calc(-7px * var(--scale));
+      margin-bottom: calc(-8px * var(--scale));
     }
 
     /* reduce the gap between body and footer */
