@@ -155,6 +155,7 @@
     const modeHidden = document.getElementById("rvMode");
     const postTitleEl = document.getElementById("rvPostTitle");
     const scriptEl = document.getElementById("rvScript");
+    const videoNameEl = document.getElementById("nfVideoName");
 
     const postVoiceEl = document.getElementById("rvPostVoice");
     const scriptVoiceEl = document.getElementById("rvScriptVoice");
@@ -1217,6 +1218,11 @@
 
       const postOpts = window.nfGetVoiceOpts("post", postVoiceId);
       const scriptOpts = window.nfGetVoiceOpts("script", scriptVoiceId);
+      // ✅ Get custom video name
+      const videoName =
+      String(videoNameEl?.value || "").trim() ||
+      "Untitled reddit video";
+
 
       const payload = {
         username: String(readAnyText(usernameEl)).trim(),
@@ -1241,6 +1247,9 @@
         postVoiceVolume: postOpts.volume,
         scriptVoiceSpeed: scriptOpts.speed,
         scriptVoiceVolume: scriptOpts.volume,
+
+        video_name: videoName,
+        videoName: videoName,
       };
 
       if (captionsEnabled && captionStyle && captionSettings) {
