@@ -363,7 +363,7 @@
 
     /* Inter + slightly heavier like screenshot #2 */
     .nf-rvUsername{
-      font-weight: 800;
+      font-weight: 700;
       font-size: calc(34px * var(--scale));
       line-height:1.05;
       white-space:nowrap;
@@ -388,7 +388,7 @@
 
     /* slightly heavier body, but not super bold */
     .nf-rvBody{
-      font-weight: 650;
+      font-weight: 600;
       font-size: calc(29.7px * var(--scale));
       line-height:1.35;
       white-space:pre-wrap;
