@@ -1,6 +1,6 @@
 (function () {
-  if (window.__nf_reddit_preview_v13_full__) return;
-  window.__nf_reddit_preview_v13_full__ = true;
+  if (window.__nf_reddit_preview_v14_tokenfix__) return;
+  window.__nf_reddit_preview_v14_tokenfix__ = true;
 
   const API_BASE = "https://nofacelabs-backend.vercel.app";
   const SIGNED_UPLOAD_ENDPOINT = API_BASE + "/api/user-video-upload-url";
@@ -65,23 +65,74 @@
   const PREVIEW_BASE = "https://pub-178d4bb2cbf54f3f92bc03819410134c.r2.dev";
 
   // ==========================================================
-  // ✅ AUTH (Memberstack token) + helpers (FIXED + WAIT)
+  // ✅ AUTH (Memberstack) — HARDENED TOKEN + MEMBER DETECTION
   // ==========================================================
   let __nfTokenCache = { token: "", at: 0 };
+  let __nfMemberCache = { member: null, at: 0 };
 
   function __nfIsJwtLike(t) {
-    if (!t) return false;
-    const s = String(t).trim();
+    const s = String(t || "").trim();
     return s.split(".").length === 3 && s.length > 40;
   }
 
-  async function __nfWaitForMemberstack(maxMs = 4000) {
+  function __nfPickTokenFromAny(obj) {
+    // attempt a bunch of known shapes
+    const cand = [
+      obj?.data?.token,
+      obj?.data?.accessToken,
+      obj?.data?.jwt,
+      obj?.data?.idToken,
+      obj?.token,
+      obj?.accessToken,
+      obj?.jwt,
+      obj?.idToken,
+    ]
+      .map((x) => (x == null ? "" : String(x).trim()))
+      .find((x) => __nfIsJwtLike(x));
+
+    return cand || "";
+  }
+
+  async function __nfSleep(ms) {
+    return new Promise((r) => setTimeout(r, ms));
+  }
+
+  async function __nfWaitForMemberstack(maxMs = 8000) {
     const start = Date.now();
     while (Date.now() - start < maxMs) {
-      if (window.$memberstackDom || window.$memberstack || window.MemberStack) return true;
-      await new Promise((r) => setTimeout(r, 50));
+      if (window.$memberstackDom) return true;
+      await __nfSleep(50);
     }
     return false;
+  }
+
+  async function nfGetCurrentMemberSafe() {
+    try {
+      if (__nfMemberCache.member && Date.now() - __nfMemberCache.at < 10_000) {
+        return __nfMemberCache.member;
+      }
+    } catch {}
+
+    const msd = window.$memberstackDom;
+    if (!msd || typeof msd.getCurrentMember !== "function") return null;
+
+    try {
+      // some installs expose onReady as a promise
+      if (msd.onReady) {
+        try {
+          await msd.onReady;
+        } catch {}
+      }
+    } catch {}
+
+    try {
+      const res = await msd.getCurrentMember();
+      const member = res?.data || res || null;
+      __nfMemberCache = { member, at: Date.now() };
+      return member;
+    } catch {
+      return null;
+    }
   }
 
   async function nfGetMsToken() {
@@ -91,126 +142,63 @@
       }
     } catch {}
 
-    await __nfWaitForMemberstack(4000);
+    await __nfWaitForMemberstack(8000);
 
-    // 1) $memberstackDom (MS v2 DOM)
+    const msd = window.$memberstackDom;
+    if (!msd) return "";
+
+    // Ensure ready
     try {
-      const msd = window.$memberstackDom;
-      if (msd) {
-        if (typeof msd?.onReady === "function") {
-          // some versions: onReady is a promise
-          try {
-            await msd.onReady;
-          } catch {}
-        }
-
-        if (typeof msd.getToken === "function") {
-          const { data } = await msd.getToken();
-          const t = String(data?.token || "").trim();
-          if (t) {
-            __nfTokenCache = { token: t, at: Date.now() };
-            return t;
-          }
-        }
-
-        if (typeof msd.getMemberToken === "function") {
-          const { data } = await msd.getMemberToken();
-          const t = String(data?.token || data?.accessToken || "").trim();
-          if (t) {
-            __nfTokenCache = { token: t, at: Date.now() };
-            return t;
-          }
-        }
-
-        if (typeof msd.getAuthToken === "function") {
-          const { data } = await msd.getAuthToken();
-          const t = String(data?.token || data?.accessToken || "").trim();
-          if (t) {
-            __nfTokenCache = { token: t, at: Date.now() };
-            return t;
-          }
-        }
-
-        if (typeof msd.getCurrentMember === "function") {
-          const { data } = await msd.getCurrentMember();
-          const maybe = String(data?.token || data?.accessToken || "").trim();
-          if (maybe && __nfIsJwtLike(maybe)) {
-            __nfTokenCache = { token: maybe, at: Date.now() };
-            return maybe;
-          }
-        }
-      }
-    } catch {}
-
-    // 2) $memberstack (older/global)
-    try {
-      const ms = window.$memberstack;
-      if (ms) {
-        if (typeof ms.getToken === "function") {
-          const r = await ms.getToken();
-          const t = String(r?.data?.token || r?.token || "").trim();
-          if (t) {
-            __nfTokenCache = { token: t, at: Date.now() };
-            return t;
-          }
-        }
-        if (typeof ms.getMemberToken === "function") {
-          const r = await ms.getMemberToken();
-          const t = String(r?.data?.token || r?.data?.accessToken || r?.token || "").trim();
-          if (t) {
-            __nfTokenCache = { token: t, at: Date.now() };
-            return t;
-          }
-        }
-      }
-    } catch {}
-
-    // 3) MemberStack fallback
-    try {
-      const MS = window.MemberStack;
-      if (MS) {
-        if (typeof MS.onReady === "function") {
-          await new Promise((resolve) => MS.onReady(resolve));
-        }
-        if (typeof MS.getToken === "function") {
-          const t = String((await MS.getToken()) || "").trim();
-          if (t) {
-            __nfTokenCache = { token: t, at: Date.now() };
-            return t;
-          }
-        }
-      }
-    } catch {}
-
-    // 4) localStorage JWT-like fallback
-    try {
-      const keys = Object.keys(localStorage || {});
-      const preferred = keys.filter((k) => {
-        const s = k.toLowerCase();
-        return s.includes("memberstack") || s.includes("ms_") || s.includes("token") || s.includes("auth");
-      });
-      const scan = preferred.length ? preferred : keys;
-
-      for (const k of scan) {
-        const raw = localStorage.getItem(k);
-        if (!raw) continue;
-
+      if (msd.onReady) {
         try {
-          const j = JSON.parse(raw);
-          const cand = String(j?.token || j?.accessToken || j?.idToken || "").trim();
-          if (cand && __nfIsJwtLike(cand)) {
-            __nfTokenCache = { token: cand, at: Date.now() };
-            return cand;
-          }
-        } catch {
-          const cand = String(raw || "").trim();
-          if (cand && __nfIsJwtLike(cand)) {
-            __nfTokenCache = { token: cand, at: Date.now() };
-            return cand;
-          }
-        }
+          await msd.onReady;
+        } catch {}
       }
     } catch {}
+
+    // Aggressive retries — MS sometimes returns empty token on first calls
+    for (let attempt = 0; attempt < 25; attempt++) {
+      // 1) getToken (most common)
+      try {
+        if (typeof msd.getToken === "function") {
+          const r = await msd.getToken();
+          const t = __nfPickTokenFromAny(r);
+          if (t) {
+            __nfTokenCache = { token: t, at: Date.now() };
+            return t;
+          }
+        }
+      } catch {}
+
+      // 2) getMemberToken / getAuthToken (varies by install)
+      try {
+        if (typeof msd.getMemberToken === "function") {
+          const r = await msd.getMemberToken();
+          const t = __nfPickTokenFromAny(r);
+          if (t) {
+            __nfTokenCache = { token: t, at: Date.now() };
+            return t;
+          }
+        }
+      } catch {}
+
+      try {
+        if (typeof msd.getAuthToken === "function") {
+          const r = await msd.getAuthToken();
+          const t = __nfPickTokenFromAny(r);
+          if (t) {
+            __nfTokenCache = { token: t, at: Date.now() };
+            return t;
+          }
+        }
+      } catch {}
+
+      // 3) If member exists, sometimes token becomes available right after
+      await nfGetCurrentMemberSafe();
+
+      // wait a bit and retry
+      await __nfSleep(160);
+    }
 
     return "";
   }
@@ -235,12 +223,9 @@
   }
 
   // ==========================================================
-  // ✅ MAIN
+  // ✅ MAIN APP
   // ==========================================================
-  async function boot() {
-    // ✅ wait a moment so Memberstack is ready (fixes "ms token? NO" while logged in)
-    await __nfWaitForMemberstack(1500);
-
+  function boot() {
     // ---------- DOM ----------
     const msgEl = document.getElementById("rvMsg");
     const statusEl = document.getElementById("rvStatus");
@@ -258,10 +243,8 @@
     const postVoiceLabel = document.getElementById("rvPostVoiceLabel");
     const scriptVoiceLabel = document.getElementById("rvScriptVoiceLabel");
 
-    // ✅ ONE voices button
     const voicesBtn = document.getElementById("rvVoicesBtn");
 
-    // ✅ Voice modal
     const voiceModal = document.getElementById("rvVoiceModal");
     const voiceClose = document.getElementById("rvVoiceClose");
     const voiceTitle = document.getElementById("rvVoiceTitle");
@@ -277,7 +260,6 @@
     const genBtn = document.getElementById("rvGenerate");
     const dlBtn = document.getElementById("rvDownload");
 
-    // buttons
     const pfpUploadBtn = document.getElementById("rvPfpUploadBtn");
     const pfpFileEl = document.getElementById("rvPfpFile");
     const openPfpLibBtn = document.getElementById("rvOpenPfpLib");
@@ -287,15 +269,12 @@
     const bgSelectedLine = document.getElementById("rvBgSelectedLine");
     const bgSelectedName = document.getElementById("rvBgSelectedName");
 
-    // segmented (only mode stays on page now)
     const modeSeg = document.getElementById("rvModeSeg");
     const modeTrack = document.getElementById("rvModeTrack");
 
-    // hidden tone/len (still used in payload)
     const toneHidden = document.getElementById("rvTone");
     const lenHidden = document.getElementById("rvLen");
 
-    // ✅ Script generator modal
     const genScriptBtn = document.getElementById("rvGenScriptBtn");
     const scriptModal = document.getElementById("rvScriptModal");
     const scriptClose = document.getElementById("rvScriptClose");
@@ -307,7 +286,6 @@
     const lenSegM = document.getElementById("rvLenSegModal");
     const lenTrackM = document.getElementById("rvLenTrackModal");
 
-    // optional IDs (may not exist)
     const postTextEl = document.getElementById("rvPostText");
     const pfpUrlEl = document.getElementById("rvPfpUrl");
 
@@ -316,7 +294,6 @@
     let localBgObjectUrl = "";
     let demoBgUrl = DEMO_GAMEPLAY_URL;
 
-    // ✅ render-safe background URL (must be public https)
     let bgLibraryUrl = "";
     let bgLibraryName = "";
 
@@ -392,7 +369,6 @@
       const token = await nfGetMsToken();
       if (!token) throw new Error("Not logged in (missing Memberstack token). Please refresh + log in again.");
 
-      // ✅ FIXED: call SIGNED_UPLOAD_ENDPOINT (NOT /api/reddit-video)
       const { res, json } = await nfFetchJson(SIGNED_UPLOAD_ENDPOINT, {
         method: "POST",
         headers: await nfAuthHeaders({ "Content-Type": "application/json" }),
@@ -405,7 +381,7 @@
       if (!json?.signedUrl || !json?.bucket || !json?.path) {
         throw new Error("Signed upload response missing signedUrl/bucket/path.");
       }
-      return json; // { bucket, path, signedUrl }
+      return json;
     }
 
     async function putFileToSignedUrl(signedUrl, file) {
@@ -443,35 +419,17 @@
         .nf-rvWrap{ position:absolute; inset:0; z-index:5000; display:block; pointer-events:none; }
         .nf-rvCard{ pointer-events:none; }
         .nf-rvDemoVideo{ pointer-events:auto; }
-
-        .nf-rvDemoVideo{
-          position:absolute; inset:0;
-          width:100%; height:100%;
-          object-fit:cover;
-          object-position:center;
-          background:#000;
-          display:block;
-        }
-
+        .nf-rvDemoVideo{ position:absolute; inset:0; width:100%; height:100%; object-fit:cover; object-position:center; background:#000; display:block; }
         .nf-rvCard{
-          position:absolute;
-          left:50%;
-          top:50%;
-          transform:translate(-50%,-50%);
+          position:absolute; left:50%; top:50%; transform:translate(-50%,-50%);
           width: var(--cardW);
-
-          height:auto;
-          min-height: var(--cardMinH);
-          max-height: var(--cardMaxH);
-
+          height:auto; min-height: var(--cardMinH); max-height: var(--cardMaxH);
           border-radius: calc(30px * var(--scale));
           overflow:hidden;
           box-shadow: 0 18px 55px rgba(0,0,0,.35);
           font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial;
           box-sizing:border-box;
-
-          display:grid;
-          grid-template-rows: auto 1fr auto;
+          display:grid; grid-template-rows: auto 1fr auto;
           padding: calc(24px * var(--scale));
           gap: calc(12px * var(--scale));
         }
@@ -481,37 +439,22 @@
         .nf-rvHeader{ display:flex; gap: calc(18px * var(--scale)); align-items:flex-start; min-width:0; }
         .nf-rvPfp{ width: calc(72px * var(--scale)); height: calc(72px * var(--scale)); border-radius:999vmin; overflow:hidden; flex:0 0 auto; background:#ddd; }
         .nf-rvPfp img{ width:100%; height:100%; object-fit:cover; display:block; }
-
         .nf-rvHeaderText{ flex:1 1 auto; min-width:0; }
         .nf-rvUsername{ font-weight:600; font-size: calc(34px * var(--scale)); line-height:1.05; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-
         .nf-rvFlairs{ margin-top: calc(6px * var(--scale)); display:flex; gap: calc(6px * var(--scale)); align-items:center; flex-wrap:nowrap; overflow:hidden; }
         .nf-rvFlairs img{ height: calc(24px * var(--scale)); width:auto; display:block; }
-
-        .nf-rvBody{
-          font-weight:600;
-          font-size: calc(29.7px * var(--scale));
-          line-height:1.35;
-          white-space:pre-wrap;
-          overflow:hidden;
-          word-break: break-word;
-        }
-
+        .nf-rvBody{ font-weight:600; font-size: calc(29.7px * var(--scale)); line-height:1.35; white-space:pre-wrap; overflow:hidden; word-break: break-word; }
         .nf-rvFooter{
-          display:flex;
-          align-items:flex-end;
-          justify-content:space-between;
+          display:flex; align-items:flex-end; justify-content:space-between;
           gap: calc(14px * var(--scale));
           color: rgba(180,176,176,1);
-          padding-top: calc(2px * var(--scale));
-          padding-bottom: 0;
+          padding-top: calc(2px * var(--scale)); padding-bottom: 0;
         }
         .nf-rvLeftActions{ display:flex; align-items:center; gap: calc(22px * var(--scale)); }
         .nf-rvAction{ display:flex; align-items:center; gap: calc(10px * var(--scale)); font-weight:400; font-size: calc(31px * var(--scale)); line-height:1; white-space:nowrap; }
         .nf-rvIcon{ width: calc(24px * var(--scale)); height: calc(24px * var(--scale)); display:block; opacity:0.95; }
         .nf-rvShare{ display:flex; align-items:center; gap: calc(10px * var(--scale)); font-weight:500; font-size: calc(29px * var(--scale)); white-space:nowrap; }
         .nf-rvIconHeart{ stroke: currentColor; stroke-width: 6; fill: none; stroke-linejoin: round; }
-
         .nf-rvOverlayHideText{ color: transparent !important; }
       `;
       document.head.appendChild(s);
@@ -734,7 +677,7 @@
       const minH = Math.round(frameH * 0.215);
       const maxH = Math.round(frameH * 0.62);
 
-      const scaleW = cardW / REF_CARD_W;
+      const scaleW = cardW / (REF_CARD_W || 1);
       let scale = scaleW * 0.9;
       scale = Math.max(0.45, Math.min(1.25, scale));
 
@@ -1011,7 +954,6 @@
     // Upload PFP button click
     if (pfpUploadBtn && pfpFileEl) pfpUploadBtn.addEventListener("click", () => pfpFileEl.click());
 
-    // ✅ PFP upload
     if (pfpFileEl) {
       pfpFileEl.addEventListener("change", async () => {
         const file = pfpFileEl.files?.[0];
@@ -1046,7 +988,6 @@
       });
     }
 
-    // modal event bridge
     function fire(name, detail) {
       window.dispatchEvent(new CustomEvent(name, { detail: detail || {} }));
     }
@@ -1062,7 +1003,6 @@
       updateCard();
     });
 
-    // ✅ Background upload
     if (bgFileEl) {
       bgFileEl.addEventListener("change", async () => {
         const file = bgFileEl.files?.[0];
@@ -1115,7 +1055,6 @@
       });
     }
 
-    // ✅ Library background sets render-safe URL
     window.addEventListener("nf:rv:setBackground", (e) => {
       const url = String(e?.detail?.url || "").trim();
       const name = String(e?.detail?.name || "").trim();
@@ -1133,7 +1072,6 @@
       setStatus("Background ready ✓");
     });
 
-    // realtime updates
     function bindRealtime(el) {
       if (!el) return;
       el.addEventListener("input", updateCard);
@@ -1143,12 +1081,11 @@
     [usernameEl, postTitleEl, postTextEl, likesEl, commentsEl, shareTextEl, modeHidden].forEach(bindRealtime);
 
     // ==========================================================
-    // ✅ VOICE PICKER (unchanged)
+    // ✅ VOICE PICKER (same behavior)
     // ==========================================================
     let voiceTarget = "post";
     let previewAudio = null;
     let previewingVoiceId = "";
-
     const PREVIEW_AUDIO_CACHE = new Map();
 
     function previewUrlFor(voiceId) {
@@ -1156,22 +1093,18 @@
         ? PREVIEW_BASE.replace(/\/$/, "") + "/" + encodeURIComponent(voiceId) + ".mp3"
         : "";
     }
-
     function preloadPreview(voiceId) {
       if (!PREVIEW_BASE) return;
       if (!voiceId) return;
       if (PREVIEW_AUDIO_CACHE.has(voiceId)) return;
-
       const url = previewUrlFor(voiceId);
       if (!url) return;
-
       const a = new Audio();
       a.src = url;
       a.preload = "auto";
       a.load();
       PREVIEW_AUDIO_CACHE.set(voiceId, a);
     }
-
     function warmPreviews() {
       if (!PREVIEW_BASE) return;
       VOICES.slice(0, 10).forEach((v) => preloadPreview(v.id));
@@ -1391,11 +1324,11 @@
     })();
 
     // ==========================================================
-    // ✅ Render polling + payload + generate (AUTH ADDED)
+    // ✅ Render polling + payload + generate (AUTH)
     // ==========================================================
     async function pollReddit(renderId) {
       for (;;) {
-        await new Promise((r) => setTimeout(r, 2500));
+        await __nfSleep(2500);
 
         const { res, json } = await nfFetchJson(API_BASE + "/api/reddit-video?id=" + encodeURIComponent(renderId), {
           method: "GET",
@@ -1485,9 +1418,21 @@
             throw new Error("Profile picture is still preview-only. Wait for upload to finish.");
           }
 
+          const member = await nfGetCurrentMemberSafe();
           const token = await nfGetMsToken();
-          console.log("[rv] ms token?", token ? `yes (${token.length} chars)` : "NO");
+
+          console.log("[rv] ms globals:", !!window.$memberstackDom, !!window.$memberstack, !!window.MemberStack);
+          console.log("[rv] ms member?", member ? "YES" : "NO", member || null);
+          console.log("[rv] ms token?", token ? `YES (${token.length} chars)` : "NO");
+
           if (!token) {
+            if (member) {
+              throw new Error(
+                "Memberstack shows you are logged in, but no JWT token is available to send to the backend.\n\n" +
+                  "This usually means JWTs aren't enabled for your Memberstack project/site or the token API is blocked on this domain.\n" +
+                  "Enable Memberstack JWT/token access for this site, then refresh."
+              );
+            }
             throw new Error("Not logged in (Memberstack token missing). Refresh, log in, and try again.");
           }
 
@@ -1501,14 +1446,6 @@
           setProgress(20);
 
           const payload = buildPayload();
-
-          console.log("[rv] voice opts check =>", {
-            postVoice: payload.postVoice,
-            postVoiceSpeed: payload.postVoiceSpeed,
-            scriptVoice: payload.scriptVoice,
-            scriptVoiceSpeed: payload.scriptVoiceSpeed,
-          });
-          console.log("[rv] payload =>", payload);
 
           const { res, json } = await nfFetchJson(API_BASE + "/api/reddit-video", {
             method: "POST",
@@ -1566,7 +1503,7 @@
   }
 
   if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", () => boot());
+    document.addEventListener("DOMContentLoaded", boot);
   } else {
     boot();
   }
