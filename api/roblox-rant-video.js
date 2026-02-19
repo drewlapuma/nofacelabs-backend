@@ -448,16 +448,18 @@ async function transformMp3WithFfmpeg(mp3Buffer, speed, pitch, volume) {
 
   fs.writeFileSync(tmpIn, mp3Buffer);
 
+  // ✅ Use explicit sample rate (mp3 is typically 44100; ElevenLabs returns 44100 in your logs)
+  const SR = 44100;
+
   // Pitch shift preserving duration:
-  // asetrate=sample_rate*pitch, aresample=sample_rate, atempo=(speed/pitch)
+  // asetrate=SR*pitch, aresample=SR, atempo=(speed/pitch)
   const tempo = sp / pi;
   const tempoParts = atempoChain(tempo);
   const tempoFilter = tempoParts.map((x) => `atempo=${x}`).join(",");
 
-  // Build filter
   const afilter = [
-    `asetrate=sample_rate*${pi}`,
-    `aresample=sample_rate`,
+    `asetrate=${Math.round(SR * pi)}`,
+    `aresample=${SR}`,
     tempoFilter,
     `volume=${vol}`,
   ].filter(Boolean).join(",");
@@ -479,7 +481,7 @@ async function transformMp3WithFfmpeg(mp3Buffer, speed, pitch, volume) {
     p.on("error", reject);
     p.on("close", (code) => {
       if (code === 0) return resolve();
-      reject(new Error(`ffmpeg failed (code ${code}): ${err.slice(-1200)}`));
+      reject(new Error(`ffmpeg failed (code ${code}): ${err.slice(-2000)}`));
     });
   });
 
@@ -490,6 +492,7 @@ async function transformMp3WithFfmpeg(mp3Buffer, speed, pitch, volume) {
 
   return outBuf;
 }
+
 
 // -------------------- buildModifications (Roblox Rants) --------------------
 async function buildModifications(body) {
