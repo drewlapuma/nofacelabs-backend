@@ -17,11 +17,15 @@ function setCors(req, res) {
   }
 
   res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+
+  // ✅ IMPORTANT: allow your Memberstack headers too (fixes your earlier CORS error)
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization, x-nf-member-id, x-nf-member-email"
+  );
 }
 
 async function readJson(req) {
-  // Works reliably on Vercel Node serverless
   if (req.body && typeof req.body === "object") return req.body;
 
   const chunks = [];
@@ -51,30 +55,25 @@ function safeName(name) {
 module.exports = async function handler(req, res) {
   setCors(req, res);
 
-  if (req.method === "OPTIONS") {
-    // Preflight
-    return json(res, 200, { ok: true });
-  }
-
-  if (req.method !== "POST") {
-    return json(res, 405, { error: "Method not allowed" });
-  }
+  if (req.method === "OPTIONS") return json(res, 200, { ok: true });
+  if (req.method !== "POST") return json(res, 405, { ok: false, error: "Method not allowed" });
 
   const body = await readJson(req);
-  if (!body) return json(res, 400, { error: "Missing body" });
-  if (body === "__INVALID__") return json(res, 400, { error: "Invalid JSON" });
+  if (!body) return json(res, 400, { ok: false, error: "Missing body" });
+  if (body === "__INVALID__") return json(res, 400, { ok: false, error: "Invalid JSON" });
 
-  const { fileName, fileSize, contentType } = body;
+  // ✅ accept both spellings (your JS might send either)
+  const fileName = body.fileName || body.filename || body.name;
+  const fileSize = body.fileSize || body.size;
+  const contentType = body.contentType || body.type || "video/mp4";
 
   if (!fileName || !fileSize) {
-    return json(res, 400, { error: "fileName and fileSize are required" });
+    return json(res, 400, { ok: false, error: "fileName and fileSize are required" });
   }
 
-  // ✅ Server-only env vars
   const SUPABASE_URL = process.env.SUPABASE_URL;
   const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-  // ✅ bucket: env var first, fallback to your real bucket name
   const BUCKET =
     process.env.SUPABASE_UPLOAD_BUCKET ||
     process.env.USER_VIDEOS_BUCKET ||
@@ -82,6 +81,7 @@ module.exports = async function handler(req, res) {
 
   if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
     return json(res, 500, {
+      ok: false,
       error: "Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY env vars",
     });
   }
@@ -90,29 +90,60 @@ module.exports = async function handler(req, res) {
     auth: { persistSession: false },
   });
 
-  // Path in bucket
   const safe = safeName(fileName);
   const ext = (safe.split(".").pop() || "mp4").toLowerCase();
   const base = safe.replace(/\.[^/.]+$/, "");
   const path = `uploads/${Date.now()}_${base}.${ext}`;
 
-  // ✅ Create signed upload URL (client will PUT to signedUrl)
+  // ✅ Signed upload URL (client will PUT to it)
   const { data, error } = await supabaseAdmin.storage
     .from(BUCKET)
     .createSignedUploadUrl(path);
 
   if (error || !data?.signedUrl) {
     return json(res, 500, {
+      ok: false,
       error: "Failed to create signed upload URL",
       details: error?.message || null,
     });
   }
 
-  // IMPORTANT: client uses PUT to signedUrl, so return signedUrl
+  // ✅ Public URL (works if bucket is public)
+  let publicUrl = null;
+  try {
+    const pub = supabaseAdmin.storage.from(BUCKET).getPublicUrl(path);
+    publicUrl = pub?.data?.publicUrl || null;
+  } catch {
+    publicUrl = null;
+  }
+
+  // ✅ Signed download URL fallback (works even if bucket is private)
+  // Set long enough for rendering to complete (ex: 24 hours)
+  let downloadUrl = null;
+  try {
+    const expiresIn = 60 * 60 * 24; // 24h
+    const signedGet = await supabaseAdmin.storage.from(BUCKET).createSignedUrl(path, expiresIn);
+    downloadUrl = signedGet?.data?.signedUrl || null;
+  } catch {
+    downloadUrl = null;
+  }
+
   return json(res, 200, {
+    ok: true,
     bucket: BUCKET,
     path,
-    signedUrl: data.signedUrl,
-    contentType: contentType || "video/mp4",
+
+    // ✅ what the front-end uploader expects
+    uploadUrl: data.signedUrl,
+
+    // ✅ what your renderer should use as backgroundVideoUrl
+    // Prefer publicUrl; fallback to downloadUrl for private buckets
+    publicUrl: publicUrl || downloadUrl,
+
+    // also include both explicitly (helpful for debugging)
+    publicUrlRaw: publicUrl,
+    downloadUrl,
+
+    contentType,
   });
 };
