@@ -26,7 +26,11 @@ function setCors(req, res) {
   }
 
   res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  // ✅ FIX: allow Memberstack/NF headers so preflight doesn't fail
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization, x-nf-member-id, x-nf-member-email"
+  );
 }
 
 function json(res, status, body) {
@@ -52,7 +56,7 @@ function countWords(text) {
 function normalizeSecondsBucket(secondsRaw) {
   const s = clamp(secondsRaw ?? 45, 20, 180);
 
-  // Your UI options: 30,45,60,90,120,180 (based on your surprise array)
+  // UI options: 30,45,60,90,120,180
   if (s >= 150) return 180;
   if (s >= 105) return 120;
   if (s >= 75) return 90;
@@ -70,7 +74,7 @@ function getWordBounds(targetSeconds) {
   const WPS_TYP = 2.35; // rant cadence is often slightly faster than Reddit narration
 
   if (targetSeconds === 60) {
-    const MIN_WPS_FAST = 2.7;        // fast speaker safety
+    const MIN_WPS_FAST = 2.7; // fast speaker safety
     const minWords = Math.ceil(60 * MIN_WPS_FAST); // ~162
     const maxWords = Math.ceil(78 * MIN_WPS_FAST); // allow a bit over (~78s fast)
     return { targetSeconds, minWords, maxWords };
@@ -91,7 +95,9 @@ function cleanStyle(style) {
 
 function cleanOutput(s) {
   let out = String(s || "").trim();
+  // remove code fences if the model ever adds them
   out = out.replace(/^```[\s\S]*?\n/, "").replace(/```$/g, "").trim();
+  // remove leading "Script:" etc
   out = out.replace(/^(script|narration)\s*:\s*/i, "").trim();
   return out;
 }
