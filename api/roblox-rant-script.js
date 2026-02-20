@@ -85,41 +85,40 @@ function looksLikeRobloxOrGaming(topic) {
 }
 
 /**
- * Duration rules (tighter):
- * - 30s/45s/90s/120s/180s: keep close to target
- * - 60s: must NEVER be under 60 seconds; can be slightly over
- *
- * We approximate timing via words-per-second.
- * Typical short-form narration ranges ~2.2–2.7 wps depending on energy.
+ * ✅ Updated duration math:
+ * Your generated audio is reading faster than 2.35 wps.
+ * We target ~3.0 words/sec so 30s/45s/60s stop coming out short.
  */
 function getWordBounds(targetSeconds) {
-  const WPS_TARGET = 2.35; // ~141 wpm
-  const WPS_FAST = 2.75;   // fast speaker safety
-  const WPS_SLOW = 2.10;   // slower speaker
+  const WPS_TARGET = 3.0; // ~180 wpm (matches your observed ElevenLabs pace)
+  const WPS_FAST_SAFETY = 3.3; // very fast speaker safety (for "never under 60s")
 
-  // 60s: enforce never below 60s even at fast read
-  if (targetSeconds === 60) {
-    const minWords = Math.ceil(60 * WPS_FAST); // ~165
-    // allow slightly over 60s (up to ~70s at fast, ~90s at slow)
-    const maxWords = Math.ceil(70 * WPS_FAST); // ~193
-    return { targetSeconds, minWords, maxWords };
-  }
-
-  // tighter windows for other buckets
-  // (smaller clips should be tighter)
-  const tightPct =
-    targetSeconds === 30 ? 0.07 : // ±7%
-    targetSeconds === 45 ? 0.08 : // ±8%
+  // Tight windows by clip length
+  const pct =
+    targetSeconds === 30 ? 0.06 : // ±6%
+    targetSeconds === 45 ? 0.07 : // ±7%
     targetSeconds === 90 ? 0.08 : // ±8%
     targetSeconds === 120 ? 0.09 : // ±9%
     0.10; // 180: ±10%
 
-  const targetWords = Math.round(targetSeconds * WPS_TARGET);
-  const minWords = Math.max(40, Math.floor(targetWords * (1 - tightPct)));
-  const maxWords = Math.ceil(targetWords * (1 + tightPct));
+  // 60s: never under 60s, even if spoken fast
+  if (targetSeconds === 60) {
+    const targetWords = Math.round(60 * WPS_TARGET); // 180
+    const minWords = Math.ceil(60 * WPS_FAST_SAFETY); // 198 (enforces >= ~60s at fast pace)
+    const maxWords = Math.ceil(targetWords * 1.12);   // allow a bit over (up to ~202)
+    return {
+      targetSeconds,
+      targetWords,
+      minWords,
+      maxWords: Math.max(maxWords, minWords + 6),
+    };
+  }
 
-  // extra guardrails so tiny prompts don't come out super short
-  return { targetSeconds, minWords, maxWords };
+  const targetWords = Math.round(targetSeconds * WPS_TARGET);
+  const minWords = Math.max(55, Math.floor(targetWords * (1 - pct)));
+  const maxWords = Math.ceil(targetWords * (1 + pct));
+
+  return { targetSeconds, targetWords, minWords, maxWords };
 }
 
 async function openaiChat(messages, temperature = 0.75) {
@@ -160,8 +159,6 @@ async function openaiChat(messages, temperature = 0.75) {
 }
 
 function buildSystemPrompt({ isRoblox }) {
-  // ✅ generic base prompt (no forced Roblox)
-  // ✅ ONLY allow Roblox/game details when topic indicates it
   return `
 You write short narration scripts for TikTok/Shorts.
 
@@ -171,64 +168,54 @@ Hard constraints:
 - Hook in the first 1–2 lines (scroll-stopping).
 - Short punchy paragraphs. Easy to read aloud.
 - No slurs, hate speech, or explicit sexual content.
-- End with EXACTLY ONE question that invites comments (e.g., "Am I tripping?" "What would you do?" "Is this normal?").
+- End with EXACTLY ONE question that invites comments.
 
 Topic fidelity rules:
 - Follow the topic exactly as written.
 - Do NOT add the word "Roblox" or turn it into a game scenario unless the topic explicitly includes Roblox or obvious gaming keywords.
-- If the topic is real-life (e.g., school, bathroom, friends, drama), keep it real-life.
-- If the topic is about Roblox/gaming, keep it inside that game-world with believable details (servers, chat, bans, updates, pay-to-win, trading, etc.).
+- If the topic is real-life, keep it real-life.
+- If the topic is gaming/Roblox, keep it in that world with believable details.
 
 Vibe:
 - Sounds like a real creator ranting right after it happened.
-- Natural speech, a few quick dialogue snippets are okay (no quotes blocks).
-- Keep it believable for the topic category.
-
-${isRoblox ? "Category: GAMING/ROBLOX (okay to reference Roblox-specific concepts)." : "Category: REAL-LIFE/GENERAL (do NOT reference Roblox unless topic says so)."}
+- Natural speech; quick dialogue snippets are okay.
+${isRoblox ? "Category: GAMING/ROBLOX (Roblox terms allowed)." : "Category: REAL-LIFE/GENERAL (Roblox terms NOT allowed unless topic says so)."}
 `.trim();
 }
 
 function styleHintsFor(style) {
   return {
-    family:
-      "Clean, family-friendly. No profanity. More playful frustration than anger.",
-    mild:
-      "Mild annoyance. A little sarcasm, but chill and relatable.",
-    hot_take:
-      "High energy, slightly heated, confident opinions. Punchy, funny, a little dramatic.",
-    storytime:
-      "Story-first: clear timeline, specific beats, what I did, what they did, what happened next.",
-    tier_list:
-      "Frame it like I'm ranking the worst parts of the topic, but still a narration (not actual bullets).",
+    family: "Clean, family-friendly. No profanity. Playful frustration.",
+    mild: "Mild annoyance, relatable, light sarcasm.",
+    hot_take: "High energy, confident opinions, funny and punchy.",
+    storytime: "Clear timeline beats: what happened, then what happened next.",
+    tier_list: "Sounds like ranking the worst parts, but still a narration (no bullets).",
   }[style] || "High energy, punchy rant.";
 }
 
-function buildUserPrompt({ topic, style, minWords, maxWords, targetSeconds }) {
+function buildUserPrompt({ topic, style, minWords, maxWords, targetWords, targetSeconds }) {
   return `
 Topic: ${topic}
 Style: ${style} (${styleHintsFor(style)})
 
-Length requirement:
+LENGTH (VERY IMPORTANT):
 - Target duration: ~${targetSeconds}s
-- Word count MUST be between ${minWords} and ${maxWords} words.
-- Do not intentionally overshoot the max. Stay tight and on-time.
+- Target word count: ~${targetWords} words
+- Word count MUST be BETWEEN ${minWords} and ${maxWords} words.
 
-Structure guidance:
+Structure:
 - Hook (1–2 lines)
 - What happened (specific details)
 - My reaction + why it's annoying/unfair
-- One twist or escalation
+- One twist/escalation
 - End with EXACTLY ONE question inviting comments
 
-Important:
-- If under ${minWords} words: add natural detail and 1 extra escalation beat.
-- If over ${maxWords} words: tighten and remove filler.
-- Output ONLY the script.
+Output ONLY the script.
 `.trim();
 }
 
 async function generateWithWordBounds({ topic, style, secondsBucket }) {
-  const { minWords, maxWords, targetSeconds } = getWordBounds(secondsBucket);
+  const { minWords, maxWords, targetWords, targetSeconds } = getWordBounds(secondsBucket);
   const isRoblox = looksLikeRobloxOrGaming(topic);
   const system = buildSystemPrompt({ isRoblox });
 
@@ -236,14 +223,14 @@ async function generateWithWordBounds({ topic, style, secondsBucket }) {
     { role: "system", content: system },
     {
       role: "user",
-      content: buildUserPrompt({ topic, style, minWords, maxWords, targetSeconds }),
+      content: buildUserPrompt({ topic, style, minWords, maxWords, targetWords, targetSeconds }),
     },
   ];
 
   let best = "";
   let bestScore = Infinity;
 
-  for (let attempt = 1; attempt <= 3; attempt++) {
+  for (let attempt = 1; attempt <= 5; attempt++) {
     const script = await openaiChat(messages, attempt === 1 ? 0.85 : 0.6);
     const wc = countWords(script);
 
@@ -255,10 +242,18 @@ async function generateWithWordBounds({ topic, style, secondsBucket }) {
       best = script;
     }
 
-    const fix =
+    // Stronger rewrite instruction: models comply better with a specific target word count
+    const direction =
       wc < minWords
-        ? `Your last script was ${wc} words (too short). Revise it to be BETWEEN ${minWords} and ${maxWords} words by adding natural detail and exactly one extra escalation beat. Do NOT change the topic category. Output ONLY the revised script.`
-        : `Your last script was ${wc} words (too long). Revise it to be BETWEEN ${minWords} and ${maxWords} words by tightening and removing filler. Do NOT change the topic category. Output ONLY the revised script.`;
+        ? `too short`
+        : `too long`;
+
+    const fix =
+      `Your last script was ${wc} words (${direction}). ` +
+      `Rewrite it to be BETWEEN ${minWords} and ${maxWords} words, aiming for about ${targetWords} words. ` +
+      `Keep the SAME topic category (do not add Roblox unless topic explicitly includes it). ` +
+      `Keep the hook strong, add/remove natural detail, keep EXACTLY ONE ending question. ` +
+      `Output ONLY the revised script.`;
 
     messages = [
       { role: "system", content: system },
@@ -289,13 +284,19 @@ module.exports = async function handler(req, res) {
     const script = await generateWithWordBounds({ topic, style, secondsBucket });
     if (!script) return json(res, 500, { ok: false, error: "Failed to generate script" });
 
+    const wc = countWords(script);
+    const b = getWordBounds(secondsBucket);
+
     return json(res, 200, {
       ok: true,
       script,
       meta: {
         secondsBucket,
         looksLikeRoblox: looksLikeRobloxOrGaming(topic),
-        wordCount: countWords(script),
+        wordCount: wc,
+        targetWords: b.targetWords,
+        minWords: b.minWords,
+        maxWords: b.maxWords,
       },
     });
   } catch (e) {
