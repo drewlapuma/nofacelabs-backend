@@ -1,11 +1,6 @@
 // api/roblox-rant-script.js (CommonJS, Node 18+)
-// POST { topic, style, seconds, speed? }  (also accepts rrSpeed)
+// POST { topic, style, seconds, speed }
 // => { ok:true, script }
-//
-// Env:
-// - OPENAI_API_KEY
-// - OPENAI_MODEL (optional) default: gpt-4.1-mini
-// - ALLOW_ORIGIN or ALLOW_ORIGINS (optional)
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4.1-mini";
@@ -53,9 +48,7 @@ function countWords(text) {
 }
 
 function normalizeSecondsBucket(secondsRaw) {
-  const s = clamp(secondsRaw ?? 45, 20, 180);
-
-  // UI options: 30,45,60,90,120,180
+  const s = clamp(secondsRaw ?? 60, 20, 180);
   if (s >= 150) return 180;
   if (s >= 105) return 120;
   if (s >= 75) return 90;
@@ -77,47 +70,28 @@ function cleanOutput(s) {
   return out;
 }
 
-function readSpeed(body) {
-  // ✅ default = 1.2x as requested
-  const raw = body?.speed ?? body?.rrSpeed ?? body?.voiceSpeed ?? 1.2;
-  return clamp(raw, 1.0, 2.0);
-}
-
-/**
- * WORD BOUNDS THAT TARGET DURATION AT THE GIVEN SPEED
- *
- * If speed > 1, audio becomes shorter.
- * So we must generate MORE words to keep the same seconds.
- *
- * Effective words-per-second increases ~proportionally with speed,
- * so targetWords = seconds * (baseWPS * speed)
- */
+// ✅ IMPORTANT: word bounds now account for speed
 function getWordBounds(targetSeconds, speed) {
-  // base at 1.0x (tweakable)
-  const BASE_WPS = 2.35;
+  const sp = clamp(speed ?? 1.2, 1.0, 2.0);
 
-  const sp = clamp(speed, 1.0, 2.0);
+  // If scripts are still short, bump these up slightly.
+  const BASE_WPS_AT_1X = 2.75;
+  const FAST_WPS_AT_1X = 3.10;
 
+  // ✅ 60s rule: NEVER under 60s at chosen speed
   if (targetSeconds === 60) {
-    // ✅ must NEVER be less than 60s (at current speed)
-    // guard for "fast speaker" at this speed
-    const FAST_WPS_AT_1X = 2.7; // your prior fast speaker safety
     const minWords = Math.ceil(60 * FAST_WPS_AT_1X * sp);
-
-    // allow a bit more than a minute
-    const maxWords = Math.ceil(75 * FAST_WPS_AT_1X * sp);
-
-    return { targetSeconds, minWords, maxWords };
+    const maxWords = Math.ceil(78 * FAST_WPS_AT_1X * sp);
+    return { targetSeconds, minWords, maxWords, speed: sp };
   }
 
-  // 30 / 45 / 90 / 120 / 180 should be "around there"
-  const targetWords = Math.round(targetSeconds * BASE_WPS * sp);
+  const targetWords = Math.round(targetSeconds * BASE_WPS_AT_1X * sp);
 
-  // tighter window than before (more accurate timing)
-  const minWords = Math.max(45, Math.floor(targetWords * 0.92));
-  const maxWords = Math.ceil(targetWords * 1.08);
+  // ✅ Bias longer so 30s doesn't become 20s
+  const minWords = Math.max(55, Math.floor(targetWords * 1.08));
+  const maxWords = Math.ceil(targetWords * 1.25);
 
-  return { targetSeconds, minWords, maxWords };
+  return { targetSeconds, minWords, maxWords, speed: sp };
 }
 
 async function openaiChat(messages, temperature = 0.75) {
@@ -138,53 +112,40 @@ async function openaiChat(messages, temperature = 0.75) {
 
   const text = await resp.text().catch(() => "");
   let data = {};
-  try {
-    data = JSON.parse(text || "{}");
-  } catch {
-    data = { raw: text };
-  }
+  try { data = JSON.parse(text || "{}"); } catch { data = { raw: text }; }
 
   if (!resp.ok) {
-    const msg =
-      data?.error?.message ||
-      data?.message ||
-      data?.raw ||
-      `OpenAI error (${resp.status})`;
+    const msg = data?.error?.message || data?.message || data?.raw || `OpenAI error (${resp.status})`;
     throw new Error(msg);
   }
 
-  const out = data?.choices?.[0]?.message?.content || "";
-  return cleanOutput(out);
-}
-
-function buildSystemPrompt() {
-  return `
-You write short TikTok/Shorts narration scripts based on the user's topic prompt.
-
-Hard constraints:
-- Output ONLY the script. No title. No bullet points. No headings. No word count. No emojis.
-- First person ("I").
-- Hook in the first 1–2 lines (scroll-stopping).
-- Short punchy paragraphs. Easy to read aloud.
-- Follow the TOPIC literally. Do NOT add "Roblox" unless the topic is actually about Roblox.
-- No slurs, hate speech, or explicit content.
-- End with ONE question that invites comments (e.g., "Am I tripping?" "What would you do?" "Is this normal?").
-`.trim();
+  return cleanOutput(data?.choices?.[0]?.message?.content || "");
 }
 
 function styleHintsFor(style) {
   return {
-    family:
-      "Clean, family-friendly. No profanity. More playful frustration than anger.",
-    mild:
-      "Mild annoyance. A little sarcasm, but chill and relatable.",
-    hot_take:
-      "High energy, slightly heated, confident opinions. Punchy, funny, a little dramatic.",
-    storytime:
-      "Story-first: clear timeline, specific beats, what I did, what they did, what happened next.",
-    tier_list:
-      "Frame it like I'm ranking the worst behaviors/things, but as a rant narration (no bullets).",
+    family: "Clean, family-friendly. No profanity. More playful frustration than anger.",
+    mild: "Mild annoyance. A little sarcasm, but chill and relatable.",
+    hot_take: "High energy, slightly heated, confident opinions. Punchy, funny, a little dramatic.",
+    storytime: "Story-first: clear timeline, specific beats, what I did, what they did, what happened next.",
+    tier_list: "Frame it like I'm ranking things, but write as narration (no bullets).",
   }[style] || "High energy, punchy rant.";
+}
+
+// ✅ SYSTEM PROMPT: do NOT force Roblox into the topic
+function buildSystemPrompt() {
+  return `
+You write short narration scripts for TikTok/Shorts rant videos.
+
+Hard constraints:
+- Output ONLY the script. No title. No bullet points. No headings. No word count. No emojis.
+- First person ("I").
+- Hook in the first 1–2 lines.
+- Short punchy paragraphs. Easy to read aloud.
+- Stay EXACTLY on the user's topic. Do NOT add "Roblox" unless the topic is actually Roblox-related.
+- No slurs, hate speech, or explicit sexual content.
+- End with ONE question inviting comments.
+`.trim();
 }
 
 function buildUserPrompt({ topic, style, minWords, maxWords, targetSeconds, speed }) {
@@ -192,57 +153,51 @@ function buildUserPrompt({ topic, style, minWords, maxWords, targetSeconds, spee
 Topic: ${topic}
 Style: ${style} (${styleHintsFor(style)})
 
-Length requirement (IMPORTANT):
-- Target duration: ${targetSeconds}s
-- Assume narration speed is ${Number(speed).toFixed(1)}x.
+Length requirement:
+- Target: ${targetSeconds}s at VOICE SPEED ${speed}x
 - Word count MUST be between ${minWords} and ${maxWords} words.
 
 Structure guidance:
 - Hook (1–2 lines)
 - What happened (specific details)
 - My reaction + why it's annoying/unfair
-- One twist or escalation
+- One escalation/twist
 - End with ONE question inviting comments
 
 Important:
-- Follow the topic exactly. If the topic is NOT Roblox, do NOT mention Roblox.
-- If under ${minWords} words, add natural detail and 1 extra beat.
+- Stay on-topic: do not inject unrelated settings (ex: do NOT add "Roblox" unless topic is Roblox).
+- If under ${minWords} words, add: (1) 2 extra beats of action, (2) 2 quick dialogue lines, (3) 1 escalation moment.
 - If over ${maxWords} words, tighten and remove filler.
 - Output ONLY the script.
 `.trim();
 }
 
 async function generateWithWordBounds({ topic, style, secondsBucket, speed }) {
-  const { minWords, maxWords, targetSeconds } = getWordBounds(secondsBucket, speed);
+  const { minWords, maxWords, targetSeconds, speed: sp } = getWordBounds(secondsBucket, speed);
   const system = buildSystemPrompt();
 
   let messages = [
     { role: "system", content: system },
-    {
-      role: "user",
-      content: buildUserPrompt({ topic, style, minWords, maxWords, targetSeconds, speed }),
-    },
+    { role: "user", content: buildUserPrompt({ topic, style, minWords, maxWords, targetSeconds, speed: sp }) },
   ];
 
   let best = "";
   let bestScore = Infinity;
 
-  for (let attempt = 1; attempt <= 4; attempt++) {
+  // ✅ more attempts + heavy penalty for short
+  for (let attempt = 1; attempt <= 6; attempt++) {
     const script = await openaiChat(messages, attempt === 1 ? 0.85 : 0.55);
     const wc = countWords(script);
 
     if (wc >= minWords && wc <= maxWords) return script;
 
-    const score = wc < minWords ? (minWords - wc) * 2 : (wc - maxWords);
-    if (score < bestScore) {
-      bestScore = score;
-      best = script;
-    }
+    const score = wc < minWords ? (minWords - wc) * 4 : (wc - maxWords);
+    if (score < bestScore) { bestScore = score; best = script; }
 
     const fix =
       wc < minWords
-        ? `Your last script was ${wc} words (too short). Expand it to be BETWEEN ${minWords} and ${maxWords} words while staying strictly on-topic. Add 1 extra escalation beat + natural detail. Keep ONE ending question. Output ONLY the revised script.`
-        : `Your last script was ${wc} words (too long). Tighten it to be BETWEEN ${minWords} and ${maxWords} words while staying strictly on-topic. Keep ONE ending question. Output ONLY the revised script.`;
+        ? `Too short. You wrote ${wc} words. Expand to BETWEEN ${minWords} and ${maxWords} words by adding: (1) 2 extra beats of action, (2) 2 quick dialogue lines, (3) 1 escalation moment, (4) a stronger ending beat. Stay strictly on-topic. Keep ONE ending question. Output ONLY the revised script.`
+        : `Too long. You wrote ${wc} words. Tighten to BETWEEN ${minWords} and ${maxWords} words by removing filler and shortening sentences. Stay strictly on-topic. Keep ONE ending question. Output ONLY the revised script.`;
 
     messages = [
       { role: "system", content: system },
@@ -259,24 +214,22 @@ module.exports = async function handler(req, res) {
   if (req.method === "OPTIONS") return res.end();
 
   try {
-    if (req.method !== "POST") {
-      return json(res, 405, { ok: false, error: "Use POST" });
-    }
+    if (req.method !== "POST") return json(res, 405, { ok: false, error: "Use POST" });
 
     const body = req.body || {};
-    const topic = String(body.topic || body.prompt || "").trim();
+    const topic = String(body.topic || "").trim();
     const style = cleanStyle(body.style || body.tone);
     const secondsBucket = normalizeSecondsBucket(body.seconds ?? 60);
 
-    // ✅ speed-aware length targeting (default 1.2)
-    const speed = readSpeed(body);
+    // ✅ default to 1.2 if client forgets to send it
+    const speed = clamp(body.speed ?? body.rrSpeed ?? 1.2, 1.0, 2.0);
 
     if (!topic) return json(res, 400, { ok: false, error: "Missing topic" });
 
     const script = await generateWithWordBounds({ topic, style, secondsBucket, speed });
     if (!script) return json(res, 500, { ok: false, error: "Failed to generate script" });
 
-    return json(res, 200, { ok: true, script, meta: { secondsBucket, speed } });
+    return json(res, 200, { ok: true, script });
   } catch (e) {
     console.error(e);
     return json(res, 500, { ok: false, error: String(e?.message || e) });
