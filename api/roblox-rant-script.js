@@ -33,6 +33,20 @@ function json(res, status, body) {
   res.end(JSON.stringify(body));
 }
 
+// ✅ safer for serverless: handle both parsed and raw stream bodies
+async function readBody(req) {
+  if (req.body && typeof req.body === "object") return req.body;
+
+  let data = "";
+  for await (const chunk of req) data += chunk;
+  if (!data.trim()) return {};
+  try {
+    return JSON.parse(data);
+  } catch {
+    return {};
+  }
+}
+
 function clamp(n, a, b) {
   n = Number(n);
   if (!Number.isFinite(n)) return a;
@@ -61,7 +75,7 @@ function normalizeSecondsBucket(secondsRaw) {
   return 30;
 }
 
-/* -------------------- THEME + TONE (NEW) -------------------- */
+/* -------------------- THEME + TONE -------------------- */
 
 function cleanTheme(theme) {
   const s = String(theme || "").toLowerCase().trim();
@@ -125,18 +139,16 @@ function cleanOutput(s) {
 function getWordBounds(targetSeconds, speed) {
   const sp = clamp(speed ?? 1.2, 1.0, 2.0);
 
-  // If scripts are still short, bump these up slightly.
   const BASE_WPS_AT_1X = 2.75;
   const FAST_WPS_AT_1X = 3.1;
 
-  // ✅ 60s rule: NEVER under 60s at chosen speed
+  // ✅ 60s rule: bias longer (avoid under-length)
   if (targetSeconds === 60) {
     const minWords = Math.ceil(60 * FAST_WPS_AT_1X * sp);
     const maxWords = Math.ceil(78 * FAST_WPS_AT_1X * sp);
     return { targetSeconds, minWords, maxWords, speed: sp };
   }
 
-  // 30/45/90 should also bias long (avoid shrinking)
   const targetWords = Math.round(targetSeconds * BASE_WPS_AT_1X * sp);
   const minWords = Math.max(55, Math.floor(targetWords * 1.08));
   const maxWords = Math.ceil(targetWords * 1.25);
@@ -182,7 +194,7 @@ function themeHintsFor(theme) {
     science: "Simple science framing, cause/effect, 'here’s the weird part' energy.",
     psychology: "Relatable behavior patterns, habits, social dynamics; no diagnosing.",
     mystery: "Tease clues and a reveal; keep it realistic and not scary-gory.",
-    thriller: "Tension + escalation beats; still PG-13/brand-safe (no violence details).",
+    thriller: "Tension + escalation beats; still brand-safe (no violence details).",
     space: "Space/astronomy metaphors, wonder, scale; keep it fun.",
     myth: "Myth/legend framing as metaphors; not preachy.",
     history: "Light historical parallels; no heavy dates needed.",
@@ -190,10 +202,10 @@ function themeHintsFor(theme) {
     nature: "Outdoor/wildlife metaphors and sensory details; still a rant.",
     animals: "Pet/animal comparisons, cute/chaotic energy.",
     sports: "Sports metaphors (coach, playbook, clutch), but keep it accessible.",
-    school: "Classroom/homework/teachers/social dynamics; no bullying content.",
+    school: "Classroom/homework/teachers/social dynamics; keep it non-hateful.",
     relationships: "Friendships/dating/social etiquette; respectful, not explicit.",
     money: "Prices, subscriptions, value, budgeting pain; no financial advice.",
-    life: "Everyday adulting/teen-life annoyances; relatable beats.",
+    life: "Everyday annoyances; relatable beats.",
     random: "Wildcard: still coherent, but with surprise comparisons.",
   }[theme] || "General audience. Use the topic as-is.";
 }
@@ -208,18 +220,17 @@ function toneHintsFor(tone) {
     humorous: "Jokes, exaggeration, playful analogies; still coherent.",
     dramatic: "Big emotions, quick punches, emphasis, but not hateful.",
     casual: "Conversational, chill, like talking to a friend.",
-    roast: "Roasty and spicy but not mean-spirited; no insults about protected traits.",
+    roast: "Roasty and spicy but not mean-spirited; no protected-trait insults.",
     hot_take: "Confident opinion. Punchy, assertive, 'hear me out' energy.",
     storytime: "Clear timeline story beats: what happened, then what, then the twist.",
     wholesome: "Warm and kind, light frustration, safe for all ages.",
-    sarcastic: "Dry humor, ironic contrast, witty little side comments.",
+    sarcastic: "Dry humor, ironic contrast, witty side comments.",
     serious: "Direct, grounded, no jokes, clear logic.",
     motivational: "Coach-like energy, action-oriented, 'here’s what I’m doing now'.",
-    chill: "Low-stakes humor, laid-back, minimal intensity.",
+    chill: "Low-stakes, laid-back, minimal intensity.",
   }[tone] || "Punchy, confident, funny, a little dramatic.";
 }
 
-// ✅ SYSTEM PROMPT: do NOT force theme words unless they fit the topic
 function buildSystemPrompt() {
   return `
 You write short narration scripts for TikTok/Shorts rant videos.
@@ -275,7 +286,6 @@ async function generateWithWordBounds({ topic, theme, tone, secondsBucket, speed
   let best = "";
   let bestScore = Infinity;
 
-  // ✅ more attempts + heavy penalty for short
   for (let attempt = 1; attempt <= 6; attempt++) {
     const script = await openaiChat(messages, attempt === 1 ? 0.85 : 0.55);
     const wc = countWords(script);
@@ -307,19 +317,15 @@ module.exports = async function handler(req, res) {
   try {
     if (req.method !== "POST") return json(res, 405, { ok: false, error: "Use POST" });
 
-    const body = req.body || {};
+    const body = await readBody(req);
 
-    // Your UI:
-    // - topic comes from the prompt input
-    // - theme from rrAiTheme
-    // - tone from rrAiTone
     const topic = String(body.topic || "").trim();
     const theme = cleanTheme(body.theme);
-    const tone = cleanTone(body.tone || body.style); // backwards-compat if any old client sends style
+
+    // ✅ accept either tone OR old style field
+    const tone = cleanTone(body.tone || body.style);
 
     const secondsBucket = normalizeSecondsBucket(body.seconds ?? 60);
-
-    // ✅ default to 1.2 if client forgets to send it
     const speed = clamp(body.speed ?? body.rrSpeed ?? 1.2, 1.0, 2.0);
 
     if (!topic) return json(res, 400, { ok: false, error: "Missing topic" });
