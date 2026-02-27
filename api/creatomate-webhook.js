@@ -4,6 +4,10 @@
 //   ?id=<renders.id>&kind=caption
 //   ?id=<renders.id>&kind=composite
 //
+// Also accepted aliases:
+//   kind=reddit        -> main
+//   kind=roblox_rants  -> main
+//
 // Updates:
 // - MAIN: status + video_url (+ render_id if missing)
 // - CAPTION: caption_status + captioned_video_url
@@ -51,9 +55,8 @@ module.exports = async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ ok: false, error: "METHOD_NOT_ALLOWED" });
 
   const dbId = String(req.query?.id || "").trim();
-  let kind = String(req.query?.kind || "").trim().toLowerCase(); // "main" | "caption" | "composite" | "reddit"
-  // ✅ alias: reddit renders are your "main" render for the row
-  if (kind === "reddit") kind = "main";
+  let kind = String(req.query?.kind || "").trim().toLowerCase(); // "main" | "caption" | "composite" | aliases
+  if (kind === "reddit" || kind === "roblox_rants") kind = "main"; // ✅ FIX
   if (!dbId) return res.status(200).json({ ok: true, skipped: "MISSING_DB_ID" });
 
   const sb = getAdminSupabase();
@@ -75,8 +78,6 @@ module.exports = async function handler(req, res) {
       keys: Object.keys(body || {}),
     });
 
-    // ✅ Select ONLY columns that exist in your table
-    // Added composite_* fields
     const { data: row, error: readErr } = await sb
       .from("renders")
       .select(
@@ -102,13 +103,12 @@ module.exports = async function handler(req, res) {
 
     if (readErr || !row) {
       console.warn("[CREATOMATE_WEBHOOK] row not found yet, retry", { dbId, readErr });
-      // ✅ return 500 so Creatomate retries
       return res.status(500).json({ ok: false, error: "ROW_NOT_FOUND_RETRY" });
     }
 
     const mainId = String(row.render_id || "").trim();
     const compositeId = String(row.composite_job_id || "").trim();
-    // If Creatomate doesn't always send id, fallback to row-stored ids:
+
     const renderIdToFetch =
       incomingRenderId ||
       (kind === "composite" ? compositeId : mainId) ||
@@ -118,7 +118,6 @@ module.exports = async function handler(req, res) {
     // ✅ MAIN
     // ------------------------------------------------------------
     if (kind === "main") {
-      // ✅ If webhook says terminal + URL, TRUST IT and update immediately
       if (bodyStatus === "succeeded" && bodyUrl) {
         const patch = {
           render_id: mainId || renderIdToFetch || null,
@@ -137,7 +136,6 @@ module.exports = async function handler(req, res) {
         return res.status(200).json({ ok: true });
       }
 
-      // Otherwise: look up render to confirm
       let rObj = null;
       let getStatus = "";
       let getUrl = null;
@@ -192,7 +190,6 @@ module.exports = async function handler(req, res) {
     // ✅ CAPTION
     // ------------------------------------------------------------
     if (kind === "caption") {
-      // ✅ If webhook says terminal + URL, TRUST IT
       if (bodyStatus === "succeeded" && bodyUrl) {
         const patch = {
           caption_status: "completed",
@@ -210,7 +207,6 @@ module.exports = async function handler(req, res) {
         return res.status(200).json({ ok: true });
       }
 
-      // Otherwise: GET (optional)
       let rObj = null;
       let getStatus = "";
       let getUrl = null;
@@ -264,7 +260,6 @@ module.exports = async function handler(req, res) {
     // ✅ COMPOSITE
     // ------------------------------------------------------------
     if (kind === "composite") {
-      // ✅ If webhook says terminal + URL, TRUST IT
       if (bodyStatus === "succeeded" && bodyUrl) {
         const patch = {
           composite_status: "completed",
@@ -283,7 +278,6 @@ module.exports = async function handler(req, res) {
         return res.status(200).json({ ok: true });
       }
 
-      // Otherwise: GET (optional)
       let rObj = null;
       let getStatus = "";
       let getUrl = null;
