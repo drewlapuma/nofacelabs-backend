@@ -744,7 +744,7 @@ module.exports = async function handler(req, res) {
 
     // ✅ Start Creatomate render with webhook to your existing webhook handler
     const publicBaseUrl = (process.env.API_BASE || "").trim() || `https://${req.headers.host}`;
-    const webhook_url = `${publicBaseUrl}/api/creatomate-webhook?id=${encodeURIComponent(dbId)}&kind=roblox_rants`;
+    const webhook_url = `${publicBaseUrl}/api/creatomate-webhook?id=${encodeURIComponent(dbId)}&kind=main`;
 
     const startResp = await creatomateRequest("/v1/renders", "POST", {
       template_id: TEMPLATE_ID,
