@@ -50,19 +50,68 @@ async function creatomateGetRender(renderId) {
   return j;
 }
 
-module.exports = async function handler(req, res) {
-  if (req.method === "OPTIONS") return res.status(200).end();
-  if (req.method !== "POST") return res.status(405).json({ ok: false, error: "METHOD_NOT_ALLOWED" });
+// ✅ Robust query getter (works even when req.query is empty on Vercel)
+function getQuery(req, key) {
+  if (req?.query && req.query[key] != null) return String(req.query[key]);
+  try {
+    const u = new URL(req.url, "http://localhost");
+    const v = u.searchParams.get(key);
+    return v == null ? "" : String(v);
+  } catch {
+    return "";
+  }
+}
 
-  const dbId = String(req.query?.id || "").trim();
-  let kind = String(req.query?.kind || "").trim().toLowerCase(); // "main" | "caption" | "composite" | aliases
-  if (kind === "reddit" || kind === "roblox_rants") kind = "main"; // ✅ FIX
-  if (!dbId) return res.status(200).json({ ok: true, skipped: "MISSING_DB_ID" });
+// ✅ Robust body parser (Creatomate may send JSON or string)
+function parseBody(req) {
+  try {
+    if (typeof req.body === "string") return JSON.parse(req.body || "{}");
+    if (req.body && typeof req.body === "object") return req.body;
+    return {};
+  } catch {
+    return {};
+  }
+}
+
+module.exports = async function handler(req, res) {
+  // ✅ Loud early log to prove route is being hit
+  try {
+    console.log("[CREATOMATE_WEBHOOK] hit", {
+      method: req.method,
+      url: req.url,
+      hasQueryObj: Boolean(req.query),
+      host: req.headers?.host,
+      ua: req.headers?.["user-agent"],
+    });
+  } catch {}
+
+  if (req.method === "OPTIONS") return res.status(200).end();
+
+  // ✅ Allow GET temporarily so you can test in browser and see logs
+  if (req.method !== "POST" && req.method !== "GET") {
+    return res.status(405).json({ ok: false, error: "METHOD_NOT_ALLOWED" });
+  }
+
+  const dbId = getQuery(req, "id").trim();
+  let kind = getQuery(req, "kind").trim().toLowerCase(); // main | caption | composite | aliases
+  if (kind === "reddit" || kind === "roblox_rants") kind = "main";
+
+  // ✅ If missing dbId, return 500 so Creatomate retries (and so you notice)
+  if (!dbId) {
+    console.warn("[CREATOMATE_WEBHOOK] missing dbId", { url: req.url, query: req.query || null });
+    return res.status(500).json({ ok: false, error: "MISSING_DB_ID_RETRY" });
+  }
+
+  // ✅ GET: just log + confirm the endpoint is reachable
+  if (req.method === "GET") {
+    console.log("[CREATOMATE_WEBHOOK] GET ping", { dbId, kind });
+    return res.status(200).json({ ok: true, ping: true, dbId, kind });
+  }
 
   const sb = getAdminSupabase();
 
   try {
-    const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : req.body || {};
+    const body = parseBody(req);
     const incomingRenderId = String(body?.id || body?.render_id || "").trim();
 
     const bodyStatus = normStatus(body?.status || "");
@@ -72,7 +121,7 @@ module.exports = async function handler(req, res) {
       dbId,
       kind,
       incomingRenderId,
-      bodyStatus: body?.status,
+      bodyStatusRaw: body?.status,
       bodyStatusNorm: bodyStatus,
       hasBodyUrl: Boolean(bodyUrl),
       keys: Object.keys(body || {}),
@@ -118,6 +167,7 @@ module.exports = async function handler(req, res) {
     // ✅ MAIN
     // ------------------------------------------------------------
     if (kind === "main") {
+      // Trust terminal+url from webhook
       if (bodyStatus === "succeeded" && bodyUrl) {
         const patch = {
           render_id: mainId || renderIdToFetch || null,
@@ -136,6 +186,7 @@ module.exports = async function handler(req, res) {
         return res.status(200).json({ ok: true });
       }
 
+      // Otherwise: GET to confirm
       let rObj = null;
       let getStatus = "";
       let getUrl = null;
@@ -146,7 +197,10 @@ module.exports = async function handler(req, res) {
           getStatus = normStatus(rObj?.status || "");
           getUrl = extractOutputUrl(rObj);
         } catch (e) {
-          console.warn("[CREATOMATE_WEBHOOK] main GET failed, fallback to body", { message: String(e?.message || e) });
+          console.warn("[CREATOMATE_WEBHOOK] main GET failed, fallback to body", {
+            message: String(e?.message || e),
+            renderIdToFetch,
+          });
         }
       }
 
@@ -217,7 +271,10 @@ module.exports = async function handler(req, res) {
           getStatus = normStatus(rObj?.status || "");
           getUrl = extractOutputUrl(rObj);
         } catch (e) {
-          console.warn("[CREATOMATE_WEBHOOK] caption GET failed, fallback to body", { message: String(e?.message || e) });
+          console.warn("[CREATOMATE_WEBHOOK] caption GET failed, fallback to body", {
+            message: String(e?.message || e),
+            renderIdToFetch,
+          });
         }
       }
 
@@ -288,7 +345,10 @@ module.exports = async function handler(req, res) {
           getStatus = normStatus(rObj?.status || "");
           getUrl = extractOutputUrl(rObj);
         } catch (e) {
-          console.warn("[CREATOMATE_WEBHOOK] composite GET failed, fallback to body", { message: String(e?.message || e) });
+          console.warn("[CREATOMATE_WEBHOOK] composite GET failed, fallback to body", {
+            message: String(e?.message || e),
+            renderIdToFetch,
+          });
         }
       }
 
