@@ -83,10 +83,12 @@ function runCommand(cmd, args) {
 
     child.stdout.on("data", (d) => {
       stdout += d.toString();
+      if (stdout.length > 20000) stdout = stdout.slice(-20000);
     });
 
     child.stderr.on("data", (d) => {
       stderr += d.toString();
+      if (stderr.length > 40000) stderr = stderr.slice(-40000);
     });
 
     child.on("error", reject);
@@ -126,9 +128,39 @@ async function getVideoDurationSeconds(inputPath) {
   return n;
 }
 
+async function getFileSize(filePath) {
+  const stat = await fsp.stat(filePath);
+  return stat.size;
+}
+
 async function trimVideo({ inputPath, outputPath, startTime, endTime }) {
   const duration = Math.max(0.01, endTime - startTime);
 
+  // Fast path: no re-encode
+  try {
+    await runCommand(ffmpegPath, [
+      "-y",
+      "-ss", String(startTime),
+      "-i", inputPath,
+      "-t", String(duration),
+      "-c", "copy",
+      "-movflags", "+faststart",
+      outputPath
+    ]);
+
+    const size = await getFileSize(outputPath);
+    if (size > 1024) {
+      return;
+    }
+  } catch (err) {
+    console.warn("Fast trim failed, falling back to re-encode:", err.message);
+  }
+
+  try {
+    if (fs.existsSync(outputPath)) await fsp.unlink(outputPath);
+  } catch {}
+
+  // Fallback: accurate re-encode
   await runCommand(ffmpegPath, [
     "-y",
     "-ss", String(startTime),
@@ -136,7 +168,7 @@ async function trimVideo({ inputPath, outputPath, startTime, endTime }) {
     "-t", String(duration),
     "-c:v", "libx264",
     "-preset", "veryfast",
-    "-crf", "18",
+    "-crf", "22",
     "-c:a", "aac",
     "-movflags", "+faststart",
     outputPath
@@ -227,8 +259,8 @@ module.exports = async function handler(req, res) {
     await downloadToFile(signedInput.data.signedUrl, inputFile);
 
     const actualDuration = await getVideoDurationSeconds(inputFile);
-    const safeStart = Math.max(0, Math.min(startNum, actualDuration - 0.05));
-    const safeEnd = Math.max(safeStart + 0.05, Math.min(endNum, actualDuration));
+    const safeStart = Math.max(0, Math.min(startNum, actualDuration - 0.1));
+    const safeEnd = Math.max(safeStart + 0.1, Math.min(endNum, actualDuration));
 
     if (safeEnd <= safeStart) {
       throw new Error("Trim range is outside the video duration");
