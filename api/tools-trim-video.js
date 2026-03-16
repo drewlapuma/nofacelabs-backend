@@ -1,6 +1,6 @@
 // api/tools-trim-video.js
 // CommonJS, Node 18+
-// Requires ffmpeg + ffprobe available in the Vercel runtime
+// Uses bundled ffmpeg-static + ffprobe-static binaries for Vercel
 
 const { createClient } = require("@supabase/supabase-js");
 const { spawn } = require("child_process");
@@ -8,7 +8,15 @@ const fs = require("fs");
 const fsp = require("fs/promises");
 const os = require("os");
 const path = require("path");
-const crypto = require("crypto");
+const ffmpegPath = require("ffmpeg-static");
+const ffprobePath = require("ffprobe-static").path;
+
+if (!ffmpegPath) {
+  throw new Error("ffmpeg-static binary not found");
+}
+if (!ffprobePath) {
+  throw new Error("ffprobe-static binary not found");
+}
 
 const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || "*")
   .split(",")
@@ -16,7 +24,7 @@ const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || 
   .filter(Boolean);
 
 function setCors(req, res) {
-  const origin = req.headers.origin;
+  const origin = req.headers.origin || "";
 
   if (ALLOW_ORIGINS.includes("*")) {
     res.setHeader("Access-Control-Allow-Origin", "*");
@@ -30,6 +38,7 @@ function setCors(req, res) {
     "Access-Control-Allow-Headers",
     "Content-Type, Authorization, x-nf-member-id, x-nf-member-email"
   );
+  res.setHeader("Access-Control-Max-Age", "86400");
 }
 
 async function readJson(req) {
@@ -103,7 +112,7 @@ async function downloadToFile(url, outPath) {
 }
 
 async function getVideoDurationSeconds(inputPath) {
-  const { stdout } = await runCommand("ffprobe", [
+  const { stdout } = await runCommand(ffprobePath, [
     "-v", "error",
     "-show_entries", "format=duration",
     "-of", "default=noprint_wrappers=1:nokey=1",
@@ -120,8 +129,7 @@ async function getVideoDurationSeconds(inputPath) {
 async function trimVideo({ inputPath, outputPath, startTime, endTime }) {
   const duration = Math.max(0.01, endTime - startTime);
 
-  // Re-encode for widest compatibility and reliable trimming
-  await runCommand("ffmpeg", [
+  await runCommand(ffmpegPath, [
     "-y",
     "-ss", String(startTime),
     "-i", inputPath,
@@ -139,6 +147,7 @@ module.exports = async function handler(req, res) {
   setCors(req, res);
 
   if (req.method === "OPTIONS") return json(res, 200, { ok: true });
+
   if (req.method !== "POST") {
     return json(res, 405, { ok: false, error: "Method not allowed" });
   }
@@ -174,7 +183,10 @@ module.exports = async function handler(req, res) {
   const endNum = Number(endTime);
 
   if (!Number.isFinite(startNum) || !Number.isFinite(endNum)) {
-    return json(res, 400, { ok: false, error: "startTime and endTime must be numbers" });
+    return json(res, 400, {
+      ok: false,
+      error: "startTime and endTime must be numbers"
+    });
   }
 
   if (startNum < 0 || endNum <= startNum) {
@@ -201,10 +213,9 @@ module.exports = async function handler(req, res) {
 
   const tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), "nf-trim-"));
   const inputFile = path.join(tempDir, `input.${ext}`);
-  const outputFile = path.join(tempDir, `trimmed.mp4`);
+  const outputFile = path.join(tempDir, "trimmed.mp4");
 
   try {
-    // 1) Create signed URL for the uploaded source file
     const signedInput = await supabaseAdmin.storage
       .from(inputBucket)
       .createSignedUrl(inputPath, 60 * 20);
@@ -213,10 +224,8 @@ module.exports = async function handler(req, res) {
       throw new Error(signedInput.error?.message || "Failed to create signed input URL");
     }
 
-    // 2) Download source file to temp
     await downloadToFile(signedInput.data.signedUrl, inputFile);
 
-    // 3) Validate against actual duration
     const actualDuration = await getVideoDurationSeconds(inputFile);
     const safeStart = Math.max(0, Math.min(startNum, actualDuration - 0.05));
     const safeEnd = Math.max(safeStart + 0.05, Math.min(endNum, actualDuration));
@@ -225,7 +234,6 @@ module.exports = async function handler(req, res) {
       throw new Error("Trim range is outside the video duration");
     }
 
-    // 4) Trim with ffmpeg
     await trimVideo({
       inputPath: inputFile,
       outputPath: outputFile,
@@ -233,7 +241,6 @@ module.exports = async function handler(req, res) {
       endTime: safeEnd
     });
 
-    // 5) Upload trimmed output
     const outputPath = `tools/trim/${memberId}/${jobId}/trimmed.mp4`;
     const outputBuffer = await fsp.readFile(outputFile);
 
@@ -248,7 +255,6 @@ module.exports = async function handler(req, res) {
       throw new Error(uploadRes.error.message || "Failed to upload trimmed video");
     }
 
-    // 6) Create signed download URL for trimmed output
     const signedOutput = await supabaseAdmin.storage
       .from(outputBucket)
       .createSignedUrl(outputPath, 60 * 60 * 24);
@@ -256,10 +262,6 @@ module.exports = async function handler(req, res) {
     if (signedOutput.error || !signedOutput.data?.signedUrl) {
       throw new Error(signedOutput.error?.message || "Failed to create signed output URL");
     }
-
-    // Optional: update media_jobs if you want
-    // If your media_jobs.user_id expects Supabase auth UUID, skip this unless you have that mapping.
-    // Otherwise you can create a separate tools jobs table keyed by memberId.
 
     return json(res, 200, {
       ok: true,
@@ -289,7 +291,9 @@ module.exports = async function handler(req, res) {
       if (fs.existsSync(outputFile)) await fsp.unlink(outputFile);
     } catch {}
     try {
-      if (fs.existsSync(tempDir)) await fsp.rm(tempDir, { recursive: true, force: true });
+      if (fs.existsSync(tempDir)) {
+        await fsp.rm(tempDir, { recursive: true, force: true });
+      }
     } catch {}
   }
 };
