@@ -12,6 +12,7 @@ const ALLOWED_TOOL_TYPES = new Set([
   "trim",
   "resize",
   "compress",
+  "audio",
   "image_generate",
   "video_generate",
   "general",
@@ -131,7 +132,6 @@ module.exports = async function handler(req, res) {
   const ext = (safe.split(".").pop() || "bin").toLowerCase();
   const jobId = makeJobId();
 
-  // Original uploads always go into tool-inputs
   const path = `tools/${toolType}/${memberId}/${jobId}/original.${ext}`;
 
   const { data, error } = await supabaseAdmin.storage
@@ -150,7 +150,7 @@ module.exports = async function handler(req, res) {
   try {
     const signedGet = await supabaseAdmin.storage
       .from(INPUT_BUCKET)
-      .createSignedUrl(path, 60 * 60 * 24); // 24h
+      .createSignedUrl(path, 60 * 60 * 24);
     signedReadUrl = signedGet?.data?.signedUrl || null;
   } catch {
     signedReadUrl = null;
@@ -167,8 +167,6 @@ module.exports = async function handler(req, res) {
 
     path,
     uploadUrl: data.signedUrl,
-
-    // Temporary preview/read URL for the uploaded original file
     fileUrl: signedReadUrl,
 
     originalFileName: safe,
