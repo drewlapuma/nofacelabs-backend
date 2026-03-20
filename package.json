@@ -10,6 +10,7 @@
     "@supabase/supabase-js": "^2.49.1",
     "@vercel/blob": "^0.27.0",
     "ffmpeg-static": "^5.2.0",
-    "ffprobe-static": "^3.1.0"
+    "ffprobe-static": "^3.1.0",
+    "@google/genai": "^0.5.0"
   }
 }
