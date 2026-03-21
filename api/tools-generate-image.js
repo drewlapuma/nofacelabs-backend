@@ -1,6 +1,9 @@
 // api/tools-generate-image.js
 // CommonJS, Node 18+
-// Safer Vercel version with lazy imports
+// No SDK dependency required for Google image generation.
+// - Nano Banana -> Google REST generateContent
+// - Imagen 4 -> Google REST predict
+// - FLUX.2 -> Black Forest Labs async API
 
 const { createClient } = require("@supabase/supabase-js");
 
@@ -45,7 +48,7 @@ function setCors(req, res) {
     res.setHeader("Vary", "Origin");
   }
 
-  res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS,GET");
   res.setHeader(
     "Access-Control-Allow-Headers",
     "Content-Type, Authorization, x-nf-member-id, x-nf-member-email"
@@ -115,34 +118,48 @@ function fileExtFromContentType(contentType) {
   return "png";
 }
 
-async function getGoogleGenAI() {
-  const mod = await import("@google/genai");
-  return mod.GoogleGenAI;
-}
-
 async function generateWithNanoBanana({ apiKey, prompt, aspectRatio, modelName }) {
-  const GoogleGenAI = await getGoogleGenAI();
-  const ai = new GoogleGenAI({ apiKey });
+  const endpoint =
+    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelName)}:generateContent`;
 
-  const response = await ai.models.generateContent({
-    model: modelName,
-    contents: prompt,
-    config: {
-      imageConfig: {
-        aspectRatio,
-      },
+  const res = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      "x-goog-api-key": apiKey,
+      "Content-Type": "application/json",
     },
+    body: JSON.stringify({
+      contents: [
+        {
+          parts: [{ text: prompt }],
+        },
+      ],
+      generationConfig: {
+        imageConfig: {
+          aspectRatio,
+        },
+      },
+    }),
   });
 
-  const candidate = response?.candidates?.[0];
-  const parts = candidate?.content?.parts || [];
+  const data = await res.json().catch(() => null);
+
+  if (!res.ok) {
+    throw new Error(
+      data?.error?.message ||
+        data?.message ||
+        `Nano Banana request failed: HTTP ${res.status}`
+    );
+  }
+
+  const parts = data?.candidates?.[0]?.content?.parts || [];
 
   for (const part of parts) {
-    if (part.inlineData?.data) {
-      const mimeType = part.inlineData.mimeType || "image/png";
+    const inlineData = part.inlineData || part.inline_data;
+    if (inlineData?.data) {
       return {
-        buffer: Buffer.from(part.inlineData.data, "base64"),
-        contentType: mimeType,
+        buffer: Buffer.from(inlineData.data, "base64"),
+        contentType: inlineData.mimeType || inlineData.mime_type || "image/png",
       };
     }
   }
@@ -151,25 +168,49 @@ async function generateWithNanoBanana({ apiKey, prompt, aspectRatio, modelName }
 }
 
 async function generateWithImagen({ apiKey, prompt, aspectRatio, modelName }) {
-  const GoogleGenAI = await getGoogleGenAI();
-  const ai = new GoogleGenAI({ apiKey });
+  const endpoint =
+    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelName)}:predict`;
 
-  const response = await ai.models.generateImages({
-    model: modelName,
-    prompt,
-    config: {
-      numberOfImages: 1,
-      aspectRatio,
+  const res = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      "x-goog-api-key": apiKey,
+      "Content-Type": "application/json",
     },
+    body: JSON.stringify({
+      instances: [
+        {
+          prompt,
+        },
+      ],
+      parameters: {
+        sampleCount: 1,
+        aspectRatio,
+      },
+    }),
   });
 
-  const img = response?.generatedImages?.[0]?.image?.imageBytes;
-  if (!img) {
+  const data = await res.json().catch(() => null);
+
+  if (!res.ok) {
+    throw new Error(
+      data?.error?.message ||
+        data?.message ||
+        `Imagen 4 request failed: HTTP ${res.status}`
+    );
+  }
+
+  const imageBytes =
+    data?.predictions?.[0]?.bytesBase64Encoded ||
+    data?.predictions?.[0]?.image?.imageBytes ||
+    data?.generatedImages?.[0]?.image?.imageBytes;
+
+  if (!imageBytes) {
     throw new Error("Imagen 4 did not return an image");
   }
 
   return {
-    buffer: Buffer.from(img, "base64"),
+    buffer: Buffer.from(imageBytes, "base64"),
     contentType: "image/png",
   };
 }
@@ -193,10 +234,14 @@ async function generateWithFlux2({ apiKey, prompt, aspectRatio, endpoint }) {
   const createData = await createRes.json().catch(() => null);
 
   if (!createRes.ok || !createData?.polling_url) {
+    if (createRes.status === 402) {
+      throw new Error("FLUX.2 is unavailable because the BFL account needs active billing or more credits.");
+    }
+
     throw new Error(
       createData?.error ||
-      createData?.message ||
-      `FLUX.2 request failed: HTTP ${createRes.status}`
+        createData?.message ||
+        `FLUX.2 request failed: HTTP ${createRes.status}`
     );
   }
 
@@ -220,8 +265,8 @@ async function generateWithFlux2({ apiKey, prompt, aspectRatio, endpoint }) {
     if (!pollRes.ok) {
       throw new Error(
         pollData?.error ||
-        pollData?.message ||
-        `FLUX.2 polling failed: HTTP ${pollRes.status}`
+          pollData?.message ||
+          `FLUX.2 polling failed: HTTP ${pollRes.status}`
       );
     }
 
@@ -238,8 +283,8 @@ async function generateWithFlux2({ apiKey, prompt, aspectRatio, endpoint }) {
     if (status === "error" || status === "failed") {
       throw new Error(
         pollData?.error ||
-        pollData?.message ||
-        "FLUX.2 generation failed"
+          pollData?.message ||
+          "FLUX.2 generation failed"
       );
     }
   }
@@ -255,7 +300,11 @@ module.exports = async function handler(req, res) {
   }
 
   if (req.method === "GET") {
-    return json(res, 200, { ok: true, route: "tools-generate-image", status: "ready" });
+    return json(res, 200, {
+      ok: true,
+      route: "tools-generate-image",
+      status: "ready",
+    });
   }
 
   if (req.method !== "POST") {
