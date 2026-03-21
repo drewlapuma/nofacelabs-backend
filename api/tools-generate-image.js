@@ -13,21 +13,57 @@ const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || 
   .filter(Boolean);
 
 const SUPPORTED_MODELS = {
+
+  // ===== NANO BANANA =====
   "nano-banana": {
     provider: "google-gemini",
     label: "Nano Banana",
     model: "gemini-2.5-flash-image",
   },
+  "nano-banana-pro": {
+    provider: "google-gemini",
+    label: "Nano Banana Pro",
+    model: "gemini-3-pro-image-preview", // ⚠️ use correct model if different
+  },
+
+  // ===== IMAGEN =====
   "imagen-4": {
     provider: "google-imagen",
     label: "Imagen 4",
     model: "imagen-4.0-generate-001",
   },
+  "imagen-4-fast": {
+    provider: "google-imagen",
+    label: "Imagen 4 Fast",
+    model: "imagen-4.0-fast-generate-001", // ⚠️ confirm naming
+  },
+  "imagen-4-ultra": {
+    provider: "google-imagen",
+    label: "Imagen 4 Ultra",
+    model: "imagen-4.0-ultra-generate-001", // ⚠️ confirm naming
+  },
+
+  // ===== FLUX =====
   "flux-2": {
     provider: "bfl",
     label: "FLUX.2",
     endpoint: "https://api.bfl.ai/v1/flux-2-pro",
   },
+  "flux-2-pro": {
+    provider: "bfl",
+    label: "FLUX.2 Pro",
+    endpoint: "https://api.bfl.ai/v1/flux-2-pro",
+  },
+  "flux-2-max": {
+    provider: "bfl",
+    label: "FLUX.2 Max",
+    endpoint: "https://api.bfl.ai/v1/flux-2-max",
+  },
+  "flux-2-flex": {
+    provider: "bfl",
+    label: "FLUX.2 Flex",
+    endpoint: "https://api.bfl.ai/v1/flux-2-flex",
+  }
 };
 
 const SUPPORTED_ASPECT_RATIOS = new Set(["1:1", "9:16", "16:9", "4:3", "3:4"]);
