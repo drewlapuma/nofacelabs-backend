@@ -1,14 +1,5 @@
 // api/tools-generate-video.js
 // CommonJS, Node 18+
-//
-// Starts a video generation job and returns a normalized "pending" response.
-// This route does NOT download/store the final mp4 yet.
-// Build/use tools-video-status.js to poll provider jobs later.
-//
-// Providers:
-// - OpenAI Sora -> POST /v1/videos
-// - Google Veo -> REST long-running operation
-// - BytePlus Seedance -> env-configurable create-task endpoint
 
 const crypto = require("crypto");
 
@@ -60,18 +51,11 @@ const SUPPORTED_MODELS = {
     modelId: "sora-2-pro",
   },
 
-  // BytePlus Seedance
-  "seedance-1.0-pro": {
-    provider: "byteplus-seedance",
-    label: "Seedance 1.0 Pro",
-    modelIdEnv: "SEEDANCE_10_PRO_MODEL_ID",
-    defaultModelId: "seedance-1-0-pro",
-  },
-  "seedance-1.5-pro": {
-    provider: "byteplus-seedance",
-    label: "Seedance 1.5 Pro",
-    modelIdEnv: "SEEDANCE_15_PRO_MODEL_ID",
-    defaultModelId: "seedance-1-5-pro",
+  // xAI
+  "grok-imagine-video": {
+    provider: "xai-video",
+    label: "Grok Imagine Video",
+    modelId: "grok-imagine-video",
   },
 };
 
@@ -170,14 +154,11 @@ function normalizeVeoConfig({ aspectRatio, resolution, durationSeconds }) {
   let res = resolution;
   let dur = durationSeconds;
 
-  // Veo docs support 16:9 and 9:16. Use 16:9 fallback for 1:1.
   if (ratio === "1:1") ratio = "16:9";
   if (!["16:9", "9:16"].includes(ratio)) ratio = "16:9";
 
-  // Veo docs show 4, 6, 8 seconds.
   if (!["4", "6", "8"].includes(dur)) dur = "8";
 
-  // Higher resolutions generally align with 8s in docs/examples.
   if ((res === "1080p" || res === "4k") && dur !== "8") {
     dur = "8";
   }
@@ -189,7 +170,7 @@ function normalizeVeoConfig({ aspectRatio, resolution, durationSeconds }) {
   };
 }
 
-function normalizeSeedanceConfig({ aspectRatio, resolution, durationSeconds }) {
+function normalizeXaiConfig({ aspectRatio, resolution, durationSeconds }) {
   return {
     aspectRatio,
     resolution,
@@ -266,11 +247,7 @@ async function createGoogleVeoJob({
     `${encodeURIComponent(modelId)}:predictLongRunning?key=${encodeURIComponent(apiKey)}`;
 
   const body = {
-    instances: [
-      {
-        prompt,
-      },
-    ],
+    instances: [{ prompt }],
     parameters: {
       aspectRatio: normalized.aspectRatio,
       resolution: normalized.resolution,
@@ -307,7 +284,8 @@ async function createGoogleVeoJob({
     normalizedConfig: normalized,
   };
 }
-async function createSeedanceJob({
+
+async function createXaiVideoJob({
   apiKey,
   modelId,
   prompt,
@@ -315,63 +293,44 @@ async function createSeedanceJob({
   resolution,
   durationSeconds,
 }) {
-  const createUrl = process.env.BYTEPLUS_VIDEO_CREATE_URL;
-
-  if (!createUrl) {
-    throw new Error(
-      "Missing BYTEPLUS_VIDEO_CREATE_URL. Set the exact BytePlus create-task endpoint."
-    );
-  }
-
-  const normalized = normalizeSeedanceConfig({
+  const normalized = normalizeXaiConfig({
     aspectRatio,
     resolution,
     durationSeconds: String(durationSeconds),
   });
 
-  const body = {
-    model: modelId,
-    prompt,
-    aspect_ratio: normalized.aspectRatio,
-    resolution: normalized.resolution,
-    duration_seconds: Number(normalized.durationSeconds),
-  };
-
-  const res = await fetch(createUrl, {
+  const res = await fetch("https://api.x.ai/v1/videos/generations", {
     method: "POST",
     headers: {
       "Authorization": `Bearer ${apiKey}`,
       "Content-Type": "application/json",
       "Accept": "application/json",
     },
-    body: JSON.stringify(body),
+    body: JSON.stringify({
+      model: modelId,
+      prompt,
+      aspect_ratio: normalized.aspectRatio,
+      resolution: normalized.resolution,
+      duration_seconds: Number(normalized.durationSeconds),
+    }),
   });
 
   const data = await res.json().catch(() => null);
 
   if (!res.ok) {
     throw new Error(
-      data?.error ||
+      data?.error?.message ||
       data?.message ||
-      `BytePlus video create failed: HTTP ${res.status}`
+      JSON.stringify(data) ||
+      `xAI video create failed: HTTP ${res.status}`
     );
   }
 
   return {
-    provider: "byteplus-seedance",
-    providerJobId:
-      data?.id ||
-      data?.task_id ||
-      data?.taskId ||
-      data?.data?.id ||
-      data?.data?.task_id ||
-      null,
-    status:
-      data?.status ||
-      data?.task_status ||
-      data?.data?.status ||
-      "queued",
-    progress: Number(data?.progress || data?.data?.progress || 0),
+    provider: "xai-video",
+    providerJobId: data?.request_id || data?.id || null,
+    status: data?.status || "queued",
+    progress: Number(data?.progress || 0),
     raw: data,
     normalizedConfig: normalized,
   };
@@ -459,13 +418,13 @@ module.exports = async function handler(req, res) {
         resolution,
         durationSeconds,
       });
-    } else if (modelMeta.provider === "byteplus-seedance") {
-      if (!process.env.BYTEPLUS_API_KEY) {
-        throw new Error("Missing BYTEPLUS_API_KEY");
+    } else if (modelMeta.provider === "xai-video") {
+      if (!process.env.XAI_API_KEY) {
+        throw new Error("Missing XAI_API_KEY");
       }
 
-      started = await createSeedanceJob({
-        apiKey: process.env.BYTEPLUS_API_KEY,
+      started = await createXaiVideoJob({
+        apiKey: process.env.XAI_API_KEY,
         modelId: resolvedModelId,
         prompt,
         aspectRatio,
