@@ -76,7 +76,13 @@ function extFromContentType(contentType) {
 }
 
 async function downloadToBuffer(url, headers = {}) {
-  const res = await fetch(url, { headers });
+  const res = await fetch(url, {
+  method: "GET",
+  headers: {
+    ...headers,
+    "Accept": "*/*"
+  }
+});
 
   if (!res.ok) {
     throw new Error(`Failed to download provider video: HTTP ${res.status}`);
@@ -233,19 +239,13 @@ async function pollGoogleVeo({
     };
   }
 
-  const generatedVideo =
-    operation?.response?.generatedVideos?.[0] ||
-    operation?.response?.videos?.[0] ||
-    operation?.generatedVideos?.[0] ||
-    operation?.videos?.[0] ||
-    null;
-
   const fileUri =
-    generatedVideo?.video?.uri ||
-    generatedVideo?.video?.fileUri ||
-    generatedVideo?.uri ||
+    operation?.response?.generateVideoResponse?.generatedSamples?.[0]?.video?.uri ||
     operation?.response?.generatedVideos?.[0]?.video?.uri ||
     operation?.response?.generatedVideos?.[0]?.video?.fileUri ||
+    operation?.response?.videos?.[0]?.uri ||
+    operation?.generatedVideos?.[0]?.video?.uri ||
+    operation?.generatedVideos?.[0]?.uri ||
     null;
 
   if (!fileUri) {
@@ -255,7 +255,11 @@ async function pollGoogleVeo({
     );
   }
 
-  const finalVideo = await downloadToBuffer(fileUri);
+  const downloadUrl = fileUri.includes("key=")
+    ? fileUri
+    : fileUri + (fileUri.includes("?") ? "&" : "?") + "key=" + encodeURIComponent(apiKey);
+
+  const finalVideo = await downloadToBuffer(downloadUrl);
 
   return {
     status: "completed",
