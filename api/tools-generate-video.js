@@ -27,7 +27,7 @@ const SUPPORTED_MODELS = {
     provider: "google-veo",
     label: "Veo 3.1",
     modelIdEnv: "VEO_31_MODEL_ID",
-    defaultModelId: "veo-3.1-generate-001",
+    defaultModelId: "veo-3.1-generate-preview",
   },
   "veo-3.1-fast": {
     provider: "google-veo",
