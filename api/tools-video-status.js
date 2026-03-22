@@ -217,6 +217,7 @@ async function pollGoogleVeo({
     throw new Error(
       operation?.error?.message ||
       operation?.message ||
+      JSON.stringify(operation) ||
       `Google Veo status failed: HTTP ${res.status}`
     );
   }
@@ -241,12 +242,17 @@ async function pollGoogleVeo({
 
   const fileUri =
     generatedVideo?.video?.uri ||
+    generatedVideo?.video?.fileUri ||
     generatedVideo?.uri ||
     operation?.response?.generatedVideos?.[0]?.video?.uri ||
+    operation?.response?.generatedVideos?.[0]?.video?.fileUri ||
     null;
 
   if (!fileUri) {
-    throw new Error("Google Veo operation completed but no video file URI was returned");
+    throw new Error(
+      "Google Veo operation completed but no video file URI was returned: " +
+      JSON.stringify(operation)
+    );
   }
 
   const finalVideo = await downloadToBuffer(fileUri);
@@ -259,7 +265,6 @@ async function pollGoogleVeo({
     finalVideo,
   };
 }
-
 async function pollSeedance({
   apiKey,
   providerJobId,
