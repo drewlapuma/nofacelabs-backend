@@ -27,25 +27,25 @@ const SUPPORTED_MODELS = {
     provider: "google-veo",
     label: "Veo 3.1",
     modelIdEnv: "VEO_31_MODEL_ID",
-    defaultModelId: "veo-3.1-generate-preview",
+    defaultModelId: "veo-3.1-generate-001",
   },
   "veo-3.1-fast": {
     provider: "google-veo",
     label: "Veo 3.1 Fast",
     modelIdEnv: "VEO_31_FAST_MODEL_ID",
-    defaultModelId: "veo-3.1-generate-preview",
+    defaultModelId: "veo-3.1-fast-generate-001",
   },
   "veo-3": {
     provider: "google-veo",
     label: "Veo 3",
     modelIdEnv: "VEO_3_MODEL_ID",
-    defaultModelId: "veo-3.1-generate-preview",
+    defaultModelId: "veo-3.0-generate-001",
   },
   "veo-3-fast": {
     provider: "google-veo",
     label: "Veo 3 Fast",
     modelIdEnv: "VEO_3_FAST_MODEL_ID",
-    defaultModelId: "veo-3.1-generate-preview",
+    defaultModelId: "veo-3.0-fast-generate-001",
   },
 
   // OpenAI Sora
@@ -263,22 +263,28 @@ async function createGoogleVeoJob({
   const apiVersion = process.env.GOOGLE_GENAI_API_VERSION || "v1beta";
   const endpoint =
     `https://generativelanguage.googleapis.com/${apiVersion}/models/` +
-    `${encodeURIComponent(modelId)}:generateVideos?key=${encodeURIComponent(apiKey)}`;
+    `${encodeURIComponent(modelId)}:predictLongRunning?key=${encodeURIComponent(apiKey)}`;
+
+  const body = {
+    instances: [
+      {
+        prompt,
+      },
+    ],
+    parameters: {
+      aspectRatio: normalized.aspectRatio,
+      resolution: normalized.resolution,
+      durationSeconds: Number(normalized.durationSeconds),
+      sampleCount: 1,
+    },
+  };
 
   const res = await fetch(endpoint, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      prompt,
-      config: {
-        numberOfVideos: 1,
-        aspectRatio: normalized.aspectRatio,
-        resolution: normalized.resolution,
-        durationSeconds: normalized.durationSeconds,
-      },
-    }),
+    body: JSON.stringify(body),
   });
 
   const data = await res.json().catch(() => null);
@@ -287,20 +293,20 @@ async function createGoogleVeoJob({
     throw new Error(
       data?.error?.message ||
       data?.message ||
+      JSON.stringify(data) ||
       `Google Veo create failed: HTTP ${res.status}`
     );
   }
 
   return {
     provider: "google-veo",
-    providerJobId: data?.name || null, // long-running operation name
+    providerJobId: data?.name || null,
     status: data?.done ? "completed" : "queued",
     progress: 0,
     raw: data,
     normalizedConfig: normalized,
   };
 }
-
 async function createSeedanceJob({
   apiKey,
   modelId,
