@@ -2,26 +2,14 @@
 // CommonJS, Node 18+
 //
 // Polls a previously-started video generation job and returns a normalized status.
-// If the provider job is complete and bytes/url are available, this route uploads
-// the final mp4 to Supabase storage and returns a signed download URL.
+// If complete, uploads the final mp4 to Supabase and returns a signed URL.
 //
-// Expected body:
-// {
-//   jobId: "internal uuid from tools-generate-video.js",
-//   memberId: "memberstack id",
-//   provider: "openai-sora" | "google-veo" | "byteplus-seedance",
-//   providerJobId: "...",
-//   model: "sora-2" | ...,
-//   outputBucket?: "tool-outputs"
-// }
-//
-// Notes:
-// - OpenAI Sora: verified GET /v1/videos/{video_id} and GET /v1/videos/{video_id}/content
-// - Google Veo: verified generateVideos returns an operation; poll with getVideosOperation
-// - BytePlus Seedance: retrieve-task flow exists, but exact endpoint/shape is env-configurable here
+// Providers:
+// - OpenAI Sora -> GET /v1/videos/{id} and /content
+// - Google Veo -> REST long-running operation polling
+// - BytePlus Seedance -> env-configurable retrieve endpoint
 
 const { createClient } = require("@supabase/supabase-js");
-const crypto = require("crypto");
 
 const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || "*")
   .split(",")
@@ -211,12 +199,27 @@ async function pollGoogleVeo({
   apiKey,
   providerJobId,
 }) {
-  const { GoogleGenAI } = await import("@google/genai");
-  const ai = new GoogleGenAI({ apiKey });
+  const apiVersion = process.env.GOOGLE_GENAI_API_VERSION || "v1beta";
+  const endpoint =
+    `https://generativelanguage.googleapis.com/${apiVersion}/` +
+    `${providerJobId}?key=${encodeURIComponent(apiKey)}`;
 
-  const operation = await ai.operations.getVideosOperation({
-    operation: providerJobId,
+  const res = await fetch(endpoint, {
+    method: "GET",
+    headers: {
+      "Accept": "application/json",
+    },
   });
+
+  const operation = await res.json().catch(() => null);
+
+  if (!res.ok) {
+    throw new Error(
+      operation?.error?.message ||
+      operation?.message ||
+      `Google Veo status failed: HTTP ${res.status}`
+    );
+  }
 
   const done = Boolean(operation?.done);
 
@@ -229,7 +232,6 @@ async function pollGoogleVeo({
     };
   }
 
-  // Different SDK responses can nest generated videos differently.
   const generatedVideo =
     operation?.response?.generatedVideos?.[0] ||
     operation?.response?.videos?.[0] ||
@@ -247,27 +249,7 @@ async function pollGoogleVeo({
     throw new Error("Google Veo operation completed but no video file URI was returned");
   }
 
-  // Gemini file URIs are not always directly downloadable. The SDK usually exposes files.download.
-  // We try SDK download first, then fall back to fetch if the URI is already public/signed.
-  let finalVideo = null;
-
-  try {
-    if (ai.files && typeof ai.files.download === "function") {
-      const fileRes = await ai.files.download({ file: fileUri });
-      const chunks = [];
-      for await (const chunk of fileRes) chunks.push(Buffer.from(chunk));
-      finalVideo = {
-        buffer: Buffer.concat(chunks),
-        contentType: "video/mp4",
-      };
-    }
-  } catch (e) {
-    finalVideo = null;
-  }
-
-  if (!finalVideo) {
-    finalVideo = await downloadToBuffer(fileUri);
-  }
+  const finalVideo = await downloadToBuffer(fileUri);
 
   return {
     status: "completed",
@@ -286,7 +268,7 @@ async function pollSeedance({
 
   if (!retrieveUrlBase) {
     throw new Error(
-      "Missing BYTEPLUS_VIDEO_RETRIEVE_URL. Set the exact BytePlus retrieve-task endpoint from your ModelArk docs."
+      "Missing BYTEPLUS_VIDEO_RETRIEVE_URL. Set the exact BytePlus retrieve-task endpoint."
     );
   }
 
