@@ -1,13 +1,5 @@
 // api/tools-video-status.js
 // CommonJS, Node 18+
-//
-// Polls a previously-started video generation job and returns a normalized status.
-// If complete, uploads the final mp4 to Supabase and returns a signed URL.
-//
-// Providers:
-// - OpenAI Sora -> GET /v1/videos/{id} and /content
-// - Google Veo -> REST long-running operation polling
-// - BytePlus Seedance -> env-configurable retrieve endpoint
 
 const { createClient } = require("@supabase/supabase-js");
 
@@ -77,12 +69,12 @@ function extFromContentType(contentType) {
 
 async function downloadToBuffer(url, headers = {}) {
   const res = await fetch(url, {
-  method: "GET",
-  headers: {
-    ...headers,
-    "Accept": "*/*"
-  }
-});
+    method: "GET",
+    headers: {
+      ...headers,
+      "Accept": "*/*",
+    },
+  });
 
   if (!res.ok) {
     throw new Error(`Failed to download provider video: HTTP ${res.status}`);
@@ -269,23 +261,12 @@ async function pollGoogleVeo({
     finalVideo,
   };
 }
-async function pollSeedance({
+
+async function pollXaiVideo({
   apiKey,
   providerJobId,
 }) {
-  const retrieveUrlBase = process.env.BYTEPLUS_VIDEO_RETRIEVE_URL;
-
-  if (!retrieveUrlBase) {
-    throw new Error(
-      "Missing BYTEPLUS_VIDEO_RETRIEVE_URL. Set the exact BytePlus retrieve-task endpoint."
-    );
-  }
-
-  const retrieveUrl = retrieveUrlBase.includes("{task_id}")
-    ? retrieveUrlBase.replace("{task_id}", encodeURIComponent(providerJobId))
-    : `${retrieveUrlBase.replace(/\/$/, "")}/${encodeURIComponent(providerJobId)}`;
-
-  const res = await fetch(retrieveUrl, {
+  const res = await fetch(`https://api.x.ai/v1/videos/${encodeURIComponent(providerJobId)}`, {
     method: "GET",
     headers: {
       "Authorization": `Bearer ${apiKey}`,
@@ -297,24 +278,24 @@ async function pollSeedance({
 
   if (!res.ok) {
     throw new Error(
-      data?.error ||
+      data?.error?.message ||
       data?.message ||
-      `BytePlus video status failed: HTTP ${res.status}`
+      JSON.stringify(data) ||
+      `xAI video status failed: HTTP ${res.status}`
     );
   }
 
   const status = String(
     data?.status ||
-    data?.task_status ||
-    data?.data?.status ||
-    data?.data?.task_status ||
+    data?.state ||
+    data?.result?.status ||
     ""
   ).toLowerCase();
 
-  if (status !== "completed" && status !== "succeeded" && status !== "success") {
+  if (!["completed", "succeeded", "success"].includes(status)) {
     return {
       status: status || "queued",
-      progress: Number(data?.progress || data?.data?.progress || 0),
+      progress: Number(data?.progress || data?.result?.progress || 0),
       isComplete: false,
       raw: data,
     };
@@ -322,16 +303,19 @@ async function pollSeedance({
 
   const videoUrl =
     data?.video_url ||
+    data?.url ||
+    data?.result_url ||
     data?.output_url ||
     data?.result?.url ||
     data?.result?.video_url ||
-    data?.data?.video_url ||
-    data?.data?.output_url ||
-    data?.data?.result?.url ||
+    data?.video?.url ||
+    data?.artifacts?.[0]?.url ||
     null;
 
   if (!videoUrl) {
-    throw new Error("BytePlus task completed but no video URL was returned");
+    throw new Error(
+      "xAI video completed but no video URL returned: " + JSON.stringify(data)
+    );
   }
 
   const finalVideo = await downloadToBuffer(videoUrl, {
@@ -416,13 +400,13 @@ module.exports = async function handler(req, res) {
         apiKey: process.env.GEMINI_API_KEY,
         providerJobId,
       });
-    } else if (provider === "byteplus-seedance") {
-      if (!process.env.BYTEPLUS_API_KEY) {
-        throw new Error("Missing BYTEPLUS_API_KEY");
+    } else if (provider === "xai-video") {
+      if (!process.env.XAI_API_KEY) {
+        throw new Error("Missing XAI_API_KEY");
       }
 
-      polled = await pollSeedance({
-        apiKey: process.env.BYTEPLUS_API_KEY,
+      polled = await pollXaiVideo({
+        apiKey: process.env.XAI_API_KEY,
         providerJobId,
       });
     } else {
