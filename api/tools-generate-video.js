@@ -299,6 +299,12 @@ async function createXaiVideoJob({
     durationSeconds: String(durationSeconds),
   });
 
+  const safeResolution = ["480p", "720p"].includes(normalized.resolution)
+    ? normalized.resolution
+    : "720p";
+
+  const safeDuration = Math.min(Math.max(Number(normalized.durationSeconds || 8), 1), 15);
+
   const res = await fetch("https://api.x.ai/v1/videos/generations", {
     method: "POST",
     headers: {
@@ -309,9 +315,9 @@ async function createXaiVideoJob({
     body: JSON.stringify({
       model: modelId,
       prompt,
+      duration: safeDuration,
       aspect_ratio: normalized.aspectRatio,
-      resolution: normalized.resolution,
-      duration_seconds: Number(normalized.durationSeconds),
+      resolution: safeResolution,
     }),
   });
 
@@ -329,10 +335,14 @@ async function createXaiVideoJob({
   return {
     provider: "xai-video",
     providerJobId: data?.request_id || data?.id || null,
-    status: data?.status || "queued",
-    progress: Number(data?.progress || 0),
+    status: "pending",
+    progress: 0,
     raw: data,
-    normalizedConfig: normalized,
+    normalizedConfig: {
+      aspectRatio: normalized.aspectRatio,
+      resolution: safeResolution,
+      durationSeconds: String(safeDuration),
+    },
   };
 }
 
