@@ -33,7 +33,7 @@ const SUPPORTED_MODELS = {
     provider: "google-veo",
     label: "Veo 3.1 Fast",
     modelIdEnv: "VEO_31_FAST_MODEL_ID",
-    defaultModelId: "veo-3.1-fast-generate-001",
+    defaultModelId: "veo-3.1-fast-generate-preview",
   },
   "veo-3": {
     provider: "google-veo",
