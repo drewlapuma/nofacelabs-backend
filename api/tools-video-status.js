@@ -285,49 +285,45 @@ async function pollXaiVideo({
     );
   }
 
-  const status = String(
-    data?.status ||
-    data?.state ||
-    data?.result?.status ||
-    ""
-  ).toLowerCase();
+  const status = String(data?.status || "").toLowerCase();
 
-  if (!["completed", "succeeded", "success"].includes(status)) {
+  if (status === "done") {
+    const videoUrl =
+      data?.video?.url ||
+      data?.url ||
+      data?.result?.url ||
+      null;
+
+    if (!videoUrl) {
+      throw new Error("xAI video completed but no video URL returned: " + JSON.stringify(data));
+    }
+
+    const finalVideo = await downloadToBuffer(videoUrl, {
+      "Authorization": `Bearer ${apiKey}`,
+    });
+
     return {
-      status: status || "queued",
-      progress: Number(data?.progress || data?.result?.progress || 0),
-      isComplete: false,
+      status: "completed",
+      progress: 100,
+      isComplete: true,
       raw: data,
+      finalVideo,
     };
   }
 
-  const videoUrl =
-    data?.video_url ||
-    data?.url ||
-    data?.result_url ||
-    data?.output_url ||
-    data?.result?.url ||
-    data?.result?.video_url ||
-    data?.video?.url ||
-    data?.artifacts?.[0]?.url ||
-    null;
-
-  if (!videoUrl) {
-    throw new Error(
-      "xAI video completed but no video URL returned: " + JSON.stringify(data)
-    );
+  if (status === "failed") {
+    throw new Error(data?.message || "xAI video generation failed");
   }
 
-  const finalVideo = await downloadToBuffer(videoUrl, {
-    "Authorization": `Bearer ${apiKey}`,
-  });
+  if (status === "expired") {
+    throw new Error("xAI video request expired");
+  }
 
   return {
-    status: "completed",
-    progress: 100,
-    isComplete: true,
+    status: status || "pending",
+    progress: 0,
+    isComplete: false,
     raw: data,
-    finalVideo,
   };
 }
 
