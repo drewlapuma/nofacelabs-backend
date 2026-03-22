@@ -1,0 +1,480 @@
+// api/tools-generate-video.js
+// CommonJS, Node 18+
+//
+// Starts a video generation job and returns a normalized "pending" response.
+// This route does NOT download/store the final mp4 yet.
+// Build a follow-up status route next to poll OpenAI / Veo / Seedance jobs.
+//
+// Provider notes:
+// - OpenAI Sora: verified create flow via POST /v1/videos with model, prompt, size, seconds.
+// - Google Veo 3.1: verified JS SDK flow via ai.models.generateVideos(...), returning an operation.
+// - BytePlus Seedance: create/retrieve task flow is documented, but exact request shape is left env-configurable here.
+
+const crypto = require("crypto");
+
+const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || "*")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+const SUPPORTED_ASPECT_RATIOS = new Set(["16:9", "9:16", "1:1"]);
+const SUPPORTED_RESOLUTIONS = new Set(["720p", "1080p", "4k"]);
+const SUPPORTED_DURATIONS = new Set(["4", "5", "6", "8", "10"]);
+
+const SUPPORTED_MODELS = {
+  // Google Veo
+  "veo-3.1": {
+    provider: "google-veo",
+    label: "Veo 3.1",
+    modelIdEnv: "VEO_31_MODEL_ID",
+    defaultModelId: "veo-3.1-generate-preview",
+  },
+  "veo-3.1-fast": {
+    provider: "google-veo",
+    label: "Veo 3.1 Fast",
+    modelIdEnv: "VEO_31_FAST_MODEL_ID",
+    defaultModelId: "veo-3.1-generate-preview",
+  },
+  "veo-3": {
+    provider: "google-veo",
+    label: "Veo 3",
+    modelIdEnv: "VEO_3_MODEL_ID",
+    defaultModelId: "veo-3.1-generate-preview",
+  },
+  "veo-3-fast": {
+    provider: "google-veo",
+    label: "Veo 3 Fast",
+    modelIdEnv: "VEO_3_FAST_MODEL_ID",
+    defaultModelId: "veo-3.1-generate-preview",
+  },
+
+  // OpenAI Sora
+  "sora-2": {
+    provider: "openai-sora",
+    label: "Sora 2",
+    modelId: "sora-2",
+  },
+  "sora-2-pro": {
+    provider: "openai-sora",
+    label: "Sora 2 Pro",
+    modelId: "sora-2-pro",
+  },
+
+  // BytePlus Seedance
+  "seedance-1.0-pro": {
+    provider: "byteplus-seedance",
+    label: "Seedance 1.0 Pro",
+    modelIdEnv: "SEEDANCE_10_PRO_MODEL_ID",
+    defaultModelId: "seedance-1-0-pro",
+  },
+  "seedance-1.5-pro": {
+    provider: "byteplus-seedance",
+    label: "Seedance 1.5 Pro",
+    modelIdEnv: "SEEDANCE_15_PRO_MODEL_ID",
+    defaultModelId: "seedance-1-5-pro",
+  },
+};
+
+function setCors(req, res) {
+  const origin = req.headers.origin || "";
+
+  if (ALLOW_ORIGINS.includes("*")) {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+  } else if (origin && ALLOW_ORIGINS.includes(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+  }
+
+  res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization, x-nf-member-id, x-nf-member-email"
+  );
+  res.setHeader("Access-Control-Max-Age", "86400");
+}
+
+async function readJson(req) {
+  if (req.body && typeof req.body === "object") return req.body;
+
+  const chunks = [];
+  for await (const chunk of req) chunks.push(chunk);
+  const raw = Buffer.concat(chunks).toString("utf8").trim();
+  if (!raw) return null;
+
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return "__INVALID__";
+  }
+}
+
+function json(res, status, body) {
+  res.statusCode = status;
+  res.setHeader("Content-Type", "application/json");
+  res.end(JSON.stringify(body));
+}
+
+function safeSegment(value, fallback = "unknown") {
+  return String(value || fallback)
+    .replace(/[^a-zA-Z0-9_-]/g, "_")
+    .slice(0, 80);
+}
+
+function resolveModelId(modelKey) {
+  const meta = SUPPORTED_MODELS[modelKey];
+  if (!meta) return null;
+  if (meta.modelId) return meta.modelId;
+  if (meta.modelIdEnv && process.env[meta.modelIdEnv]) return process.env[meta.modelIdEnv];
+  return meta.defaultModelId || null;
+}
+
+function normalizeAspectRatio(input) {
+  const v = String(input || "16:9").trim();
+  if (!SUPPORTED_ASPECT_RATIOS.has(v)) return "16:9";
+  return v;
+}
+
+function normalizeResolution(input) {
+  const v = String(input || "720p").toLowerCase().trim();
+  if (!SUPPORTED_RESOLUTIONS.has(v)) return "720p";
+  return v;
+}
+
+function normalizeDuration(input) {
+  const v = String(input || "8").trim();
+  if (!SUPPORTED_DURATIONS.has(v)) return "8";
+  return v;
+}
+
+function mapOpenAISize(aspectRatio, resolution, model) {
+  const is1080Allowed = model === "sora-2-pro";
+  const is4kRequested = resolution === "4k";
+  const use1080 = resolution === "1080p" || is4kRequested;
+
+  if (aspectRatio === "9:16") {
+    if (use1080 && is1080Allowed) return "1080x1920";
+    return "720x1280";
+  }
+
+  if (aspectRatio === "1:1") {
+    if (use1080 && is1080Allowed) return "1080x1080";
+    return "720x720";
+  }
+
+  if (use1080 && is1080Allowed) return "1920x1080";
+  return "1280x720";
+}
+
+function normalizeVeoConfig({ aspectRatio, resolution, durationSeconds }) {
+  let ratio = aspectRatio;
+  let res = resolution;
+  let dur = durationSeconds;
+
+  // Veo docs are explicit about 16:9 / 9:16 and 4/6/8 seconds.
+  if (ratio === "1:1") ratio = "16:9";
+  if (!["16:9", "9:16"].includes(ratio)) ratio = "16:9";
+
+  if (!["4", "6", "8"].includes(dur)) dur = "8";
+
+  // Veo docs indicate 1080p/4k must be 8s for these modes.
+  if ((res === "1080p" || res === "4k") && dur !== "8") {
+    dur = "8";
+  }
+
+  return {
+    aspectRatio: ratio,
+    resolution: res,
+    durationSeconds: dur,
+  };
+}
+
+function normalizeSeedanceConfig({ aspectRatio, resolution, durationSeconds }) {
+  // Conservative defaults. BytePlus exact constraints vary by model/account.
+  return {
+    aspectRatio,
+    resolution,
+    durationSeconds,
+  };
+}
+
+async function createOpenAISoraJob({
+  apiKey,
+  modelId,
+  prompt,
+  aspectRatio,
+  resolution,
+  durationSeconds,
+}) {
+  const size = mapOpenAISize(aspectRatio, resolution, modelId);
+
+  const res = await fetch("https://api.openai.com/v1/videos", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: modelId,
+      prompt,
+      size,
+      seconds: String(durationSeconds),
+    }),
+  });
+
+  const data = await res.json().catch(() => null);
+
+  if (!res.ok) {
+    throw new Error(
+      data?.error?.message ||
+      data?.message ||
+      `OpenAI video create failed: HTTP ${res.status}`
+    );
+  }
+
+  return {
+    provider: "openai-sora",
+    providerJobId: data?.id || null,
+    status: data?.status || "queued",
+    progress: Number(data?.progress || 0),
+    raw: data,
+    normalizedConfig: {
+      aspectRatio,
+      resolution,
+      durationSeconds: String(durationSeconds),
+      size,
+    },
+  };
+}
+
+async function createGoogleVeoJob({
+  apiKey,
+  modelId,
+  prompt,
+  aspectRatio,
+  resolution,
+  durationSeconds,
+}) {
+  const { GoogleGenAI } = await import("@google/genai");
+
+  const ai = new GoogleGenAI({ apiKey });
+
+  const normalized = normalizeVeoConfig({
+    aspectRatio,
+    resolution,
+    durationSeconds: String(durationSeconds),
+  });
+
+  const operation = await ai.models.generateVideos({
+    model: modelId,
+    prompt,
+    config: {
+      aspectRatio: normalized.aspectRatio,
+      resolution: normalized.resolution,
+      durationSeconds: normalized.durationSeconds,
+      numberOfVideos: 1,
+    },
+  });
+
+  return {
+    provider: "google-veo",
+    providerJobId: operation?.name || null,
+    status: operation?.done ? "completed" : "queued",
+    progress: 0,
+    raw: operation,
+    normalizedConfig: normalized,
+  };
+}
+
+async function createSeedanceJob({
+  apiKey,
+  modelId,
+  prompt,
+  aspectRatio,
+  resolution,
+  durationSeconds,
+}) {
+  const createUrl = process.env.BYTEPLUS_VIDEO_CREATE_URL;
+
+  if (!createUrl) {
+    throw new Error(
+      "Missing BYTEPLUS_VIDEO_CREATE_URL. Set the exact BytePlus create-task endpoint from your ModelArk docs."
+    );
+  }
+
+  const normalized = normalizeSeedanceConfig({
+    aspectRatio,
+    resolution,
+    durationSeconds: String(durationSeconds),
+  });
+
+  // This payload is intentionally configurable and conservative because the
+  // exact BytePlus request shape is not safely verifiable from the parsed docs here.
+  const body = {
+    model: modelId,
+    prompt,
+    aspect_ratio: normalized.aspectRatio,
+    resolution: normalized.resolution,
+    duration_seconds: Number(normalized.durationSeconds),
+  };
+
+  const res = await fetch(createUrl, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+      "Accept": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+
+  const data = await res.json().catch(() => null);
+
+  if (!res.ok) {
+    throw new Error(
+      data?.error ||
+      data?.message ||
+      `BytePlus video create failed: HTTP ${res.status}`
+    );
+  }
+
+  return {
+    provider: "byteplus-seedance",
+    providerJobId:
+      data?.id ||
+      data?.task_id ||
+      data?.taskId ||
+      data?.data?.id ||
+      data?.data?.task_id ||
+      null,
+    status:
+      data?.status ||
+      data?.task_status ||
+      data?.data?.status ||
+      "queued",
+    progress: Number(data?.progress || data?.data?.progress || 0),
+    raw: data,
+    normalizedConfig: normalized,
+  };
+}
+
+module.exports = async function handler(req, res) {
+  setCors(req, res);
+
+  if (req.method === "OPTIONS") return json(res, 200, { ok: true });
+
+  if (req.method !== "POST") {
+    return json(res, 405, { ok: false, error: "Method not allowed" });
+  }
+
+  const body = await readJson(req);
+  if (!body) return json(res, 400, { ok: false, error: "Missing body" });
+  if (body === "__INVALID__") {
+    return json(res, 400, { ok: false, error: "Invalid JSON" });
+  }
+
+  const memberId = safeSegment(
+    body.memberId || req.headers["x-nf-member-id"] || "anonymous"
+  );
+
+  const prompt = String(body.prompt || "").trim();
+  const model = String(body.model || "").trim();
+  const aspectRatio = normalizeAspectRatio(body.aspectRatio);
+  const resolution = normalizeResolution(body.resolution);
+  const durationSeconds = normalizeDuration(body.durationSeconds);
+
+  if (!prompt) {
+    return json(res, 400, { ok: false, error: "prompt is required" });
+  }
+
+  if (prompt.length > 1600) {
+    return json(res, 400, { ok: false, error: "prompt is too long" });
+  }
+
+  if (!SUPPORTED_MODELS[model]) {
+    return json(res, 400, {
+      ok: false,
+      error: "Invalid model",
+      allowed: Object.keys(SUPPORTED_MODELS),
+    });
+  }
+
+  const modelMeta = SUPPORTED_MODELS[model];
+  const resolvedModelId = resolveModelId(model);
+
+  if (!resolvedModelId) {
+    return json(res, 500, {
+      ok: false,
+      error: `Could not resolve provider model id for ${model}`,
+    });
+  }
+
+  const internalJobId = crypto.randomUUID();
+
+  try {
+    let started;
+
+    if (modelMeta.provider === "openai-sora") {
+      if (!process.env.OPENAI_API_KEY) {
+        throw new Error("Missing OPENAI_API_KEY");
+      }
+
+      started = await createOpenAISoraJob({
+        apiKey: process.env.OPENAI_API_KEY,
+        modelId: resolvedModelId,
+        prompt,
+        aspectRatio,
+        resolution,
+        durationSeconds,
+      });
+    } else if (modelMeta.provider === "google-veo") {
+      if (!process.env.GEMINI_API_KEY) {
+        throw new Error("Missing GEMINI_API_KEY");
+      }
+
+      started = await createGoogleVeoJob({
+        apiKey: process.env.GEMINI_API_KEY,
+        modelId: resolvedModelId,
+        prompt,
+        aspectRatio,
+        resolution,
+        durationSeconds,
+      });
+    } else if (modelMeta.provider === "byteplus-seedance") {
+      if (!process.env.BYTEPLUS_API_KEY) {
+        throw new Error("Missing BYTEPLUS_API_KEY");
+      }
+
+      started = await createSeedanceJob({
+        apiKey: process.env.BYTEPLUS_API_KEY,
+        modelId: resolvedModelId,
+        prompt,
+        aspectRatio,
+        resolution,
+        durationSeconds,
+      });
+    } else {
+      throw new Error("Unsupported provider");
+    }
+
+    return json(res, 200, {
+      ok: true,
+      jobId: internalJobId,
+      memberId,
+      model,
+      modelLabel: modelMeta.label,
+      provider: started.provider,
+      providerJobId: started.providerJobId,
+      status: started.status || "queued",
+      progress: Number(started.progress || 0),
+      pollAfterMs: 4000,
+      normalizedConfig: started.normalizedConfig,
+      providerRaw: started.raw,
+    });
+  } catch (err) {
+    console.error("tools-generate-video error:", err);
+    return json(res, 500, {
+      ok: false,
+      error: err.message || "Failed to start video generation",
+    });
+  }
+};
