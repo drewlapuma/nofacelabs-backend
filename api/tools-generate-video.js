@@ -3,12 +3,12 @@
 //
 // Starts a video generation job and returns a normalized "pending" response.
 // This route does NOT download/store the final mp4 yet.
-// Build a follow-up status route next to poll OpenAI / Veo / Seedance jobs.
+// Build/use tools-video-status.js to poll provider jobs later.
 //
-// Provider notes:
-// - OpenAI Sora: verified create flow via POST /v1/videos with model, prompt, size, seconds.
-// - Google Veo 3.1: verified JS SDK flow via ai.models.generateVideos(...), returning an operation.
-// - BytePlus Seedance: create/retrieve task flow is documented, but exact request shape is left env-configurable here.
+// Providers:
+// - OpenAI Sora -> POST /v1/videos
+// - Google Veo -> REST long-running operation
+// - BytePlus Seedance -> env-configurable create-task endpoint
 
 const crypto = require("crypto");
 
@@ -170,13 +170,14 @@ function normalizeVeoConfig({ aspectRatio, resolution, durationSeconds }) {
   let res = resolution;
   let dur = durationSeconds;
 
-  // Veo docs are explicit about 16:9 / 9:16 and 4/6/8 seconds.
+  // Veo docs support 16:9 and 9:16. Use 16:9 fallback for 1:1.
   if (ratio === "1:1") ratio = "16:9";
   if (!["16:9", "9:16"].includes(ratio)) ratio = "16:9";
 
+  // Veo docs show 4, 6, 8 seconds.
   if (!["4", "6", "8"].includes(dur)) dur = "8";
 
-  // Veo docs indicate 1080p/4k must be 8s for these modes.
+  // Higher resolutions generally align with 8s in docs/examples.
   if ((res === "1080p" || res === "4k") && dur !== "8") {
     dur = "8";
   }
@@ -189,7 +190,6 @@ function normalizeVeoConfig({ aspectRatio, resolution, durationSeconds }) {
 }
 
 function normalizeSeedanceConfig({ aspectRatio, resolution, durationSeconds }) {
-  // Conservative defaults. BytePlus exact constraints vary by model/account.
   return {
     aspectRatio,
     resolution,
@@ -254,33 +254,49 @@ async function createGoogleVeoJob({
   resolution,
   durationSeconds,
 }) {
-  const { GoogleGenAI } = await import("@google/genai");
-
-  const ai = new GoogleGenAI({ apiKey });
-
   const normalized = normalizeVeoConfig({
     aspectRatio,
     resolution,
     durationSeconds: String(durationSeconds),
   });
 
-  const operation = await ai.models.generateVideos({
-    model: modelId,
-    prompt,
-    config: {
-      aspectRatio: normalized.aspectRatio,
-      resolution: normalized.resolution,
-      durationSeconds: normalized.durationSeconds,
-      numberOfVideos: 1,
+  const apiVersion = process.env.GOOGLE_GENAI_API_VERSION || "v1beta";
+  const endpoint =
+    `https://generativelanguage.googleapis.com/${apiVersion}/models/` +
+    `${encodeURIComponent(modelId)}:generateVideos?key=${encodeURIComponent(apiKey)}`;
+
+  const res = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
     },
+    body: JSON.stringify({
+      prompt,
+      config: {
+        numberOfVideos: 1,
+        aspectRatio: normalized.aspectRatio,
+        resolution: normalized.resolution,
+        durationSeconds: normalized.durationSeconds,
+      },
+    }),
   });
+
+  const data = await res.json().catch(() => null);
+
+  if (!res.ok) {
+    throw new Error(
+      data?.error?.message ||
+      data?.message ||
+      `Google Veo create failed: HTTP ${res.status}`
+    );
+  }
 
   return {
     provider: "google-veo",
-    providerJobId: operation?.name || null,
-    status: operation?.done ? "completed" : "queued",
+    providerJobId: data?.name || null, // long-running operation name
+    status: data?.done ? "completed" : "queued",
     progress: 0,
-    raw: operation,
+    raw: data,
     normalizedConfig: normalized,
   };
 }
@@ -297,7 +313,7 @@ async function createSeedanceJob({
 
   if (!createUrl) {
     throw new Error(
-      "Missing BYTEPLUS_VIDEO_CREATE_URL. Set the exact BytePlus create-task endpoint from your ModelArk docs."
+      "Missing BYTEPLUS_VIDEO_CREATE_URL. Set the exact BytePlus create-task endpoint."
     );
   }
 
@@ -307,8 +323,6 @@ async function createSeedanceJob({
     durationSeconds: String(durationSeconds),
   });
 
-  // This payload is intentionally configurable and conservative because the
-  // exact BytePlus request shape is not safely verifiable from the parsed docs here.
   const body = {
     model: modelId,
     prompt,
