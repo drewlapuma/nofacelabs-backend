@@ -2,6 +2,12 @@
 // CommonJS, Node 18+
 
 const crypto = require("crypto");
+const { createClient } = require("@supabase/supabase-js");
+const {
+  getVideoCredits,
+  deductCredits,
+  addCredits
+} = require("../lib/credits");
 
 const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || "*")
   .split(",")
@@ -379,51 +385,106 @@ module.exports = async function handler(req, res) {
     return json(res, 405, { ok: false, error: "Method not allowed" });
   }
 
-  const body = await readJson(req);
-  if (!body) return json(res, 400, { ok: false, error: "Missing body" });
-  if (body === "__INVALID__") {
-    return json(res, 400, { ok: false, error: "Invalid JSON" });
-  }
-
-  const memberId = safeSegment(
-    body.memberId || req.headers["x-nf-member-id"] || "anonymous"
-  );
-
-  const prompt = String(body.prompt || "").trim();
-  const model = String(body.model || "").trim();
-  const aspectRatio = normalizeAspectRatio(body.aspectRatio);
-  const resolution = normalizeResolution(body.resolution);
-  const durationSeconds = normalizeDuration(body.durationSeconds);
-
-  if (!prompt) {
-    return json(res, 400, { ok: false, error: "prompt is required" });
-  }
-
-  if (prompt.length > 1600) {
-    return json(res, 400, { ok: false, error: "prompt is too long" });
-  }
-
-  if (!SUPPORTED_MODELS[model]) {
-    return json(res, 400, {
-      ok: false,
-      error: "Invalid model",
-      allowed: Object.keys(SUPPORTED_MODELS),
-    });
-  }
-
-  const modelMeta = SUPPORTED_MODELS[model];
-  const resolvedModelId = resolveModelId(model);
-
-  if (!resolvedModelId) {
-    return json(res, 500, {
-      ok: false,
-      error: `Could not resolve provider model id for ${model}`,
-    });
-  }
-
-  const internalJobId = crypto.randomUUID();
+  let creditsDeducted = false;
+  let refundContext = null;
 
   try {
+    const body = await readJson(req);
+    if (!body) return json(res, 400, { ok: false, error: "Missing body" });
+    if (body === "__INVALID__") {
+      return json(res, 400, { ok: false, error: "Invalid JSON" });
+    }
+
+    const memberId = safeSegment(
+      body.memberId || req.headers["x-nf-member-id"] || "anonymous"
+    );
+
+    const prompt = String(body.prompt || "").trim();
+    const model = String(body.model || "").trim();
+    const aspectRatio = normalizeAspectRatio(body.aspectRatio);
+    const resolution = normalizeResolution(body.resolution);
+    const durationSeconds = normalizeDuration(body.durationSeconds);
+
+    if (!prompt) {
+      return json(res, 400, { ok: false, error: "prompt is required" });
+    }
+
+    if (prompt.length > 1600) {
+      return json(res, 400, { ok: false, error: "prompt is too long" });
+    }
+
+    if (!SUPPORTED_MODELS[model]) {
+      return json(res, 400, {
+        ok: false,
+        error: "Invalid model",
+        allowed: Object.keys(SUPPORTED_MODELS),
+      });
+    }
+
+    const modelMeta = SUPPORTED_MODELS[model];
+    const resolvedModelId = resolveModelId(model);
+
+    if (!resolvedModelId) {
+      return json(res, 500, {
+        ok: false,
+        error: `Could not resolve provider model id for ${model}`,
+      });
+    }
+
+    const SUPABASE_URL = process.env.SUPABASE_URL;
+    const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+    if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+      return json(res, 500, {
+        ok: false,
+        error: "Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY env vars",
+      });
+    }
+
+    const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+      auth: { persistSession: false },
+    });
+
+    const internalJobId = crypto.randomUUID();
+
+    const creditCost = getVideoCredits({
+      model,
+      durationSeconds: Number(durationSeconds),
+      resolution
+    });
+
+    refundContext = {
+      supabaseAdmin,
+      memberId,
+      amount: creditCost,
+      reason: "video_generation_refund",
+      toolType: "video_generate",
+      model,
+      jobId: internalJobId,
+      metadata: {
+        aspectRatio,
+        resolution,
+        durationSeconds
+      }
+    };
+
+    await deductCredits({
+      supabaseAdmin,
+      memberId,
+      amount: creditCost,
+      reason: "video_generation",
+      toolType: "video_generate",
+      model,
+      jobId: internalJobId,
+      metadata: {
+        aspectRatio,
+        resolution,
+        durationSeconds
+      }
+    });
+
+    creditsDeducted = true;
+
     let started;
 
     if (modelMeta.provider === "openai-sora") {
@@ -475,6 +536,7 @@ module.exports = async function handler(req, res) {
       memberId,
       model,
       modelLabel: modelMeta.label,
+      creditCost,
       provider: started.provider,
       providerJobId: started.providerJobId,
       status: started.status || "queued",
@@ -484,7 +546,25 @@ module.exports = async function handler(req, res) {
       providerRaw: started.raw,
     });
   } catch (err) {
+    if (creditsDeducted && refundContext) {
+      try {
+        await addCredits(refundContext);
+      } catch (refundErr) {
+        console.error("tools-generate-video refund error:", refundErr);
+      }
+    }
+
     console.error("tools-generate-video error:", err);
+
+    if (err.code === "INSUFFICIENT_CREDITS") {
+      return json(res, 402, {
+        ok: false,
+        error: "Not enough credits",
+        balance: err.balance,
+        required: err.required
+      });
+    }
+
     return json(res, 500, {
       ok: false,
       error: err.message || "Failed to start video generation",
