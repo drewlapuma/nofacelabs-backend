@@ -6,6 +6,11 @@
 // - FLUX.2 -> Black Forest Labs async API
 
 const { createClient } = require("@supabase/supabase-js");
+const {
+  getImageCredits,
+  deductCredits,
+  addCredits
+} = require("../lib/credits");
 
 const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || "*")
   .split(",")
@@ -13,7 +18,6 @@ const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || 
   .filter(Boolean);
 
 const SUPPORTED_MODELS = {
-
   // ===== NANO BANANA =====
   "nano-banana": {
     provider: "google-gemini",
@@ -23,7 +27,7 @@ const SUPPORTED_MODELS = {
   "nano-banana-pro": {
     provider: "google-gemini",
     label: "Nano Banana Pro",
-    model: "gemini-3-pro-image-preview", // ⚠️ use correct model if different
+    model: "gemini-3-pro-image-preview",
   },
 
   // ===== IMAGEN =====
@@ -35,12 +39,12 @@ const SUPPORTED_MODELS = {
   "imagen-4-fast": {
     provider: "google-imagen",
     label: "Imagen 4 Fast",
-    model: "imagen-4.0-fast-generate-001", // ⚠️ confirm naming
+    model: "imagen-4.0-fast-generate-001",
   },
   "imagen-4-ultra": {
     provider: "google-imagen",
     label: "Imagen 4 Ultra",
-    model: "imagen-4.0-ultra-generate-001", // ⚠️ confirm naming
+    model: "imagen-4.0-ultra-generate-001",
   },
 
   // ===== FLUX =====
@@ -67,12 +71,6 @@ const SUPPORTED_MODELS = {
 };
 
 const SUPPORTED_ASPECT_RATIOS = new Set(["1:1", "9:16", "16:9", "4:3", "3:4"]);
-
-const CREDIT_COSTS = {
-  "nano-banana": 1,
-  "imagen-4": 3,
-  "flux-2": 2,
-};
 
 function setCors(req, res) {
   const origin = req.headers.origin || "";
@@ -183,8 +181,8 @@ async function generateWithNanoBanana({ apiKey, prompt, aspectRatio, modelName }
   if (!res.ok) {
     throw new Error(
       data?.error?.message ||
-        data?.message ||
-        `Nano Banana request failed: HTTP ${res.status}`
+      data?.message ||
+      `Nano Banana request failed: HTTP ${res.status}`
     );
   }
 
@@ -231,8 +229,8 @@ async function generateWithImagen({ apiKey, prompt, aspectRatio, modelName }) {
   if (!res.ok) {
     throw new Error(
       data?.error?.message ||
-        data?.message ||
-        `Imagen 4 request failed: HTTP ${res.status}`
+      data?.message ||
+      `Imagen 4 request failed: HTTP ${res.status}`
     );
   }
 
@@ -276,8 +274,8 @@ async function generateWithFlux2({ apiKey, prompt, aspectRatio, endpoint }) {
 
     throw new Error(
       createData?.error ||
-        createData?.message ||
-        `FLUX.2 request failed: HTTP ${createRes.status}`
+      createData?.message ||
+      `FLUX.2 request failed: HTTP ${createRes.status}`
     );
   }
 
@@ -301,8 +299,8 @@ async function generateWithFlux2({ apiKey, prompt, aspectRatio, endpoint }) {
     if (!pollRes.ok) {
       throw new Error(
         pollData?.error ||
-          pollData?.message ||
-          `FLUX.2 polling failed: HTTP ${pollRes.status}`
+        pollData?.message ||
+        `FLUX.2 polling failed: HTTP ${pollRes.status}`
       );
     }
 
@@ -319,8 +317,8 @@ async function generateWithFlux2({ apiKey, prompt, aspectRatio, endpoint }) {
     if (status === "error" || status === "failed") {
       throw new Error(
         pollData?.error ||
-          pollData?.message ||
-          "FLUX.2 generation failed"
+        pollData?.message ||
+        "FLUX.2 generation failed"
       );
     }
   }
@@ -346,6 +344,10 @@ module.exports = async function handler(req, res) {
   if (req.method !== "POST") {
     return json(res, 405, { ok: false, error: "Method not allowed" });
   }
+
+  let creditsDeducted = false;
+  let creditCost = 0;
+  let refundContext = null;
 
   try {
     const body = await readJson(req);
@@ -402,6 +404,34 @@ module.exports = async function handler(req, res) {
     });
 
     const provider = SUPPORTED_MODELS[model];
+    creditCost = getImageCredits(model);
+
+    refundContext = {
+      supabaseAdmin,
+      memberId,
+      amount: creditCost,
+      reason: "image_generation_refund",
+      toolType: "image_generate",
+      model,
+      metadata: {
+        aspectRatio
+      }
+    };
+
+    await deductCredits({
+      supabaseAdmin,
+      memberId,
+      amount: creditCost,
+      reason: "image_generation",
+      toolType: "image_generate",
+      model,
+      metadata: {
+        aspectRatio
+      }
+    });
+
+    creditsDeducted = true;
+
     let generated;
 
     if (provider.provider === "google-gemini") {
@@ -473,7 +503,7 @@ module.exports = async function handler(req, res) {
       model,
       modelLabel: provider.label,
       aspectRatio,
-      creditCost: CREDIT_COSTS[model] || 1,
+      creditCost,
       outputBucket: OUTPUT_BUCKET,
       outputPath,
       fileName,
@@ -481,7 +511,25 @@ module.exports = async function handler(req, res) {
       downloadUrl: signedOutput.data.signedUrl,
     });
   } catch (err) {
+    if (creditsDeducted && refundContext) {
+      try {
+        await addCredits(refundContext);
+      } catch (refundErr) {
+        console.error("tools-generate-image refund error:", refundErr);
+      }
+    }
+
     console.error("tools-generate-image error:", err);
+
+    if (err.code === "INSUFFICIENT_CREDITS") {
+      return json(res, 402, {
+        ok: false,
+        error: "Not enough credits",
+        balance: err.balance,
+        required: err.required
+      });
+    }
+
     return json(res, 500, {
       ok: false,
       error: err.message || "Failed to generate image",
