@@ -9,8 +9,10 @@ const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || 
   .filter(Boolean);
 
 const SUPPORTED_ASPECT_RATIOS = new Set(["16:9", "9:16", "1:1"]);
-const SUPPORTED_RESOLUTIONS = new Set(["720p", "1080p", "4k"]);
-const SUPPORTED_DURATIONS = new Set(["4", "5", "6", "8", "10"]);
+const SUPPORTED_RESOLUTIONS = new Set(["480p", "720p", "1080p"]);
+const SUPPORTED_DURATIONS = new Set([
+  "4", "5", "6", "7", "8", "9", "10", "11", "12"
+]);
 
 const SUPPORTED_MODELS = {
   // Google Veo
@@ -130,37 +132,50 @@ function normalizeDuration(input) {
   return v;
 }
 
-function mapOpenAISize(aspectRatio, resolution, model) {
-  const is1080Allowed = model === "sora-2-pro";
-  const is4kRequested = resolution === "4k";
-  const use1080 = resolution === "1080p" || is4kRequested;
+function mapOpenAISize(aspectRatio, resolution) {
+  const use1080 = resolution === "1080p";
 
   if (aspectRatio === "9:16") {
-    if (use1080 && is1080Allowed) return "1080x1920";
-    return "720x1280";
+    return use1080 ? "1080x1920" : "720x1280";
   }
 
   if (aspectRatio === "1:1") {
-    if (use1080 && is1080Allowed) return "1080x1080";
-    return "720x720";
+    return use1080 ? "1080x1080" : "720x720";
   }
 
-  if (use1080 && is1080Allowed) return "1920x1080";
-  return "1280x720";
+  return use1080 ? "1920x1080" : "1280x720";
 }
 
 function normalizeVeoConfig({ aspectRatio, resolution, durationSeconds }) {
-  let ratio = aspectRatio;
-  let res = resolution;
-  let dur = durationSeconds;
+  let ratio = String(aspectRatio || "16:9");
+  let res = String(resolution || "720p");
+  let dur = String(durationSeconds || "8");
 
-  if (ratio === "1:1") ratio = "16:9";
   if (!["16:9", "9:16"].includes(ratio)) ratio = "16:9";
-
+  if (!["720p", "1080p"].includes(res)) res = "720p";
   if (!["4", "6", "8"].includes(dur)) dur = "8";
 
-  if ((res === "1080p" || res === "4k") && dur !== "8") {
+  return {
+    aspectRatio: ratio,
+    resolution: res,
+    durationSeconds: dur,
+  };
+}
+
+function normalizeSoraConfig({ aspectRatio, resolution, durationSeconds }) {
+  let ratio = String(aspectRatio || "16:9");
+  let res = String(resolution || "720p");
+  let dur = String(durationSeconds || "8");
+
+  if (!["16:9", "9:16"].includes(ratio)) ratio = "16:9";
+  if (!["720p", "1080p"].includes(res)) res = "720p";
+
+  const durNum = Number(dur);
+  if (!Number.isFinite(durNum)) {
     dur = "8";
+  } else {
+    const clamped = Math.min(Math.max(Math.round(durNum), 4), 12);
+    dur = String(clamped);
   }
 
   return {
@@ -171,10 +186,18 @@ function normalizeVeoConfig({ aspectRatio, resolution, durationSeconds }) {
 }
 
 function normalizeXaiConfig({ aspectRatio, resolution, durationSeconds }) {
+  let ratio = String(aspectRatio || "16:9");
+  let res = String(resolution || "720p");
+  let dur = String(durationSeconds || "6");
+
+  if (!["16:9", "9:16"].includes(ratio)) ratio = "16:9";
+  if (!["480p", "720p"].includes(res)) res = "720p";
+  if (!["6", "10"].includes(dur)) dur = "6";
+
   return {
-    aspectRatio,
-    resolution,
-    durationSeconds,
+    aspectRatio: ratio,
+    resolution: res,
+    durationSeconds: dur,
   };
 }
 
@@ -186,7 +209,13 @@ async function createOpenAISoraJob({
   resolution,
   durationSeconds,
 }) {
-  const size = mapOpenAISize(aspectRatio, resolution, modelId);
+  const normalized = normalizeSoraConfig({
+    aspectRatio,
+    resolution,
+    durationSeconds: String(durationSeconds),
+  });
+
+  const size = mapOpenAISize(normalized.aspectRatio, normalized.resolution);
 
   const res = await fetch("https://api.openai.com/v1/videos", {
     method: "POST",
@@ -198,7 +227,7 @@ async function createOpenAISoraJob({
       model: modelId,
       prompt,
       size,
-      seconds: String(durationSeconds),
+      seconds: String(normalized.durationSeconds),
     }),
   });
 
@@ -219,9 +248,9 @@ async function createOpenAISoraJob({
     progress: Number(data?.progress || 0),
     raw: data,
     normalizedConfig: {
-      aspectRatio,
-      resolution,
-      durationSeconds: String(durationSeconds),
+      aspectRatio: normalized.aspectRatio,
+      resolution: normalized.resolution,
+      durationSeconds: String(normalized.durationSeconds),
       size,
     },
   };
@@ -299,11 +328,7 @@ async function createXaiVideoJob({
     durationSeconds: String(durationSeconds),
   });
 
-  const safeResolution = ["480p", "720p"].includes(normalized.resolution)
-    ? normalized.resolution
-    : "720p";
-
-  const safeDuration = Math.min(Math.max(Number(normalized.durationSeconds || 8), 1), 15);
+  const safeDuration = Number(normalized.durationSeconds);
 
   const res = await fetch("https://api.x.ai/v1/videos/generations", {
     method: "POST",
@@ -317,7 +342,7 @@ async function createXaiVideoJob({
       prompt,
       duration: safeDuration,
       aspect_ratio: normalized.aspectRatio,
-      resolution: safeResolution,
+      resolution: normalized.resolution,
     }),
   });
 
@@ -340,8 +365,8 @@ async function createXaiVideoJob({
     raw: data,
     normalizedConfig: {
       aspectRatio: normalized.aspectRatio,
-      resolution: safeResolution,
-      durationSeconds: String(safeDuration),
+      resolution: normalized.resolution,
+      durationSeconds: String(normalized.durationSeconds),
     },
   };
 }
