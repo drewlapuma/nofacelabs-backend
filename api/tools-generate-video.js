@@ -170,12 +170,11 @@ function normalizeSoraConfig({ aspectRatio, resolution, durationSeconds }) {
   if (!["16:9", "9:16"].includes(ratio)) ratio = "16:9";
   if (!["720p", "1080p"].includes(res)) res = "720p";
 
-  const durNum = Number(dur);
-  if (!Number.isFinite(durNum)) {
-    dur = "8";
-  } else {
-    const clamped = Math.min(Math.max(Math.round(durNum), 4), 12);
-    dur = String(clamped);
+  if (!["4", "8", "12"].includes(dur)) {
+    const durNum = Number(dur);
+    if (durNum <= 4) dur = "4";
+    else if (durNum <= 8) dur = "8";
+    else dur = "12";
   }
 
   return {
