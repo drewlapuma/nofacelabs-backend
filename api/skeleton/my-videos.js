@@ -1,4 +1,24 @@
-const { listJobsByUser } = require("../../lib/skeleton-jobs");
+const { listJobsByUser } = require("../_lib/skeleton-jobs");
+
+function setCors(req, res) {
+  const allowedOrigins = [
+    "https://nofacelabsai.webflow.io",
+    "https://nofacelabs.ai",
+    "http://localhost:3000",
+  ];
+
+  const origin = req.headers.origin;
+  if (origin && allowedOrigins.includes(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+  }
+
+  res.setHeader("Vary", "Origin");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization, x-nf-member-id, x-nf-member-email"
+  );
+}
 
 function send(res, status, body) {
   res.statusCode = status;
@@ -16,6 +36,13 @@ function getUserId(req) {
 }
 
 module.exports = async function handler(req, res) {
+  setCors(req, res);
+
+  if (req.method === "OPTIONS") {
+    res.statusCode = 204;
+    return res.end();
+  }
+
   try {
     if (req.method !== "GET") {
       return send(res, 405, { error: "Method not allowed" });
