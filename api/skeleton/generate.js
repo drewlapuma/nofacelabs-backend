@@ -2,17 +2,17 @@ const {
   calculateSkeletonCredits,
   VIDEO_DURATION_OPTIONS,
   VIDEO_RESOLUTION_OPTIONS,
-} = require("../../lib/skeleton-credits");
+} = require("../../_lib/skeleton-credits");
 const {
   createJob,
   updateJob,
   makeId,
-} = require("../../lib/skeleton-jobs");
+} = require("../../_lib/skeleton-jobs");
 const {
   buildSkeletonRenderScript,
   createCreatomateRender,
   pollCreatomateRender,
-} = require("../../lib/skeleton-creatomate");
+} = require("../../_lib/skeleton-creatomate");
 
 function send(res, status, body) {
   res.statusCode = status;
