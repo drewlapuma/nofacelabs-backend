@@ -2,17 +2,37 @@ const {
   calculateSkeletonCredits,
   VIDEO_DURATION_OPTIONS,
   VIDEO_RESOLUTION_OPTIONS,
-} = require("../../_lib/skeleton-credits");
+} = require("../_lib/skeleton-credits");
 const {
   createJob,
   updateJob,
   makeId,
-} = require("../../_lib/skeleton-jobs");
+} = require("../_lib/skeleton-jobs");
 const {
   buildSkeletonRenderScript,
   createCreatomateRender,
   pollCreatomateRender,
-} = require("../../_lib/skeleton-creatomate");
+} = require("../_lib/skeleton-creatomate");
+
+function setCors(req, res) {
+  const allowedOrigins = [
+    "https://nofacelabsai.webflow.io",
+    "https://nofacelabs.ai",
+    "http://localhost:3000",
+  ];
+
+  const origin = req.headers.origin;
+  if (origin && allowedOrigins.includes(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+  }
+
+  res.setHeader("Vary", "Origin");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization, x-nf-member-id, x-nf-member-email"
+  );
+}
 
 function send(res, status, body) {
   res.statusCode = status;
@@ -81,7 +101,6 @@ function getPlaceholderSceneClips({
   const count = Math.max(1, Number(estimatedSceneCount) || 1);
   const dur = Math.max(0.1, Number(animationDuration) || 4);
 
-  // Replace these with your real generated scene video URLs later.
   const placeholderClipUrl =
     process.env.SKELETON_PLACEHOLDER_SCENE_VIDEO_URL ||
     "https://samplelib.com/lib/preview/mp4/sample-5s.mp4";
@@ -117,7 +136,12 @@ function getPlaceholderCaptionSegments(totalDuration, script) {
   const text = String(script || "").trim();
   if (!text) return [];
 
-  const chunks = text.split(/[.!?]+/).map((s) => s.trim()).filter(Boolean).slice(0, 8);
+  const chunks = text
+    .split(/[.!?]+/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .slice(0, 8);
+
   if (!chunks.length) return [];
 
   const segDuration = Math.max(1, totalDuration / chunks.length);
@@ -140,7 +164,6 @@ async function runSkeletonJob(job) {
     current_step: "Generating voice",
   });
 
-  // Placeholder narration for now. Replace with real TTS next.
   const narrationAudioUrl = getPlaceholderNarrationAudioUrl();
 
   await updateJob(job.id, {
@@ -169,7 +192,11 @@ async function runSkeletonJob(job) {
     },
   });
 
-  const totalDuration = sceneClips.reduce((sum, clip) => sum + Number(clip.duration || 0), 0);
+  const totalDuration = sceneClips.reduce(
+    (sum, clip) => sum + Number(clip.duration || 0),
+    0
+  );
+
   const captionSegments = input.captionsEnabled
     ? getPlaceholderCaptionSegments(totalDuration, input.script)
     : [];
@@ -233,16 +260,20 @@ async function runSkeletonJob(job) {
       creatomate_render_id: creatomateRenderId || "",
       final_video_url: finalRender?.url || finalRender?.download_url || "",
       video_url: finalRender?.url || finalRender?.download_url || "",
-      thumbnail_url:
-        finalRender?.snapshot_url ||
-        finalRender?.thumbnail_url ||
-        "",
+      thumbnail_url: finalRender?.snapshot_url || finalRender?.thumbnail_url || "",
       creatomate_render: finalRender,
     },
   });
 }
 
 module.exports = async function handler(req, res) {
+  setCors(req, res);
+
+  if (req.method === "OPTIONS") {
+    res.statusCode = 204;
+    return res.end();
+  }
+
   try {
     if (req.method !== "POST") {
       return send(res, 405, { error: "Method not allowed" });
@@ -296,7 +327,6 @@ module.exports = async function handler(req, res) {
       output: {},
     });
 
-    // Fire and forget so API returns immediately.
     runSkeletonJob(job).catch(async (err) => {
       console.error("[api/skeleton/generate] background job failed", err);
       try {
