@@ -1,4 +1,4 @@
-const CREATOMATE_API_BASE = "https://api.creatomate.com/v1";
+const CREATOMATE_API_BASE = "https://api.creatomate.com/v2";
 
 function getCreatomateApiKey() {
   return process.env.CREATOMATE_API_KEY || "";
@@ -23,7 +23,6 @@ function safeNumber(n, fallback = 0) {
 
 function buildCaptionElements({
   captionSegments = [],
-  captionStyle = "",
   captionSettings = {},
 }) {
   if (!captionSegments.length) return [];
@@ -54,11 +53,7 @@ function buildCaptionElements({
     stroke_width: strokeWidth,
     text_align: "center",
     vertical_align: "middle",
-    animation: "none",
-    background_color:
-      captionStyle === "blackbar"
-        ? (captionSettings.backgroundColor || "#000000")
-        : "transparent",
+    background_color: "transparent",
   }));
 }
 
@@ -67,6 +62,7 @@ function buildSceneVideoElements(sceneClips = []) {
 
   return sceneClips.map((clip, index) => {
     const clipDuration = Math.max(0.1, safeNumber(clip.duration, 4));
+
     const element = {
       id: `scene_${index + 1}`,
       type: "video",
@@ -120,7 +116,6 @@ function buildSkeletonRenderScript({
   musicUrl = "",
   musicVolume = 28,
   captionSegments = [],
-  captionStyle = "",
   captionSettings = {},
   resolution = "720p",
 }) {
@@ -141,22 +136,17 @@ function buildSkeletonRenderScript({
   elements.push(
     ...buildCaptionElements({
       captionSegments,
-      captionStyle,
       captionSettings,
     })
   );
 
   const outputWidth = resolution === "1080p" ? 1080 : resolution === "480p" ? 480 : 720;
-  const outputHeight =
-    resolution === "1080p" ? 1920 : resolution === "480p" ? 854 : 1280;
+  const outputHeight = resolution === "1080p" ? 1920 : resolution === "480p" ? 854 : 1280;
 
   return {
     output_format: "mp4",
     width: outputWidth,
     height: outputHeight,
-    duration: totalDuration,
-    frame_rate: 30,
-    snapshot_time: Math.min(1, totalDuration / 2),
     elements,
   };
 }
@@ -165,21 +155,31 @@ async function createCreatomateRender(renderScript) {
   const response = await fetch(`${CREATOMATE_API_BASE}/renders`, {
     method: "POST",
     headers: getCreatomateHeaders(),
-    body: JSON.stringify({
-      source: renderScript,
-    }),
+    body: JSON.stringify(renderScript),
   });
 
-  const data = await response.json().catch(() => ({}));
+  const text = await response.text();
+  let data = {};
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    data = { raw: text };
+  }
 
   if (!response.ok) {
-    throw new Error(data?.message || data?.error || "Creatomate render creation failed");
+    console.error("[creatomate] create render failed", {
+      status: response.status,
+      body: data,
+    });
+    throw new Error(
+      data?.message ||
+      data?.error ||
+      data?.raw ||
+      `Creatomate render creation failed (${response.status})`
+    );
   }
 
-  if (Array.isArray(data)) {
-    return data[0];
-  }
-
+  if (Array.isArray(data)) return data[0];
   return data;
 }
 
@@ -189,43 +189,32 @@ async function getCreatomateRenderStatus(renderId) {
     headers: getCreatomateHeaders(),
   });
 
-  const data = await response.json().catch(() => ({}));
+  const text = await response.text();
+  let data = {};
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    data = { raw: text };
+  }
 
   if (!response.ok) {
-    throw new Error(data?.message || data?.error || "Creatomate status request failed");
+    console.error("[creatomate] get render status failed", {
+      status: response.status,
+      body: data,
+    });
+    throw new Error(
+      data?.message ||
+      data?.error ||
+      data?.raw ||
+      `Creatomate status request failed (${response.status})`
+    );
   }
 
   return data;
-}
-
-async function pollCreatomateRender(renderId, {
-  intervalMs = 5000,
-  maxAttempts = 240,
-} = {}) {
-  let attempts = 0;
-
-  while (attempts < maxAttempts) {
-    const render = await getCreatomateRenderStatus(renderId);
-    const status = String(render?.status || "").toLowerCase();
-
-    if (status === "succeeded" || status === "completed") {
-      return render;
-    }
-
-    if (status === "failed") {
-      throw new Error(render?.error || "Creatomate render failed");
-    }
-
-    await new Promise((resolve) => setTimeout(resolve, intervalMs));
-    attempts += 1;
-  }
-
-  throw new Error("Timed out waiting for Creatomate render");
 }
 
 module.exports = {
   buildSkeletonRenderScript,
   createCreatomateRender,
   getCreatomateRenderStatus,
-  pollCreatomateRender,
 };
