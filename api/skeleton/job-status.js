@@ -96,10 +96,11 @@ async function advanceJob(job) {
 
   if (job.status === "queued") {
   const voice = await generateVoiceAudio({
-    text: input.script,
-    voiceId: input.voiceId || undefined,
-    speed: input.voiceSpeed || 1,
-  });
+  text: input.script,
+  voiceId: input.voiceId || undefined,
+  speed: input.voiceSpeed || 1,
+  jobId: job.id,
+});
 
   return updateJob(job.id, {
     status: "generating_voice",
