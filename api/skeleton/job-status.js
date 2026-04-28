@@ -1,3 +1,4 @@
+const { generateVoiceAudio } = require("../_lib/skeleton-voice");
 const { getJobById, updateJob } = require("../_lib/skeleton-jobs");
 const {
   buildSkeletonRenderScript,
@@ -94,16 +95,22 @@ async function advanceJob(job) {
   const output = job.output || {};
 
   if (job.status === "queued") {
-    return updateJob(job.id, {
-      status: "generating_voice",
-      progress: 18,
-      current_step: "Generating voice",
-      output: {
-        ...output,
-        narration_audio_url: getPlaceholderNarrationAudioUrl(),
-      },
-    });
-  }
+  const voice = await generateVoiceAudio({
+    text: input.script,
+    voiceId: input.voiceId || undefined,
+    speed: input.voiceSpeed || 1,
+  });
+
+  return updateJob(job.id, {
+    status: "generating_voice",
+    progress: 25,
+    current_step: "Voice generated",
+    output: {
+      ...output,
+      narration_audio_url: voice.url,
+    },
+  });
+}
 
   if (job.status === "generating_voice") {
     const sceneClips = getPlaceholderSceneClips({
