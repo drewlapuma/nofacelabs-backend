@@ -1,5 +1,8 @@
 const { generateVoiceAudio } = require("../_lib/skeleton-voice");
 const { getJobById, updateJob } = require("../_lib/skeleton-jobs");
+const { planScenes } = require("../_lib/skeleton-scenes");
+const { generateSceneImages } = require("../_lib/skeleton-images");
+const { generateSceneVideos } = require("../_lib/skeleton-video");
 const {
   buildSkeletonRenderScript,
   createCreatomateRender,
@@ -32,26 +35,8 @@ function send(res, status, body) {
   res.end(JSON.stringify(body));
 }
 
-function getPlaceholderSceneClips({ estimatedSceneCount, animationDuration }) {
-  const count = Math.max(1, Number(estimatedSceneCount) || 1);
-  const dur = Math.max(0.1, Number(animationDuration) || 4);
-
-  const placeholderClipUrl =
-    process.env.SKELETON_PLACEHOLDER_SCENE_VIDEO_URL ||
-    "https://samplelib.com/lib/preview/mp4/sample-5s.mp4";
-
-  return Array.from({ length: count }).map((_, i) => ({
-    url: placeholderClipUrl,
-    duration: dur,
-    index: i + 1,
-  }));
-}
-
-function getPlaceholderNarrationAudioUrl() {
-  return (
-    process.env.SKELETON_PLACEHOLDER_NARRATION_AUDIO_URL ||
-    "https://samplelib.com/lib/preview/mp3/sample-3s.mp3"
-  );
+function getMemberId(job) {
+  return job.user_id || job.member_id || job.input?.memberId || "anonymous";
 }
 
 function getLibraryMusicUrl(musicId) {
@@ -67,7 +52,7 @@ function getLibraryMusicUrl(musicId) {
   return map[String(musicId || "")] || "";
 }
 
-function getPlaceholderCaptionSegments(totalDuration, script) {
+function getCaptionSegments(totalDuration, script) {
   const text = String(script || "").trim();
   if (!text) return [];
 
@@ -75,7 +60,7 @@ function getPlaceholderCaptionSegments(totalDuration, script) {
     .split(/[.!?]+/)
     .map((s) => s.trim())
     .filter(Boolean)
-    .slice(0, 8);
+    .slice(0, 12);
 
   if (!chunks.length) return [];
 
@@ -90,63 +75,129 @@ function getPlaceholderCaptionSegments(totalDuration, script) {
   });
 }
 
+function normalizeSceneClips(scenesWithVideos, input) {
+  const duration = Number(input.animationDuration || input.duration || 4);
+
+  return scenesWithVideos
+    .map((scene, index) => ({
+      url: scene.videoUrl || scene.clipUrl || scene.downloadUrl || "",
+      duration,
+      index: index + 1,
+      imageUrl: scene.imageUrl || "",
+      prompt: scene.videoPrompt || scene.imagePrompt || "",
+    }))
+    .filter((clip) => clip.url);
+}
+
 async function advanceJob(job) {
   const input = job.input || {};
   const output = job.output || {};
+  const memberId = getMemberId(job);
 
   if (job.status === "queued") {
-  const voice = await generateVoiceAudio({
-  text: input.script,
-  voiceId: input.voiceId || undefined,
-  speed: input.voiceSpeed || 1,
-  jobId: job.id,
-});
-
-  return updateJob(job.id, {
-    status: "generating_voice",
-    progress: 25,
-    current_step: "Voice generated",
-    output: {
-      ...output,
-      narration_audio_url: voice.url,
-    },
-  });
-}
-
-  if (job.status === "generating_voice") {
-    const sceneClips = getPlaceholderSceneClips({
-      estimatedSceneCount: job.credits?.estimatedSceneCount,
-      animationDuration: input.animationDuration,
+    const voice = await generateVoiceAudio({
+      text: input.script || job.script,
+      voiceId: input.voiceId || undefined,
+      speed: input.voiceSpeed || 1,
+      jobId: job.id,
     });
 
     return updateJob(job.id, {
-      status: "planning_scenes",
-      progress: 36,
-      current_step: "Planning scenes",
+      status: "generating_voice",
+      progress: 20,
+      current_step: "Voice generated",
       output: {
         ...output,
-        scene_clips: sceneClips,
+        narration_audio_url: voice.url,
+        narration_audio_path: voice.path || "",
+      },
+    });
+  }
+
+  if (job.status === "generating_voice") {
+    const plannedScenes = planScenes(input.script || job.script);
+
+    return updateJob(job.id, {
+      status: "planning_scenes",
+      progress: 32,
+      current_step: "Scenes planned",
+      output: {
+        ...output,
+        planned_scenes: plannedScenes,
       },
     });
   }
 
   if (job.status === "planning_scenes") {
+    const plannedScenes = output.planned_scenes || planScenes(input.script || job.script);
+
+    const scenesWithImages = await generateSceneImages({
+      scenes: plannedScenes,
+      model: input.imageModel || "imagen-4",
+      memberId,
+    });
+
+    return updateJob(job.id, {
+      status: "generating_images",
+      progress: 50,
+      current_step: "Scene images generated",
+      output: {
+        ...output,
+        planned_scenes: plannedScenes,
+        scenes_with_images: scenesWithImages,
+      },
+    });
+  }
+
+  if (job.status === "generating_images") {
+    const scenesWithImages = output.scenes_with_images || [];
+
+    if (!scenesWithImages.length) {
+      return updateJob(job.id, {
+        status: "failed",
+        current_step: "Failed",
+        error_message: "No generated scene images found",
+      });
+    }
+
+    const scenesWithVideos = await generateSceneVideos({
+      scenes: scenesWithImages,
+      model: input.videoModel || "veo-3-1",
+      duration: input.animationDuration || 4,
+      resolution: input.resolution || "720p",
+      memberId,
+    });
+
     return updateJob(job.id, {
       status: "animating_scenes",
-      progress: 58,
-      current_step: "Animating scenes",
+      progress: 68,
+      current_step: "Scene animations started",
+      output: {
+        ...output,
+        scenes_with_videos: scenesWithVideos,
+      },
     });
   }
 
   if (job.status === "animating_scenes") {
-    const sceneClips = output.scene_clips || [];
+    const sceneClips = normalizeSceneClips(output.scenes_with_videos || [], input);
+
+    if (!sceneClips.length) {
+      return updateJob(job.id, {
+        status: "failed",
+        current_step: "Failed",
+        error_message:
+          "No completed scene video URLs found yet. Video polling needs to return final URLs before Creatomate can render.",
+      });
+    }
+
     const totalDuration = sceneClips.reduce(
       (sum, clip) => sum + Number(clip.duration || 0),
       0
     );
 
     const captionSegments = input.captionsEnabled
-      ? getPlaceholderCaptionSegments(totalDuration, input.script)
+      ? getCaptionSegments(totalDuration, input.script || job.script)
       : [];
 
     const musicUrl =
@@ -170,10 +221,11 @@ async function advanceJob(job) {
 
     return updateJob(job.id, {
       status: "rendering_final",
-      progress: 82,
+      progress: 84,
       current_step: "Waiting for Creatomate render",
       output: {
         ...output,
+        scene_clips: sceneClips,
         caption_segments: captionSegments,
         render_script: renderScript,
         creatomate_render_id: creatomateRenderId,
@@ -183,6 +235,7 @@ async function advanceJob(job) {
 
   if (job.status === "rendering_final") {
     const renderId = output.creatomate_render_id;
+
     if (!renderId) {
       return updateJob(job.id, {
         status: "failed",
@@ -237,11 +290,13 @@ module.exports = async function handler(req, res) {
     }
 
     const jobId = String(req.query?.jobId || "").trim();
+
     if (!jobId) {
       return send(res, 400, { ok: false, error: "Missing jobId" });
     }
 
     let job = await getJobById(jobId);
+
     if (!job) {
       return send(res, 404, { ok: false, error: "Job not found" });
     }
@@ -256,6 +311,7 @@ module.exports = async function handler(req, res) {
     });
   } catch (error) {
     console.error("[api/skeleton/job-status] error", error);
+
     return send(res, 500, {
       ok: false,
       error: error.message || "Failed to fetch job status",
