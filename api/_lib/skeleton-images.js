@@ -1,11 +1,25 @@
 const { getBuiltInSkeletonReferenceImages } = require("./skeleton-reference-images");
 
+function getBackendBase() {
+  const base =
+    process.env.BACKEND_BASE ||
+    process.env.NEXT_PUBLIC_BACKEND_BASE ||
+    (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "");
+
+  if (!base) {
+    throw new Error("Missing BACKEND_BASE env var");
+  }
+
+  return base.replace(/\/$/, "");
+}
+
 async function generateSceneImages({ scenes, model, memberId }) {
   const results = [];
   const referenceImages = getBuiltInSkeletonReferenceImages();
+  const backendBase = getBackendBase();
 
   for (const scene of scenes) {
-    const res = await fetch(`${process.env.BACKEND_BASE}/api/tools-generate-image`, {
+    const res = await fetch(`${backendBase}/api/tools-generate-image`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -16,8 +30,8 @@ async function generateSceneImages({ scenes, model, memberId }) {
         model,
         aspectRatio: "9:16",
 
-        // Only skeleton flow sends this.
-        // Other image generators on your site will not use these refs.
+        // Only the skeleton flow sends these.
+        // Your regular image generator will not use skeleton refs.
         referenceImages,
         forceSkeletonReferences: true,
       }),
@@ -26,7 +40,7 @@ async function generateSceneImages({ scenes, model, memberId }) {
     const data = await res.json().catch(() => ({}));
 
     if (!res.ok || !data?.ok) {
-      throw new Error(data?.error || "Image generation failed");
+      throw new Error(data?.error || `Image generation failed for scene ${scene.index}`);
     }
 
     results.push({
