@@ -1,4 +1,5 @@
 const { generateVoiceAudio } = require("../_lib/skeleton-voice");
+const { pollSceneVideosOnce } = require("../_lib/skeleton-video-poll");
 const { getJobById, updateJob } = require("../_lib/skeleton-jobs");
 const { planScenes } = require("../_lib/skeleton-scenes");
 const { generateSceneImages } = require("../_lib/skeleton-images");
@@ -179,59 +180,90 @@ async function advanceJob(job) {
     });
   }
 
-  if (job.status === "animating_scenes") {
-    const sceneClips = normalizeSceneClips(output.scenes_with_videos || [], input);
+  if (job.status === "animating_scenes" || job.status === "waiting_scene_videos") {
+  const scenesWithVideos = output.scenes_with_videos || [];
 
-    if (!sceneClips.length) {
-      return updateJob(job.id, {
-        status: "failed",
-        current_step: "Failed",
-        error_message:
-          "No completed scene video URLs found yet. Video polling needs to return final URLs before Creatomate can render.",
-      });
-    }
-
-    const totalDuration = sceneClips.reduce(
-      (sum, clip) => sum + Number(clip.duration || 0),
-      0
-    );
-
-    const captionSegments = input.captionsEnabled
-      ? getCaptionSegments(totalDuration, input.script || job.script)
-      : [];
-
-    const musicUrl =
-      input.musicType === "library"
-        ? getLibraryMusicUrl(input.musicId)
-        : "";
-
-    const renderScript = buildSkeletonRenderScript({
-      sceneClips,
-      narrationAudioUrl: output.narration_audio_url || "",
-      musicUrl,
-      musicVolume: input.musicVolume,
-      captionSegments,
-      captionStyle: input.captionStyle,
-      captionSettings: input.captionSettings || {},
-      resolution: input.resolution,
-    });
-
-    const creatomateRender = await createCreatomateRender(renderScript);
-    const creatomateRenderId = creatomateRender?.id || "";
-
+  if (!scenesWithVideos.length) {
     return updateJob(job.id, {
-      status: "rendering_final",
-      progress: 84,
-      current_step: "Waiting for Creatomate render",
+      status: "failed",
+      current_step: "Failed",
+      error_message: "No scene video jobs found",
+    });
+  }
+
+  const pollResult = await pollSceneVideosOnce({
+    scenes: scenesWithVideos,
+    memberId,
+    jobId: job.id,
+  });
+
+  const sceneProgress =
+    pollResult.total > 0
+      ? Math.round((pollResult.completed / pollResult.total) * 16)
+      : 0;
+
+  if (!pollResult.allDone) {
+    return updateJob(job.id, {
+      status: "waiting_scene_videos",
+      progress: 68 + sceneProgress,
+      current_step: `Waiting for scene videos ${pollResult.completed}/${pollResult.total}`,
       output: {
         ...output,
-        scene_clips: sceneClips,
-        caption_segments: captionSegments,
-        render_script: renderScript,
-        creatomate_render_id: creatomateRenderId,
+        scenes_with_videos: pollResult.scenes,
       },
     });
   }
+
+  const sceneClips = pollResult.scenes.map((scene, index) => ({
+    url: scene.videoUrl,
+    duration: Number(input.animationDuration || 4),
+    index: index + 1,
+    imageUrl: scene.imageUrl || "",
+    prompt: scene.videoPrompt || scene.imagePrompt || "",
+  }));
+
+  const totalDuration = sceneClips.reduce(
+    (sum, clip) => sum + Number(clip.duration || 0),
+    0
+  );
+
+  const captionSegments = input.captionsEnabled
+    ? getCaptionSegments(totalDuration, input.script || job.script)
+    : [];
+
+  const musicUrl =
+    input.musicType === "library"
+      ? getLibraryMusicUrl(input.musicId)
+      : "";
+
+  const renderScript = buildSkeletonRenderScript({
+    sceneClips,
+    narrationAudioUrl: output.narration_audio_url || "",
+    musicUrl,
+    musicVolume: input.musicVolume,
+    captionSegments,
+    captionStyle: input.captionStyle,
+    captionSettings: input.captionSettings || {},
+    resolution: input.resolution,
+  });
+
+  const creatomateRender = await createCreatomateRender(renderScript);
+  const creatomateRenderId = creatomateRender?.id || "";
+
+  return updateJob(job.id, {
+    status: "rendering_final",
+    progress: 88,
+    current_step: "Waiting for Creatomate render",
+    output: {
+      ...output,
+      scenes_with_videos: pollResult.scenes,
+      scene_clips: sceneClips,
+      caption_segments: captionSegments,
+      render_script: renderScript,
+      creatomate_render_id: creatomateRenderId,
+    },
+  });
+}
 
   if (job.status === "rendering_final") {
     const renderId = output.creatomate_render_id;
