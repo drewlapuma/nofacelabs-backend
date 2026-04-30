@@ -1,3 +1,16 @@
+function getBackendBase() {
+  const base =
+    process.env.BACKEND_BASE ||
+    process.env.NEXT_PUBLIC_BACKEND_BASE ||
+    (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "");
+
+  if (!base) {
+    throw new Error("Missing BACKEND_BASE env var");
+  }
+
+  return base.replace(/\/$/, "");
+}
+
 async function generateSceneVideos({
   scenes,
   model,
@@ -6,13 +19,14 @@ async function generateSceneVideos({
   memberId,
 }) {
   const results = [];
+  const backendBase = getBackendBase();
 
   for (const scene of scenes) {
     if (!scene.imageUrl) {
       throw new Error(`Missing imageUrl for scene ${scene.index}`);
     }
 
-    const res = await fetch(`${process.env.BACKEND_BASE}/api/tools-generate-video`, {
+    const res = await fetch(`${backendBase}/api/tools-generate-video`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -24,7 +38,7 @@ async function generateSceneVideos({
         durationSeconds: String(duration),
         aspectRatio: "9:16",
         resolution,
-        imageUrl: scene.imageUrl, // this is the key new part
+        imageUrl: scene.imageUrl,
       }),
     });
 
