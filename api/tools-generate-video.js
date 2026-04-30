@@ -7,7 +7,7 @@ const {
   getVideoCredits,
   deductCredits,
   addCredits
-} = require("../lib/credits");
+} = require("../_lib/credits");
 
 const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || "*")
   .split(",")
