@@ -21,7 +21,6 @@ const SUPPORTED_DURATIONS = new Set([
 ]);
 
 const SUPPORTED_MODELS = {
-  // Google Veo
   "veo-3.1": {
     provider: "google-veo",
     label: "Veo 3.1",
@@ -46,8 +45,6 @@ const SUPPORTED_MODELS = {
     modelIdEnv: "VEO_3_FAST_MODEL_ID",
     defaultModelId: "veo-3.0-fast-generate-001",
   },
-
-  // OpenAI Sora
   "sora-2": {
     provider: "openai-sora",
     label: "Sora 2",
@@ -58,8 +55,6 @@ const SUPPORTED_MODELS = {
     label: "Sora 2 Pro",
     modelId: "sora-2-pro",
   },
-
-  // xAI
   "grok-imagine-video": {
     provider: "xai-video",
     label: "Grok Imagine Video",
@@ -138,6 +133,11 @@ function normalizeDuration(input) {
   return v;
 }
 
+function normalizeOptionalImageUrl(input) {
+  const v = String(input || "").trim();
+  return /^https?:\/\//i.test(v) ? v : "";
+}
+
 function mapOpenAISize(aspectRatio, resolution) {
   const use1080 = resolution === "1080p";
 
@@ -206,6 +206,21 @@ function normalizeXaiConfig({ aspectRatio, resolution, durationSeconds }) {
   };
 }
 
+async function tryOpenAISoraCreate({ apiKey, payload }) {
+  const res = await fetch("https://api.openai.com/v1/videos", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  const data = await res.json().catch(() => null);
+
+  return { res, data };
+}
+
 async function createOpenAISoraJob({
   apiKey,
   modelId,
@@ -213,6 +228,7 @@ async function createOpenAISoraJob({
   aspectRatio,
   resolution,
   durationSeconds,
+  imageUrl,
 }) {
   const normalized = normalizeSoraConfig({
     aspectRatio,
@@ -222,43 +238,63 @@ async function createOpenAISoraJob({
 
   const size = mapOpenAISize(normalized.aspectRatio, normalized.resolution);
 
-  const res = await fetch("https://api.openai.com/v1/videos", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: modelId,
-      prompt,
-      size,
-      seconds: String(normalized.durationSeconds),
-    }),
-  });
+  const basePayload = {
+    model: modelId,
+    prompt,
+    size,
+    seconds: String(normalized.durationSeconds),
+  };
 
-  const data = await res.json().catch(() => null);
+  const attempts = [];
 
-  if (!res.ok) {
-    throw new Error(
-      data?.error?.message ||
-      data?.message ||
-      `OpenAI video create failed: HTTP ${res.status}`
-    );
+  if (imageUrl) {
+    attempts.push({
+      ...basePayload,
+      input_image: imageUrl,
+    });
+
+    attempts.push({
+      ...basePayload,
+      image_url: imageUrl,
+    });
+
+    attempts.push({
+      ...basePayload,
+      source_image_url: imageUrl,
+    });
+  } else {
+    attempts.push(basePayload);
   }
 
-  return {
-    provider: "openai-sora",
-    providerJobId: data?.id || null,
-    status: data?.status || "queued",
-    progress: Number(data?.progress || 0),
-    raw: data,
-    normalizedConfig: {
-      aspectRatio: normalized.aspectRatio,
-      resolution: normalized.resolution,
-      durationSeconds: String(normalized.durationSeconds),
-      size,
-    },
-  };
+  let lastError = null;
+
+  for (const payload of attempts) {
+    const { res, data } = await tryOpenAISoraCreate({ apiKey, payload });
+
+    if (res.ok) {
+      return {
+        provider: "openai-sora",
+        providerJobId: data?.id || null,
+        status: data?.status || "queued",
+        progress: Number(data?.progress || 0),
+        raw: data,
+        normalizedConfig: {
+          aspectRatio: normalized.aspectRatio,
+          resolution: normalized.resolution,
+          durationSeconds: String(normalized.durationSeconds),
+          size,
+          usedImageUrl: !!imageUrl,
+        },
+      };
+    }
+
+    lastError =
+      data?.error?.message ||
+      data?.message ||
+      `OpenAI video create failed: HTTP ${res.status}`;
+  }
+
+  throw new Error(lastError || "OpenAI video create failed");
 }
 
 async function createGoogleVeoJob({
@@ -268,6 +304,7 @@ async function createGoogleVeoJob({
   aspectRatio,
   resolution,
   durationSeconds,
+  imageUrl,
 }) {
   const normalized = normalizeVeoConfig({
     aspectRatio,
@@ -280,8 +317,12 @@ async function createGoogleVeoJob({
     `https://generativelanguage.googleapis.com/${apiVersion}/models/` +
     `${encodeURIComponent(modelId)}:predictLongRunning?key=${encodeURIComponent(apiKey)}`;
 
+  const effectivePrompt = imageUrl
+    ? `${prompt}\n\nUse the provided starting scene image as the visual anchor for this animation. Preserve subject identity, composition logic, and scene styling.`
+    : prompt;
+
   const body = {
-    instances: [{ prompt }],
+    instances: [{ prompt: effectivePrompt }],
     parameters: {
       aspectRatio: normalized.aspectRatio,
       resolution: normalized.resolution,
@@ -315,7 +356,10 @@ async function createGoogleVeoJob({
     status: data?.done ? "completed" : "queued",
     progress: 0,
     raw: data,
-    normalizedConfig: normalized,
+    normalizedConfig: {
+      ...normalized,
+      usedImageUrl: false,
+    },
   };
 }
 
@@ -326,6 +370,7 @@ async function createXaiVideoJob({
   aspectRatio,
   resolution,
   durationSeconds,
+  imageUrl,
 }) {
   const normalized = normalizeXaiConfig({
     aspectRatio,
@@ -335,16 +380,20 @@ async function createXaiVideoJob({
 
   const safeDuration = Number(normalized.durationSeconds);
 
+  const effectivePrompt = imageUrl
+    ? `${prompt}\n\nMatch the supplied scene image as closely as possible for subject identity and scene composition.`
+    : prompt;
+
   const res = await fetch("https://api.x.ai/v1/videos/generations", {
     method: "POST",
     headers: {
-      "Authorization": `Bearer ${apiKey}`,
+      Authorization: `Bearer ${apiKey}`,
       "Content-Type": "application/json",
-      "Accept": "application/json",
+      Accept: "application/json",
     },
     body: JSON.stringify({
       model: modelId,
-      prompt,
+      prompt: effectivePrompt,
       duration: safeDuration,
       aspect_ratio: normalized.aspectRatio,
       resolution: normalized.resolution,
@@ -372,6 +421,7 @@ async function createXaiVideoJob({
       aspectRatio: normalized.aspectRatio,
       resolution: normalized.resolution,
       durationSeconds: String(normalized.durationSeconds),
+      usedImageUrl: false,
     },
   };
 }
@@ -404,6 +454,7 @@ module.exports = async function handler(req, res) {
     const aspectRatio = normalizeAspectRatio(body.aspectRatio);
     const resolution = normalizeResolution(body.resolution);
     const durationSeconds = normalizeDuration(body.durationSeconds);
+    const imageUrl = normalizeOptionalImageUrl(body.imageUrl || body.startImageUrl);
 
     if (!prompt) {
       return json(res, 400, { ok: false, error: "prompt is required" });
@@ -464,7 +515,8 @@ module.exports = async function handler(req, res) {
       metadata: {
         aspectRatio,
         resolution,
-        durationSeconds
+        durationSeconds,
+        imageUrl,
       }
     };
 
@@ -479,7 +531,8 @@ module.exports = async function handler(req, res) {
       metadata: {
         aspectRatio,
         resolution,
-        durationSeconds
+        durationSeconds,
+        imageUrl,
       }
     });
 
@@ -499,6 +552,7 @@ module.exports = async function handler(req, res) {
         aspectRatio,
         resolution,
         durationSeconds,
+        imageUrl,
       });
     } else if (modelMeta.provider === "google-veo") {
       if (!process.env.GEMINI_API_KEY) {
@@ -512,6 +566,7 @@ module.exports = async function handler(req, res) {
         aspectRatio,
         resolution,
         durationSeconds,
+        imageUrl,
       });
     } else if (modelMeta.provider === "xai-video") {
       if (!process.env.XAI_API_KEY) {
@@ -525,6 +580,7 @@ module.exports = async function handler(req, res) {
         aspectRatio,
         resolution,
         durationSeconds,
+        imageUrl,
       });
     } else {
       throw new Error("Unsupported provider");
