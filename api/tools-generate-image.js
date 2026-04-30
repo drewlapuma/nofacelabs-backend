@@ -4,6 +4,7 @@
 // - Nano Banana -> Google REST generateContent
 // - Imagen 4 -> Google REST predict
 // - FLUX.2 -> Black Forest Labs async API
+// Skeleton references only apply when request body includes referenceImages.
 
 const { createClient } = require("@supabase/supabase-js");
 const {
@@ -18,7 +19,6 @@ const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || 
   .filter(Boolean);
 
 const SUPPORTED_MODELS = {
-  // ===== NANO BANANA =====
   "nano-banana": {
     provider: "google-gemini",
     label: "Nano Banana",
@@ -29,8 +29,6 @@ const SUPPORTED_MODELS = {
     label: "Nano Banana Pro",
     model: "gemini-3-pro-image-preview",
   },
-
-  // ===== IMAGEN =====
   "imagen-4": {
     provider: "google-imagen",
     label: "Imagen 4",
@@ -46,8 +44,6 @@ const SUPPORTED_MODELS = {
     label: "Imagen 4 Ultra",
     model: "imagen-4.0-ultra-generate-001",
   },
-
-  // ===== FLUX =====
   "flux-2": {
     provider: "bfl",
     label: "FLUX.2",
@@ -152,9 +148,62 @@ function fileExtFromContentType(contentType) {
   return "png";
 }
 
-async function generateWithNanoBanana({ apiKey, prompt, aspectRatio, modelName }) {
+function getReferenceImagesFromBody(body) {
+  if (!Array.isArray(body.referenceImages)) return [];
+
+  return body.referenceImages
+    .map((url) => String(url || "").trim())
+    .filter((url) => /^https?:\/\//i.test(url))
+    .slice(0, 4);
+}
+
+function buildReferenceAwarePrompt(prompt, referenceImages) {
+  if (!referenceImages.length) return prompt;
+
+  return [
+    prompt,
+    "",
+    "Use the attached skeleton reference images as the consistent main character design.",
+    "Keep the same skull shape, body proportions, realistic skeleton structure, and overall character identity across scenes.",
+    "Do not create a generic different skeleton. Preserve the built-in reference character while adapting pose, outfit, accessories, and environment to this scene.",
+    "Generate a realistic vertical 9:16 cinematic image."
+  ].join("\n");
+}
+
+async function imageUrlToGeminiPart(url) {
+  const res = await fetch(url);
+  if (!res.ok) {
+    throw new Error(`Failed to load reference image: HTTP ${res.status}`);
+  }
+
+  const arrayBuffer = await res.arrayBuffer();
+  const buffer = Buffer.from(arrayBuffer);
+  const mimeType = res.headers.get("content-type") || "image/png";
+
+  return {
+    inlineData: {
+      mimeType,
+      data: buffer.toString("base64"),
+    },
+  };
+}
+
+async function generateWithNanoBanana({
+  apiKey,
+  prompt,
+  aspectRatio,
+  modelName,
+  referenceImages = []
+}) {
   const endpoint =
     `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelName)}:generateContent`;
+
+  const imageParts = [];
+  for (const url of referenceImages) {
+    imageParts.push(await imageUrlToGeminiPart(url));
+  }
+
+  const finalPrompt = buildReferenceAwarePrompt(prompt, referenceImages);
 
   const res = await fetch(endpoint, {
     method: "POST",
@@ -165,7 +214,10 @@ async function generateWithNanoBanana({ apiKey, prompt, aspectRatio, modelName }
     body: JSON.stringify({
       contents: [
         {
-          parts: [{ text: prompt }],
+          parts: [
+            ...imageParts,
+            { text: finalPrompt }
+          ],
         },
       ],
       generationConfig: {
@@ -200,7 +252,6 @@ async function generateWithNanoBanana({ apiKey, prompt, aspectRatio, modelName }
 
   throw new Error("Nano Banana did not return an image");
 }
-
 async function generateWithImagen({ apiKey, prompt, aspectRatio, modelName }) {
   const endpoint =
     `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelName)}:predict`;
@@ -212,11 +263,7 @@ async function generateWithImagen({ apiKey, prompt, aspectRatio, modelName }) {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      instances: [
-        {
-          prompt,
-        },
-      ],
+      instances: [{ prompt }],
       parameters: {
         sampleCount: 1,
         aspectRatio,
@@ -268,10 +315,6 @@ async function generateWithFlux2({ apiKey, prompt, aspectRatio, endpoint }) {
   const createData = await createRes.json().catch(() => null);
 
   if (!createRes.ok || !createData?.polling_url) {
-    if (createRes.status === 402) {
-      throw new Error("FLUX.2 is unavailable because the BFL account needs active billing or more credits.");
-    }
-
     throw new Error(
       createData?.error ||
       createData?.message ||
@@ -281,17 +324,12 @@ async function generateWithFlux2({ apiKey, prompt, aspectRatio, endpoint }) {
 
   const pollingUrl = createData.polling_url;
   const startedAt = Date.now();
-  const timeoutMs = 1000 * 60 * 2;
 
-  while (Date.now() - startedAt < timeoutMs) {
+  while (Date.now() - startedAt < 120000) {
     await sleep(1500);
 
     const pollRes = await fetch(pollingUrl, {
-      method: "GET",
-      headers: {
-        accept: "application/json",
-        "x-key": apiKey,
-      },
+      headers: { accept: "application/json", "x-key": apiKey },
     });
 
     const pollData = await pollRes.json().catch(() => null);
@@ -300,50 +338,29 @@ async function generateWithFlux2({ apiKey, prompt, aspectRatio, endpoint }) {
       throw new Error(
         pollData?.error ||
         pollData?.message ||
-        `FLUX.2 polling failed: HTTP ${pollRes.status}`
+        `FLUX.2 polling failed`
       );
     }
 
     const status = String(pollData?.status || "").toLowerCase();
 
     if (status === "ready") {
-      const sampleUrl = pollData?.result?.sample;
-      if (!sampleUrl) {
-        throw new Error("FLUX.2 finished but did not provide an image URL");
-      }
-      return downloadToBuffer(sampleUrl, { "x-key": apiKey });
+      return downloadToBuffer(pollData.result.sample, { "x-key": apiKey });
     }
 
-    if (status === "error" || status === "failed") {
-      throw new Error(
-        pollData?.error ||
-        pollData?.message ||
-        "FLUX.2 generation failed"
-      );
+    if (status === "failed") {
+      throw new Error("FLUX.2 generation failed");
     }
   }
 
-  throw new Error("FLUX.2 generation timed out");
+  throw new Error("FLUX.2 timed out");
 }
 
 module.exports = async function handler(req, res) {
   setCors(req, res);
 
-  if (req.method === "OPTIONS") {
-    return json(res, 200, { ok: true });
-  }
-
-  if (req.method === "GET") {
-    return json(res, 200, {
-      ok: true,
-      route: "tools-generate-image",
-      status: "ready",
-    });
-  }
-
-  if (req.method !== "POST") {
-    return json(res, 405, { ok: false, error: "Method not allowed" });
-  }
+  if (req.method === "OPTIONS") return json(res, 200, { ok: true });
+  if (req.method !== "POST") return json(res, 405, { ok: false });
 
   let creditsDeducted = false;
   let creditCost = 0;
@@ -351,10 +368,6 @@ module.exports = async function handler(req, res) {
 
   try {
     const body = await readJson(req);
-    if (!body) return json(res, 400, { ok: false, error: "Missing body" });
-    if (body === "__INVALID__") {
-      return json(res, 400, { ok: false, error: "Invalid JSON" });
-    }
 
     const memberId = safeSegment(
       body.memberId || req.headers["x-nf-member-id"] || "anonymous"
@@ -362,46 +375,23 @@ module.exports = async function handler(req, res) {
 
     const prompt = String(body.prompt || "").trim();
     const model = String(body.model || "").trim();
-    const aspectRatio = String(body.aspectRatio || "1:1").trim();
+    const aspectRatio = String(body.aspectRatio || "1:1");
 
-    if (!prompt) {
-      return json(res, 400, { ok: false, error: "prompt is required" });
-    }
-
-    if (prompt.length > 1200) {
-      return json(res, 400, { ok: false, error: "prompt is too long" });
-    }
+    const referenceImages = getReferenceImagesFromBody(body);
 
     if (!SUPPORTED_MODELS[model]) {
-      return json(res, 400, {
-        ok: false,
-        error: "Invalid model",
-        allowed: Object.keys(SUPPORTED_MODELS),
-      });
+      return json(res, 400, { ok: false, error: "Invalid model" });
     }
 
     if (!SUPPORTED_ASPECT_RATIOS.has(aspectRatio)) {
-      return json(res, 400, {
-        ok: false,
-        error: "Invalid aspectRatio",
-        allowed: Array.from(SUPPORTED_ASPECT_RATIOS),
-      });
+      return json(res, 400, { ok: false, error: "Invalid aspect ratio" });
     }
 
     const SUPABASE_URL = process.env.SUPABASE_URL;
     const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
     const OUTPUT_BUCKET = process.env.SUPABASE_TOOL_OUTPUTS_BUCKET || "tool-outputs";
 
-    if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-      return json(res, 500, {
-        ok: false,
-        error: "Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY env vars",
-      });
-    }
-
-    const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
-      auth: { persistSession: false },
-    });
+    const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
     const provider = SUPPORTED_MODELS[model];
     creditCost = getImageCredits(model);
@@ -411,11 +401,6 @@ module.exports = async function handler(req, res) {
       memberId,
       amount: creditCost,
       reason: "image_generation_refund",
-      toolType: "image_generate",
-      model,
-      metadata: {
-        aspectRatio
-      }
     };
 
     await deductCredits({
@@ -425,9 +410,6 @@ module.exports = async function handler(req, res) {
       reason: "image_generation",
       toolType: "image_generate",
       model,
-      metadata: {
-        aspectRatio
-      }
     });
 
     creditsDeducted = true;
@@ -435,104 +417,61 @@ module.exports = async function handler(req, res) {
     let generated;
 
     if (provider.provider === "google-gemini") {
-      if (!process.env.GEMINI_API_KEY) {
-        throw new Error("Missing GEMINI_API_KEY");
-      }
-
       generated = await generateWithNanoBanana({
         apiKey: process.env.GEMINI_API_KEY,
         prompt,
         aspectRatio,
         modelName: provider.model,
+        referenceImages, // 🔥 ONLY applied when present
       });
     } else if (provider.provider === "google-imagen") {
-      if (!process.env.GEMINI_API_KEY) {
-        throw new Error("Missing GEMINI_API_KEY");
-      }
-
       generated = await generateWithImagen({
         apiKey: process.env.GEMINI_API_KEY,
         prompt,
         aspectRatio,
         modelName: provider.model,
       });
-    } else if (provider.provider === "bfl") {
-      if (!process.env.BFL_API_KEY) {
-        throw new Error("Missing BFL_API_KEY");
-      }
-
+    } else {
       generated = await generateWithFlux2({
         apiKey: process.env.BFL_API_KEY,
         prompt,
         aspectRatio,
         endpoint: provider.endpoint,
       });
-    } else {
-      throw new Error("Unsupported provider");
     }
 
     const contentType = generated.contentType || "image/png";
     const ext = fileExtFromContentType(contentType);
-    const fileName = safeName(`${model}_${aspectRatio}_${nowStamp()}.${ext}`);
+    const fileName = safeName(`${model}_${nowStamp()}.${ext}`);
     const outputPath = `tools/image-generate/${memberId}/${fileName}`;
 
-    const uploadRes = await supabaseAdmin.storage
+    await supabaseAdmin.storage
       .from(OUTPUT_BUCKET)
       .upload(outputPath, generated.buffer, {
         contentType,
         upsert: true,
       });
 
-    if (uploadRes.error) {
-      throw new Error(uploadRes.error.message || "Failed to upload generated image");
-    }
-
-    const signedOutput = await supabaseAdmin.storage
+    const signed = await supabaseAdmin.storage
       .from(OUTPUT_BUCKET)
-      .createSignedUrl(outputPath, 60 * 60 * 24);
-
-    if (signedOutput.error || !signedOutput.data?.signedUrl) {
-      throw new Error(
-        signedOutput.error?.message || "Failed to create signed output URL"
-      );
-    }
+      .createSignedUrl(outputPath, 86400);
 
     return json(res, 200, {
       ok: true,
-      memberId,
-      model,
-      modelLabel: provider.label,
-      aspectRatio,
-      creditCost,
-      outputBucket: OUTPUT_BUCKET,
+      downloadUrl: signed.data.signedUrl,
       outputPath,
-      fileName,
-      contentType,
-      downloadUrl: signedOutput.data.signedUrl,
     });
+
   } catch (err) {
     if (creditsDeducted && refundContext) {
-      try {
-        await addCredits(refundContext);
-      } catch (refundErr) {
-        console.error("tools-generate-image refund error:", refundErr);
-      }
+      await addCredits(refundContext);
     }
 
     console.error("tools-generate-image error:", err);
 
-    if (err.code === "INSUFFICIENT_CREDITS") {
-      return json(res, 402, {
-        ok: false,
-        error: "Not enough credits",
-        balance: err.balance,
-        required: err.required
-      });
-    }
-
     return json(res, 500, {
       ok: false,
-      error: err.message || "Failed to generate image",
+      error: err.message,
     });
   }
 };
