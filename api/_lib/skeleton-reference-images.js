@@ -5,6 +5,4 @@ function getBuiltInSkeletonReferenceImages() {
     .filter(Boolean);
 }
 
-module.exports = {
-  getBuiltInSkeletonReferenceImages,
-};
+module.exports = { getBuiltInSkeletonReferenceImages };
