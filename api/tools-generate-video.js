@@ -286,15 +286,6 @@ async function createOpenAISoraJob({
   };
 }
 
-    lastError =
-      data?.error?.message ||
-      data?.message ||
-      `OpenAI video create failed: HTTP ${res.status}`;
-  }
-
-  throw new Error(lastError || "OpenAI video create failed");
-}
-
 async function createGoogleVeoJob({
   apiKey,
   modelId,
