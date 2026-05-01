@@ -238,55 +238,53 @@ async function createOpenAISoraJob({
 
   const size = mapOpenAISize(normalized.aspectRatio, normalized.resolution);
 
-  const basePayload = {
+  const payload = {
     model: modelId,
     prompt,
     size,
     seconds: String(normalized.durationSeconds),
   };
 
-  const attempts = [];
-
   if (imageUrl) {
-    attempts.push({
-      ...basePayload,
-      input_image: imageUrl,
-    });
-
-    attempts.push({
-      ...basePayload,
+    payload.input_reference = {
       image_url: imageUrl,
-    });
-
-    attempts.push({
-      ...basePayload,
-      source_image_url: imageUrl,
-    });
-  } else {
-    attempts.push(basePayload);
+    };
   }
 
-  let lastError = null;
+  const res = await fetch("https://api.openai.com/v1/videos", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
 
-  for (const payload of attempts) {
-    const { res, data } = await tryOpenAISoraCreate({ apiKey, payload });
+  const data = await res.json().catch(() => null);
 
-    if (res.ok) {
-      return {
-        provider: "openai-sora",
-        providerJobId: data?.id || null,
-        status: data?.status || "queued",
-        progress: Number(data?.progress || 0),
-        raw: data,
-        normalizedConfig: {
-          aspectRatio: normalized.aspectRatio,
-          resolution: normalized.resolution,
-          durationSeconds: String(normalized.durationSeconds),
-          size,
-          usedImageUrl: !!imageUrl,
-        },
-      };
-    }
+  if (!res.ok) {
+    throw new Error(
+      data?.error?.message ||
+      data?.message ||
+      `OpenAI video create failed: HTTP ${res.status}`
+    );
+  }
+
+  return {
+    provider: "openai-sora",
+    providerJobId: data?.id || null,
+    status: data?.status || "queued",
+    progress: Number(data?.progress || 0),
+    raw: data,
+    normalizedConfig: {
+      aspectRatio: normalized.aspectRatio,
+      resolution: normalized.resolution,
+      durationSeconds: String(normalized.durationSeconds),
+      size,
+      usedImageUrl: !!imageUrl,
+    },
+  };
+}
 
     lastError =
       data?.error?.message ||
