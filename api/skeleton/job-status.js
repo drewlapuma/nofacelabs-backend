@@ -162,12 +162,13 @@ async function advanceJob(job) {
     }
 
     const scenesWithVideos = await generateSceneVideos({
-      scenes: scenesWithImages,
-      model: input.videoModel || "veo-3-1",
-      duration: input.animationDuration || 4,
-      resolution: input.resolution || "720p",
-      memberId,
-    });
+  scenes: scenesWithImages,
+  model: input.videoModel || "veo-3-1",
+  duration: input.animationDuration || 4,
+  resolution: input.resolution || "720p",
+  memberId,
+  jobId: job.id,
+});
 
     return updateJob(job.id, {
       status: "animating_scenes",
