@@ -1,3 +1,5 @@
+const { resizeSceneImageForVideo } = require("./skeleton-image-resize");
+
 function getBackendBase() {
   const base =
     process.env.BACKEND_BASE ||
@@ -17,6 +19,7 @@ async function generateSceneVideos({
   duration,
   resolution,
   memberId,
+  jobId,
 }) {
   const results = [];
   const backendBase = getBackendBase();
@@ -25,6 +28,14 @@ async function generateSceneVideos({
     if (!scene.imageUrl) {
       throw new Error(`Missing imageUrl for scene ${scene.index}`);
     }
+
+    const resized = await resizeSceneImageForVideo({
+      imageUrl: scene.imageUrl,
+      resolution,
+      memberId,
+      jobId,
+      sceneIndex: scene.index,
+    });
 
     const res = await fetch(`${backendBase}/api/tools-generate-video`, {
       method: "POST",
@@ -38,7 +49,7 @@ async function generateSceneVideos({
         durationSeconds: String(duration),
         aspectRatio: "9:16",
         resolution,
-        imageUrl: scene.imageUrl,
+        imageUrl: resized.url,
       }),
     });
 
@@ -51,6 +62,8 @@ async function generateSceneVideos({
     results.push({
       ...scene,
       imageUrl: scene.imageUrl,
+      resizedImageUrl: resized.url,
+      resizedImagePath: resized.path,
       provider: data.provider || "",
       providerJobId: data.providerJobId || "",
       videoStatus: data.status || "queued",
