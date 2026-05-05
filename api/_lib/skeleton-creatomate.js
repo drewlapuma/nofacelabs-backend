@@ -333,7 +333,7 @@ function buildSceneVideoElements(sceneClips = []) {
 
       // Generated scene videos should be visual-only.
       // ElevenLabs narration + optional background music are the only final audio.
-      volume: `${Math.max(0, Math.min(40, safeNumber(clip.volume, 30)))}%`,
+      volume: "0%",
     };
 
     cursor += clipDuration;
