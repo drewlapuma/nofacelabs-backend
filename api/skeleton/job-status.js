@@ -116,7 +116,11 @@ async function advanceJob(job) {
   }
 
   if (job.status === "generating_voice") {
-    const plannedScenes = planScenes(input.script || job.script);
+    const plannedScenes = planScenes(input.script || job.script, {
+  voiceSpeed: input.voiceSpeed || 1,
+  animationDuration: input.animationDuration || 4,
+  durationSec: job.credits?.estimatedDurationSec,
+});
 
     return updateJob(job.id, {
       status: "planning_scenes",
@@ -130,7 +134,11 @@ async function advanceJob(job) {
   }
 
   if (job.status === "planning_scenes") {
-    const plannedScenes = output.planned_scenes || planScenes(input.script || job.script);
+    const plannedScenes = output.planned_scenes || planScenes(input.script || job.script, {
+  voiceSpeed: input.voiceSpeed || 1,
+  animationDuration: input.animationDuration || 4,
+  durationSec: job.credits?.estimatedDurationSec,
+});
 
     const scenesWithImages = await generateSceneImages({
       scenes: plannedScenes,
