@@ -1,32 +1,59 @@
-function estimateScenes(script) {
-  const words = String(script || "").trim().split(/\s+/).filter(Boolean).length;
-  const scenes = Math.max(2, Math.ceil(words / 40)); // ~40 words per scene
-  return scenes;
+function getWordCount(text) {
+  const t = String(text || "").trim();
+  if (!t) return 0;
+  return t.split(/\s+/).filter(Boolean).length;
+}
+
+function estimateDurationSec(script, voiceSpeed = 1) {
+  const text = String(script || "").trim();
+  if (!text) return 0;
+
+  const chars = text.replace(/\s/g, "").length;
+  const words = getWordCount(text);
+  const speed = Number(voiceSpeed) || 1;
+
+  const wordBasedSec = words > 0
+    ? Math.round((words / (150 * speed)) * 60)
+    : 0;
+
+  const charBasedSec = Math.round(chars / (12 * speed));
+  const useCharBased = words <= 2 || chars / Math.max(words, 1) > 12;
+
+  return Math.max(3, useCharBased ? charBasedSec : wordBasedSec);
+}
+
+function estimateScenes(script, options = {}) {
+  const durationSec = Number(options.durationSec || estimateDurationSec(script, options.voiceSpeed || 1));
+  const animationDuration = Number(options.animationDuration || 4);
+
+  return Math.max(1, Math.ceil(durationSec / animationDuration));
 }
 
 function splitIntoScenes(script, sceneCount) {
   const sentences = String(script || "")
-    .split(/[.!?]+/)
+    .split(/(?<=[.!?])\s+/)
     .map((s) => s.trim())
     .filter(Boolean);
 
   if (!sentences.length) return [];
 
-  const perScene = Math.ceil(sentences.length / sceneCount);
-  const scenes = [];
+  const scenes = Array.from({ length: sceneCount }, (_, i) => ({
+    text: "",
+    index: i,
+  }));
 
-  for (let i = 0; i < sceneCount; i++) {
-    const chunk = sentences
-      .slice(i * perScene, (i + 1) * perScene)
-      .join(". ")
-      .trim();
+  sentences.forEach((sentence, i) => {
+    const sceneIndex = Math.min(sceneCount - 1, Math.floor((i / sentences.length) * sceneCount));
+    scenes[sceneIndex].text = `${scenes[sceneIndex].text} ${sentence}`.trim();
+  });
 
-    if (!chunk) continue;
-
-    scenes.push({
-      text: chunk,
-      index: i,
-    });
+  // Fill empty scenes by reusing nearby story context so every clip has a prompt.
+  for (let i = 0; i < scenes.length; i++) {
+    if (!scenes[i].text) {
+      const previous = scenes[i - 1]?.text;
+      const next = scenes[i + 1]?.text;
+      scenes[i].text = previous || next || String(script || "").trim();
+    }
   }
 
   return scenes;
@@ -47,12 +74,11 @@ Base the setting direction loosely on this opening moment: ${firstSceneText}
 function buildScenePrompts(scenes) {
   const storyAnchor = buildStoryAnchor(scenes);
 
-  return scenes.map((scene, i) => {
-    return {
-      index: i,
-      text: scene.text,
+  return scenes.map((scene, i) => ({
+    index: i,
+    text: scene.text,
 
-      imagePrompt: `
+    imagePrompt: `
 ${storyAnchor}
 
 Scene ${i + 1}:
@@ -62,9 +88,9 @@ Create a realistic cinematic image of this moment.
 Keep the same main skeleton character and mostly the same setting/style as the other scenes.
 Allow small natural variation in composition and camera angle, but keep the story world visually consistent.
 Ultra realistic, high detail, film still quality, 9:16.
-      `.trim(),
+    `.trim(),
 
-      videoPrompt: `
+    videoPrompt: `
 ${storyAnchor}
 
 Scene ${i + 1}:
@@ -74,15 +100,18 @@ Create a realistic cinematic animation of this exact scene.
 Keep the same main skeleton character, outfit/accessories, and mostly the same setting/style as the other scenes.
 No dialogue, no narration, no singing, no music.
 Only subtle natural sound effects if audio is generated.
-      `.trim(),
-    };
-  });
+    `.trim(),
+  }));
 }
 
-function planScenes(script) {
-  const sceneCount = estimateScenes(script);
+function planScenes(script, options = {}) {
+  const sceneCount = estimateScenes(script, options);
   const split = splitIntoScenes(script, sceneCount);
   return buildScenePrompts(split);
 }
 
-module.exports = { planScenes };
+module.exports = {
+  planScenes,
+  estimateDurationSec,
+  estimateScenes,
+};
