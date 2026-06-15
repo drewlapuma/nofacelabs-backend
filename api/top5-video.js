@@ -1,6 +1,7 @@
 // api/top5-video.js (CommonJS, Node 18+)
 // ✅ Top 5 / Top 2-9 Video Generator render endpoint
-// ✅ Uses Creatomate template modifications
+// ✅ Updated to avoid common Creatomate HTTP 400 issues
+// ✅ Better Creatomate error logging in Vercel
 // ✅ Writes to Supabase "renders" so it appears in /my-videos
 // ✅ Auth via Authorization Bearer OR x-nf-member-id fallback
 //
@@ -11,13 +12,17 @@
 // Expected Creatomate template layer names:
 // Title
 // Music
-// For ranks 1-9:
 // Clip1_Background, Clip1_Foreground, Rank1
 // Clip2_Background, Clip2_Foreground, Rank2
 // ...
 // Clip9_Background, Clip9_Foreground, Rank9
 //
 // Recommended template canvas: 1080x1920 vertical.
+//
+// NOTE ABOUT BLUR:
+// This version does NOT send dynamic ".blur" modifications because that can cause Creatomate HTTP 400.
+// For blurred mode, add the blur/effect directly to the Clip#_Background layers in Creatomate.
+// Full background mode still hides the foreground and makes the background fill the canvas.
 
 const https = require("https");
 const memberstackAdmin = require("@memberstack/admin");
@@ -172,8 +177,16 @@ function creatomateRequest(path, method, payload) {
 
           if (res.statusCode >= 200 && res.statusCode < 300) return resolve(j);
 
-          const msg = j?.error || j?.message || j?.raw || `Creatomate HTTP ${res.statusCode}`;
-          reject(new Error(msg));
+          console.error("[top5-video] Creatomate error response", {
+            statusCode: res.statusCode,
+            response: j,
+            requestPayload: payload,
+          });
+
+          const err = new Error(`Creatomate HTTP ${res.statusCode}: ${JSON.stringify(j).slice(0, 1800)}`);
+          err.statusCode = res.statusCode;
+          err.creatomateResponse = j;
+          reject(err);
         });
       }
     );
@@ -253,10 +266,9 @@ function normalizeHex(v, fallback) {
 }
 
 function hideLayer(m, name) {
+  // Safer for Creatomate than sending visible/enabled.
   m[`${name}.hidden`] = true;
   m[`${name}.opacity`] = "0%";
-  m[`${name}.visible`] = false;
-  m[`${name}.enabled`] = false;
   m[`${name}.time`] = 0;
   m[`${name}.duration`] = 0.01;
 }
@@ -264,8 +276,6 @@ function hideLayer(m, name) {
 function showLayer(m, name) {
   m[`${name}.hidden`] = false;
   m[`${name}.opacity`] = "100%";
-  m[`${name}.visible`] = true;
-  m[`${name}.enabled`] = true;
 }
 
 function sumDurations(items) {
@@ -317,11 +327,10 @@ function buildModifications(body) {
   const titleY = pctFromPreviewY(title.y ?? 21);
 
   const rankFont = normalizeFont(ranksStyle.font || ranksStyle.fontFamily || "Luckiest Guy");
-  const rankNumSize = scaleFontFromPreview(ranksStyle.numberSize ?? ranksStyle.numSize ?? 18);
-  const rankLabelSize = scaleFontFromPreview(ranksStyle.labelSize ?? 18);
+  const rankLabelSize = scaleFontFromPreview(ranksStyle.labelSize ?? ranksStyle.numberSize ?? 18);
   const rankX = pctFromPreviewX(ranksStyle.x ?? 20);
+  const rankBaseY = Number(ranksStyle.y ?? 80);
   const lineSpacingPx = clampNum(ranksStyle.spacing ?? ranksStyle.lineSpacing, 10, 160, 30);
-  const labelOffsetPx = clampNum(ranksStyle.labelOffset ?? 40, 0, 200, 40);
   const colors = Array.isArray(ranksStyle.colors) ? ranksStyle.colors : [];
 
   const modeRaw = safeStr(layout.mode || "blurred").toLowerCase();
@@ -330,7 +339,6 @@ function buildModifications(body) {
   const foreX = pctFromPreviewX(layout.foregroundX ?? layout.foreX ?? 75);
   const foreY = pctFromPreviewY(layout.foregroundY ?? layout.foreY ?? 230);
   const foreScale = clampNum(layout.foregroundScale ?? layout.foreScale ?? 0.75, 0.1, 2, 0.75);
-  const blurAmount = clampNum(layout.blurAmount ?? layout.blur ?? 12, 0, 40, 12);
 
   const musicEnabled =
     music.enabled === true ||
@@ -342,6 +350,7 @@ function buildModifications(body) {
 
   const m = {};
 
+  // Hide all possible layers first.
   for (let i = 1; i <= 9; i++) {
     hideLayer(m, `Clip${i}_Background`);
     hideLayer(m, `Clip${i}_Foreground`);
@@ -350,6 +359,7 @@ function buildModifications(body) {
 
   hideLayer(m, "Music");
 
+  // Title stays visible for whole render.
   showLayer(m, "Title");
   m["Title.text"] = titleText;
   m["Title.font_family"] = titleFont;
@@ -375,30 +385,24 @@ function buildModifications(body) {
     const fgName = `Clip${n}_Foreground`;
     const rankName = `Rank${n}`;
 
+    // Background video segment.
     showLayer(m, bgName);
     m[`${bgName}.source`] = item.videoUrl;
     m[`${bgName}.time`] = cursor;
     m[`${bgName}.duration`] = clipDur;
     m[`${bgName}.fit`] = "cover";
+    m[`${bgName}.x`] = "50%";
+    m[`${bgName}.y`] = "50%";
+    m[`${bgName}.width`] = isFullMode ? "100%" : "112%";
+    m[`${bgName}.height`] = isFullMode ? "100%" : "112%";
     m[`${bgName}.volume`] = "100%";
 
     if (isFullMode) {
-      m[`${bgName}.x`] = "50%";
-      m[`${bgName}.y`] = "50%";
-      m[`${bgName}.width`] = "100%";
-      m[`${bgName}.height`] = "100%";
-      m[`${bgName}.blur`] = 0;
-      m[`${bgName}.opacity`] = "100%";
-
+      // Full uploaded clip as entire background. No foreground.
       hideLayer(m, fgName);
     } else {
-      m[`${bgName}.x`] = "50%";
-      m[`${bgName}.y`] = "50%";
-      m[`${bgName}.width`] = "112%";
-      m[`${bgName}.height`] = "112%";
-      m[`${bgName}.blur`] = blurAmount;
-      m[`${bgName}.opacity`] = "100%";
-
+      // Cropped foreground on top of the background.
+      // Add blur/effect to the background layer inside Creatomate for blurred mode.
       showLayer(m, fgName);
       m[`${fgName}.source`] = item.videoUrl;
       m[`${fgName}.time`] = cursor;
@@ -411,6 +415,7 @@ function buildModifications(body) {
       m[`${fgName}.volume`] = "100%";
     }
 
+    // Rank appears when its clip starts and stays until the end.
     showLayer(m, rankName);
     m[`${rankName}.text`] = `${n}. ${item.label}`;
     m[`${rankName}.time`] = cursor;
@@ -419,16 +424,15 @@ function buildModifications(body) {
     m[`${rankName}.font_size`] = rankLabelSize;
     m[`${rankName}.fill_color`] = rankColor;
     m[`${rankName}.x`] = rankX;
-    m[`${rankName}.y`] = pctFromPreviewY((ranksStyle.y ?? 80) + index * lineSpacingPx);
+    m[`${rankName}.y`] = pctFromPreviewY(rankBaseY + index * lineSpacingPx);
     m[`${rankName}.text_align`] = "left";
+
+    // These usually work on text layers. If your specific Creatomate text layer rejects them,
+    // remove these 4 lines and keep only text/font/color/x/y.
     m[`${rankName}.stroke_color`] = "#000000";
     m[`${rankName}.stroke_width`] = Math.max(1, Math.round(rankLabelSize * 0.08));
     m[`${rankName}.shadow_color`] = "#000000";
-    m[`${rankName}.shadow_blur`] = 0;
     m[`${rankName}.shadow_distance`] = Math.max(2, Math.round(rankLabelSize * 0.09));
-    m[`${rankName}.number_font_size`] = rankNumSize;
-    m[`${rankName}.label_font_size`] = rankLabelSize;
-    m[`${rankName}.label_offset`] = labelOffsetPx;
 
     cursor += clipDur;
   });
@@ -439,7 +443,6 @@ function buildModifications(body) {
     m["Music.time"] = 0;
     m["Music.duration"] = totalDuration;
     m["Music.volume"] = `${Math.round(musicVolume * 100)}%`;
-    m["Music.loop"] = true;
   }
 
   return {
@@ -460,12 +463,10 @@ function buildModifications(body) {
       },
       ranks: {
         font: rankFont,
-        numberSize: ranksStyle.numberSize ?? ranksStyle.numSize ?? 18,
-        labelSize: ranksStyle.labelSize ?? 18,
+        labelSize: ranksStyle.labelSize ?? ranksStyle.numberSize ?? 18,
         x: ranksStyle.x ?? 20,
-        y: ranksStyle.y ?? 80,
+        y: rankBaseY,
         spacing: lineSpacingPx,
-        labelOffset: labelOffsetPx,
         colors,
       },
       layout: {
@@ -473,7 +474,7 @@ function buildModifications(body) {
         foregroundX: layout.foregroundX ?? layout.foreX ?? 75,
         foregroundY: layout.foregroundY ?? layout.foreY ?? 230,
         foregroundScale: foreScale,
-        blurAmount,
+        blurAmount: layout.blurAmount ?? layout.blur ?? 12,
       },
       music: {
         enabled: musicEnabled,
@@ -509,6 +510,7 @@ module.exports = async function handler(req, res) {
       });
     }
 
+    // Polling helper.
     if (req.method === "GET") {
       const url = new URL(req.url, "http://localhost");
       const id = url.searchParams.get("id");
@@ -540,6 +542,14 @@ module.exports = async function handler(req, res) {
 
     const built = buildModifications(body);
     const { modifications, choices } = built;
+
+    console.log("[top5-video] Starting render", {
+      templateId: TEMPLATE_ID,
+      rankCount: choices.rankCount,
+      itemCount: choices.items.length,
+      layoutMode: choices.layout.mode,
+      modificationKeys: Object.keys(modifications),
+    });
 
     const firstLabel = choices.items?.find((x) => x?.label)?.label || "";
     const video_name =
@@ -649,6 +659,7 @@ module.exports = async function handler(req, res) {
       ok: false,
       error: "SERVER_ERROR",
       message: msg,
+      creatomateResponse: err?.creatomateResponse || null,
     });
   }
 };
