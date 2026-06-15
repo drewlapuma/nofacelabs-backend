@@ -1,7 +1,10 @@
 // api/top5-video.js (CommonJS, Node 18+)
 // ✅ Top 5 / Top 2-9 Video Generator render endpoint
-// ✅ Updated to avoid common Creatomate HTTP 400 issues
-// ✅ Better Creatomate error logging in Vercel
+// ✅ Updated to match the website preview layout more closely
+// ✅ Uses new Creatomate template layer setup:
+//    Clip1_BlurBackground, Clip1_FullBackground, Clip1_Foreground, Rank1
+//    ...
+//    Clip9_BlurBackground, Clip9_FullBackground, Clip9_Foreground, Rank9
 // ✅ Writes to Supabase "renders" so it appears in /my-videos
 // ✅ Auth via Authorization Bearer OR x-nf-member-id fallback
 //
@@ -9,20 +12,21 @@
 // This endpoint expects PUBLIC https video URLs, not blob: URLs.
 // Your frontend must upload each selected file to Supabase/R2 first, then send those URLs here.
 //
-// Expected Creatomate template layer names:
+// New expected Creatomate template layer names:
 // Title
 // Music
-// Clip1_Background, Clip1_Foreground, Rank1
-// Clip2_Background, Clip2_Foreground, Rank2
+// Clip1_BlurBackground
+// Clip1_FullBackground
+// Clip1_Foreground
+// Rank1
 // ...
-// Clip9_Background, Clip9_Foreground, Rank9
+// Clip9_BlurBackground
+// Clip9_FullBackground
+// Clip9_Foreground
+// Rank9
 //
-// Recommended template canvas: 1080x1920 vertical.
-//
-// NOTE ABOUT BLUR:
-// This version does NOT send dynamic ".blur" modifications because that can cause Creatomate HTTP 400.
-// For blurred mode, add the blur/effect directly to the Clip#_Background layers in Creatomate.
-// Full background mode still hides the foreground and makes the background fill the canvas.
+// Recommended Creatomate template canvas: 720 x 1280 or 1080 x 1920 vertical.
+// Your current render was 720 x 1280, so this backend maps the preview to percentages.
 
 const https = require("https");
 const memberstackAdmin = require("@memberstack/admin");
@@ -34,6 +38,11 @@ const TEMPLATE_ID =
   process.env.CREATOMATE_TEMPLATE_ID_TOP5_VIDEO ||
   process.env.CREATOMATE_TEMPLATE_ID_TOP5 ||
   "";
+
+// These match the live preview CSS box.
+// Your frontend preview is max-width: 320px with a 9:16 aspect ratio.
+const PREVIEW_W = 320;
+const PREVIEW_H = PREVIEW_W * 16 / 9; // 568.888...
 
 // -------------------- CORS --------------------
 const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || process.env.ALLOW_ORIGIN || "*")
@@ -220,18 +229,26 @@ function ensurePublicHttpUrl(url, label) {
   return u;
 }
 
+function pct(n) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return "0%";
+  return `${Number(x.toFixed(3))}%`;
+}
+
 function pctFromPreviewX(x) {
-  const n = clampNum(x, 0, 360, 0);
-  return `${Number(((n / 360) * 100).toFixed(3))}%`;
+  const n = clampNum(x, -PREVIEW_W, PREVIEW_W * 2, 0);
+  return pct((n / PREVIEW_W) * 100);
 }
 
 function pctFromPreviewY(y) {
-  const n = clampNum(y, 0, 640, 0);
-  return `${Number(((n / 640) * 100).toFixed(3))}%`;
+  const n = clampNum(y, -PREVIEW_H, PREVIEW_H * 2, 0);
+  return pct((n / PREVIEW_H) * 100);
 }
 
 function scaleFontFromPreview(pxValue) {
-  return Math.round(clampNum(pxValue, 8, 140, 40) * 3);
+  const n = clampNum(pxValue, 8, 140, 40);
+  // Render is 720px wide, preview is 320px wide. 720 / 320 = 2.25.
+  return Math.round(n * 2.25);
 }
 
 function safeDuration(v, fallback = 4) {
@@ -265,6 +282,31 @@ function normalizeHex(v, fallback) {
   return fallback;
 }
 
+function removeExt(name) {
+  return String(name || "").replace(/\.[a-z0-9]{2,8}$/i, "");
+}
+
+function cleanLabel(raw, rank) {
+  let label = safeStr(raw, "");
+
+  label = removeExt(label)
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  // If the frontend sent a storage/UUID filename, don't render that huge text.
+  const looksLikeUuid =
+    /[a-f0-9]{8}\s+[a-f0-9]{4}\s+[a-f0-9]{4}/i.test(label) ||
+    /[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}/i.test(label) ||
+    /^[a-f0-9\s-]{24,}$/i.test(label);
+
+  if (!label || looksLikeUuid || label.length > 32) {
+    return `Clip ${rank}`;
+  }
+
+  return label.slice(0, 32);
+}
+
 function hideLayer(m, name) {
   // Safer for Creatomate than sending visible/enabled.
   m[`${name}.hidden`] = true;
@@ -292,7 +334,15 @@ function normalizeItems(body) {
     .map((it, index) => {
       const rank = clampNum(it?.rank ?? index + 1, 1, rankCount, index + 1);
       const videoUrl = ensurePublicHttpUrl(it?.videoUrl || it?.url || it?.source || "", `items[${index}].videoUrl`);
-      const label = safeStr(it?.label || it?.text || `Rank ${rank}`);
+
+      const rawLabel =
+        it?.label ||
+        it?.text ||
+        it?.displayName ||
+        "";
+
+      const fileName = safeStr(it?.fileName || it?.name || "");
+      const label = cleanLabel(rawLabel || fileName || `Clip ${rank}`, rank);
       const duration = safeDuration(it?.duration || it?.durationSec || it?.clipDuration, 4);
 
       return {
@@ -301,7 +351,7 @@ function normalizeItems(body) {
         videoUrl,
         label,
         duration,
-        fileName: safeStr(it?.fileName || it?.name || ""),
+        fileName,
       };
     })
     .filter((it) => it.videoUrl);
@@ -321,14 +371,20 @@ function buildModifications(body) {
   const music = body.music && typeof body.music === "object" ? body.music : {};
 
   const titleText = safeStr(title.text, "TOP 5 BEST\nMOMENTS");
+  const titleLines = titleText.split(/\n/).length || 1;
   const titleFont = normalizeFont(title.font || title.fontFamily || "Luckiest Guy");
-  const titleSize = scaleFontFromPreview(title.size ?? title.fontSize ?? 27);
+  const titlePreviewSize = clampNum(title.size ?? title.fontSize, 8, 140, 27);
+  const titleSize = scaleFontFromPreview(titlePreviewSize);
   const titleColor = normalizeHex(title.color || title.fillColor, "#ffffff");
-  const titleY = pctFromPreviewY(title.y ?? 21);
+  const titleTopPx = clampNum(title.y ?? 21, 0, PREVIEW_H, 21);
+
+  // CSS preview uses top-left positioning. Creatomate uses the layer center.
+  const titleBoxPreviewH = Math.max(42, titleLines * titlePreviewSize * 0.95);
+  const titleCenterY = titleTopPx + titleBoxPreviewH / 2;
 
   const rankFont = normalizeFont(ranksStyle.font || ranksStyle.fontFamily || "Luckiest Guy");
-  const rankLabelSize = scaleFontFromPreview(ranksStyle.labelSize ?? ranksStyle.numberSize ?? 18);
-  const rankX = pctFromPreviewX(ranksStyle.x ?? 20);
+  const rankPreviewSize = clampNum(ranksStyle.labelSize ?? ranksStyle.numberSize, 8, 100, 18);
+  const rankLabelSize = scaleFontFromPreview(rankPreviewSize);
   const rankBaseY = Number(ranksStyle.y ?? 80);
   const lineSpacingPx = clampNum(ranksStyle.spacing ?? ranksStyle.lineSpacing, 10, 160, 30);
   const colors = Array.isArray(ranksStyle.colors) ? ranksStyle.colors : [];
@@ -336,9 +392,20 @@ function buildModifications(body) {
   const modeRaw = safeStr(layout.mode || "blurred").toLowerCase();
   const isFullMode = modeRaw === "full" || modeRaw === "full-background" || modeRaw === "full_background";
 
-  const foreX = pctFromPreviewX(layout.foregroundX ?? layout.foreX ?? 75);
-  const foreY = pctFromPreviewY(layout.foregroundY ?? layout.foreY ?? 230);
+  const foreLeftPx = clampNum(layout.foregroundX ?? layout.foreX ?? 75, -PREVIEW_W, PREVIEW_W, 75);
+  const foreTopPx = clampNum(layout.foregroundY ?? layout.foreY ?? 230, -PREVIEW_H, PREVIEW_H, 230);
   const foreScale = clampNum(layout.foregroundScale ?? layout.foreScale ?? 0.75, 0.1, 2, 0.75);
+
+  // Frontend CSS: width = 240 * scale, aspect-ratio 9/16.
+  const forePreviewW = 240 * foreScale;
+  const forePreviewH = forePreviewW * 16 / 9;
+
+  // Convert CSS top-left position into Creatomate center position.
+  const foreCenterX = foreLeftPx + forePreviewW / 2;
+  const foreCenterY = foreTopPx + forePreviewH / 2;
+
+  // In a 9:16 composition, a 9:16 foreground box can use the same percent for width and height.
+  const foreSizePct = Math.round(((forePreviewW / PREVIEW_W) * 100) * 1000) / 1000;
 
   const musicEnabled =
     music.enabled === true ||
@@ -352,7 +419,8 @@ function buildModifications(body) {
 
   // Hide all possible layers first.
   for (let i = 1; i <= 9; i++) {
-    hideLayer(m, `Clip${i}_Background`);
+    hideLayer(m, `Clip${i}_BlurBackground`);
+    hideLayer(m, `Clip${i}_FullBackground`);
     hideLayer(m, `Clip${i}_Foreground`);
     hideLayer(m, `Rank${i}`);
   }
@@ -366,10 +434,16 @@ function buildModifications(body) {
   m["Title.font_size"] = titleSize;
   m["Title.fill_color"] = titleColor;
   m["Title.x"] = "50%";
-  m["Title.y"] = titleY;
+  m["Title.y"] = pctFromPreviewY(titleCenterY);
+  m["Title.width"] = "88%";
+  m["Title.height"] = "16%";
   m["Title.time"] = 0;
   m["Title.duration"] = totalDuration;
   m["Title.text_align"] = "center";
+  m["Title.stroke_color"] = "#000000";
+  m["Title.stroke_width"] = Math.max(2, Math.round(titleSize * 0.06));
+  m["Title.shadow_color"] = "#000000";
+  m["Title.shadow_distance"] = Math.max(3, Math.round(titleSize * 0.08));
 
   let cursor = 0;
 
@@ -381,37 +455,43 @@ function buildModifications(body) {
       ["#ff2d7a", "#ff9500", "#eaff00", "#00ff3b", "#00f5ff", "#a855f7", "#ffffff", "#5ac1ff", "#ff3b30"][index] || "#ffffff"
     );
 
-    const bgName = `Clip${n}_Background`;
+    const blurBgName = `Clip${n}_BlurBackground`;
+    const fullBgName = `Clip${n}_FullBackground`;
     const fgName = `Clip${n}_Foreground`;
     const rankName = `Rank${n}`;
 
-    // Background video segment.
-    showLayer(m, bgName);
-    m[`${bgName}.source`] = item.videoUrl;
-    m[`${bgName}.time`] = cursor;
-    m[`${bgName}.duration`] = clipDur;
-    m[`${bgName}.fit`] = "cover";
-    m[`${bgName}.x`] = "50%";
-    m[`${bgName}.y`] = "50%";
-    m[`${bgName}.width`] = isFullMode ? "100%" : "112%";
-    m[`${bgName}.height`] = isFullMode ? "100%" : "112%";
-    m[`${bgName}.volume`] = "100%";
+    // Both background layers get the source and timing.
+    // The selected mode chooses which one is visible.
+    [blurBgName, fullBgName].forEach((bgName) => {
+      m[`${bgName}.source`] = item.videoUrl;
+      m[`${bgName}.time`] = cursor;
+      m[`${bgName}.duration`] = clipDur;
+      m[`${bgName}.fit`] = "cover";
+      m[`${bgName}.x`] = "50%";
+      m[`${bgName}.y`] = "50%";
+      m[`${bgName}.width`] = bgName === blurBgName ? "112%" : "100%";
+      m[`${bgName}.height`] = bgName === blurBgName ? "112%" : "100%";
+      m[`${bgName}.volume`] = "100%";
+    });
 
     if (isFullMode) {
-      // Full uploaded clip as entire background. No foreground.
+      showLayer(m, fullBgName);
+      hideLayer(m, blurBgName);
       hideLayer(m, fgName);
     } else {
-      // Cropped foreground on top of the background.
-      // Add blur/effect to the background layer inside Creatomate for blurred mode.
+      showLayer(m, blurBgName);
+      hideLayer(m, fullBgName);
+
+      // Cropped foreground on top of the blurred background.
       showLayer(m, fgName);
       m[`${fgName}.source`] = item.videoUrl;
       m[`${fgName}.time`] = cursor;
       m[`${fgName}.duration`] = clipDur;
       m[`${fgName}.fit`] = "cover";
-      m[`${fgName}.x`] = foreX;
-      m[`${fgName}.y`] = foreY;
-      m[`${fgName}.width`] = `${Math.round(62.5 * foreScale * 1000) / 1000}%`;
-      m[`${fgName}.height`] = `${Math.round(111.111 * foreScale * 1000) / 1000}%`;
+      m[`${fgName}.x`] = pctFromPreviewX(foreCenterX);
+      m[`${fgName}.y`] = pctFromPreviewY(foreCenterY);
+      m[`${fgName}.width`] = `${foreSizePct}%`;
+      m[`${fgName}.height`] = `${foreSizePct}%`;
       m[`${fgName}.volume`] = "100%";
     }
 
@@ -423,16 +503,18 @@ function buildModifications(body) {
     m[`${rankName}.font_family`] = rankFont;
     m[`${rankName}.font_size`] = rankLabelSize;
     m[`${rankName}.fill_color`] = rankColor;
-    m[`${rankName}.x`] = rankX;
-    m[`${rankName}.y`] = pctFromPreviewY(rankBaseY + index * lineSpacingPx);
-    m[`${rankName}.text_align`] = "left";
 
-    // These usually work on text layers. If your specific Creatomate text layer rejects them,
-    // remove these 4 lines and keep only text/font/color/x/y.
+    // Use a centered bounding box with left-aligned text.
+    // This matches CSS: left around 20px with a wide text area.
+    m[`${rankName}.x`] = "50%";
+    m[`${rankName}.width`] = "90%";
+    m[`${rankName}.height`] = "8%";
+    m[`${rankName}.y`] = pctFromPreviewY(rankBaseY + index * lineSpacingPx + rankPreviewSize / 2);
+    m[`${rankName}.text_align`] = "left";
     m[`${rankName}.stroke_color`] = "#000000";
-    m[`${rankName}.stroke_width`] = Math.max(1, Math.round(rankLabelSize * 0.08));
+    m[`${rankName}.stroke_width`] = Math.max(2, Math.round(rankLabelSize * 0.06));
     m[`${rankName}.shadow_color`] = "#000000";
-    m[`${rankName}.shadow_distance`] = Math.max(2, Math.round(rankLabelSize * 0.09));
+    m[`${rankName}.shadow_distance`] = Math.max(3, Math.round(rankLabelSize * 0.08));
 
     cursor += clipDur;
   });
@@ -457,13 +539,13 @@ function buildModifications(body) {
       title: {
         text: titleText,
         font: titleFont,
-        size: title.size ?? title.fontSize ?? 27,
+        size: titlePreviewSize,
         color: titleColor,
-        y: title.y ?? 21,
+        y: titleTopPx,
       },
       ranks: {
         font: rankFont,
-        labelSize: ranksStyle.labelSize ?? ranksStyle.numberSize ?? 18,
+        labelSize: rankPreviewSize,
         x: ranksStyle.x ?? 20,
         y: rankBaseY,
         spacing: lineSpacingPx,
@@ -471,8 +553,8 @@ function buildModifications(body) {
       },
       layout: {
         mode: isFullMode ? "full" : "blurred",
-        foregroundX: layout.foregroundX ?? layout.foreX ?? 75,
-        foregroundY: layout.foregroundY ?? layout.foreY ?? 230,
+        foregroundX: foreLeftPx,
+        foregroundY: foreTopPx,
         foregroundScale: foreScale,
         blurAmount: layout.blurAmount ?? layout.blur ?? 12,
       },
@@ -548,6 +630,7 @@ module.exports = async function handler(req, res) {
       rankCount: choices.rankCount,
       itemCount: choices.items.length,
       layoutMode: choices.layout.mode,
+      totalDuration: choices.totalDuration,
       modificationKeys: Object.keys(modifications),
     });
 
