@@ -221,7 +221,7 @@ function normalizeItems(body) {
 function buildModifications(body) {
   const { rankCount, items } = normalizeItems(body);
   const totalDurationRaw = Math.max(0.5, sumDurations(items));
-  const totalDuration = Math.round((totalDurationRaw + 0.05) * 1000) / 1000;
+  const totalDuration = Math.round(totalDurationRaw * 1000) / 1000;
 
   const title = body.title && typeof body.title === "object" ? body.title : {};
   const ranksStyle = body.ranks && typeof body.ranks === "object" ? body.ranks : {};
@@ -372,7 +372,7 @@ function buildModifications(body) {
       totalDuration,
       title: { text: titleText, font: titleFont, size: titlePreviewSize, color: titleColor, y: titleTopPx },
       ranks: { font: rankFont, labelSize: rankPreviewSize, x: rankLeftPx, y: rankTopPx, spacing: lineSpacingPx, colors },
-      layout: { mode: isFullMode ? "full" : "blurred", foregroundX: foreLeftPx, foregroundY: foreTopPx, foregroundScale: foreScale, blurAmount: layout.blurAmount ?? layout.blur ?? 12 },
+      layout: { mode: isFullMode ? "full" : "blurred", foregroundX: foreLeftPx, foregroundY: foreTopPx, foregroundScale: foreScale, blurAmount: layout.blurAmount ?? layout.blur ?? 19 },
       music: { enabled: musicEnabled, url: musicUrl, volume: musicVolume },
       items: items.map((it) => ({ rank: it.rank, label: it.label, videoUrl: it.videoUrl, duration: it.duration, fileName: it.fileName })),
     },
