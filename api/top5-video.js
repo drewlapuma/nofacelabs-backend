@@ -245,6 +245,7 @@ function buildModifications(body) {
 
   const modeRaw = safeStr(layout.mode || "blurred").toLowerCase();
   const isFullMode = modeRaw === "full" || modeRaw === "full-background" || modeRaw === "full_background";
+  const blurAmount = clampNum(layout.blurAmount ?? layout.blur ?? 19, 0, 1000, 19);
 
   const foreLeftPx = clampNum(layout.foregroundX ?? layout.foreX ?? 75, -PREVIEW_W, PREVIEW_W, 75);
   const foreTopPx = clampNum(layout.foregroundY ?? layout.foreY ?? 230, -PREVIEW_H, PREVIEW_H, 230);
@@ -309,8 +310,8 @@ function buildModifications(body) {
       m[`${bgName}.fit`] = "cover";
       m[`${bgName}.x`] = "50%";
       m[`${bgName}.y`] = "50%";
-      m[`${bgName}.width`] = bgName === blurBgName ? "112%" : "100%";
-      m[`${bgName}.height`] = bgName === blurBgName ? "112%" : "100%";
+      m[`${bgName}.width`] = bgName === blurBgName ? "125%" : "100%";
+      m[`${bgName}.height`] = bgName === blurBgName ? "125%" : "100%";
       m[`${bgName}.volume`] = "100%";
     });
 
@@ -409,6 +410,7 @@ module.exports = async function handler(req, res) {
       rankCount: choices.rankCount,
       itemCount: choices.items.length,
       layoutMode: choices.layout.mode,
+      blurAmount: choices.layout.blurAmount,
       totalDuration: choices.totalDuration,
       textPositions: {
         titleX: modifications["Title.x"],
