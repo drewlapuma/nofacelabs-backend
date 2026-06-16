@@ -304,16 +304,20 @@ function buildModifications(body) {
     const rankName = `Rank${n}`;
 
     [blurBgName, fullBgName].forEach((bgName) => {
-      m[`${bgName}.source`] = item.videoUrl;
-      m[`${bgName}.time`] = cursor;
-      m[`${bgName}.duration`] = clipDur;
-      m[`${bgName}.fit`] = "cover";
-      m[`${bgName}.x`] = "50%";
-      m[`${bgName}.y`] = "50%";
-      m[`${bgName}.width`] = bgName === blurBgName ? "125%" : "100%";
-      m[`${bgName}.height`] = bgName === blurBgName ? "125%" : "100%";
-      m[`${bgName}.volume`] = "100%";
-    });
+  m[`${bgName}.source`] = item.videoUrl;
+  m[`${bgName}.time`] = cursor;
+  m[`${bgName}.duration`] = clipDur;
+  m[`${bgName}.fit`] = "cover";
+  m[`${bgName}.x`] = "50%";
+  m[`${bgName}.y`] = "50%";
+  m[`${bgName}.width`] = bgName === blurBgName ? "125%" : "100%";
+  m[`${bgName}.height`] = bgName === blurBgName ? "125%" : "100%";
+  m[`${bgName}.volume`] = "100%";
+
+  if (bgName === blurBgName) {
+    m[`${bgName}.blur_radius`] = blurAmount;
+  }
+});
 
     if (isFullMode) {
       showLayer(m, fullBgName);
