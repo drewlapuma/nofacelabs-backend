@@ -2,6 +2,8 @@
 // ✅ Fixes Title/Rank offset by using top-left coordinates
 // ✅ Attempts to fix black tail with top-level duration + Main.duration/Composition.duration
 // ✅ Uses new Creatomate layers: Clip#_BlurBackground, Clip#_FullBackground, Clip#_Foreground, Rank#
+// ✅ Supports foregroundWidth/foregroundHeight sliders from the frontend
+// ✅ Sends dynamic blur_radius to Creatomate
 
 const https = require("https");
 const memberstackAdmin = require("@memberstack/admin");
@@ -249,12 +251,20 @@ function buildModifications(body) {
 
   const foreLeftPx = clampNum(layout.foregroundX ?? layout.foreX ?? 75, -PREVIEW_W, PREVIEW_W, 75);
   const foreTopPx = clampNum(layout.foregroundY ?? layout.foreY ?? 230, -PREVIEW_H, PREVIEW_H, 230);
-  const foreScale = clampNum(layout.foregroundScale ?? layout.foreScale ?? 0.75, 0.1, 2, 0.75);
-  const forePreviewW = 240 * foreScale;
-  const forePreviewH = forePreviewW * 16 / 9;
+
+  // New frontend sends foregroundWidth/foregroundHeight as percentages of the 320x568.89 preview.
+  // Backwards compatible fallback: the old 75% scale equals 56.25% width and 56.25% height.
+  const fallbackScale = clampNum(layout.foregroundScale ?? layout.foreScale ?? 0.75, 0.1, 2, 0.75);
+  const foreWidthPct = clampNum(layout.foregroundWidth ?? layout.foreWidth ?? (fallbackScale * 75), 10, 150, 56.25);
+  const foreHeightPct = clampNum(layout.foregroundHeight ?? layout.foreHeight ?? (fallbackScale * 75), 10, 150, 56.25);
+
+  const forePreviewW = (foreWidthPct / 100) * PREVIEW_W;
+  const forePreviewH = (foreHeightPct / 100) * PREVIEW_H;
   const foreCenterX = foreLeftPx + forePreviewW / 2;
   const foreCenterY = foreTopPx + forePreviewH / 2;
-  const foreSizePct = Math.round(((forePreviewW / PREVIEW_W) * 100) * 1000) / 1000;
+
+  const foreWidthRenderPct = Math.round(foreWidthPct * 1000) / 1000;
+  const foreHeightRenderPct = Math.round(foreHeightPct * 1000) / 1000;
 
   const musicEnabled = music.enabled === true || String(music.enabled || "").toLowerCase() === "true" || String(music.enabled || "") === "1";
   const musicUrl = musicEnabled ? ensurePublicHttpUrl(music.url || music.musicUrl || music.source || "", "music.url") : "";
@@ -304,20 +314,22 @@ function buildModifications(body) {
     const rankName = `Rank${n}`;
 
     [blurBgName, fullBgName].forEach((bgName) => {
-  m[`${bgName}.source`] = item.videoUrl;
-  m[`${bgName}.time`] = cursor;
-  m[`${bgName}.duration`] = clipDur;
-  m[`${bgName}.fit`] = "cover";
-  m[`${bgName}.x`] = "50%";
-  m[`${bgName}.y`] = "50%";
-  m[`${bgName}.width`] = bgName === blurBgName ? "125%" : "100%";
-  m[`${bgName}.height`] = bgName === blurBgName ? "125%" : "100%";
-  m[`${bgName}.volume`] = "100%";
+      m[`${bgName}.source`] = item.videoUrl;
+      m[`${bgName}.time`] = cursor;
+      m[`${bgName}.duration`] = clipDur;
+      m[`${bgName}.fit`] = "cover";
+      m[`${bgName}.x`] = "50%";
+      m[`${bgName}.y`] = "50%";
+      m[`${bgName}.width`] = bgName === blurBgName ? "125%" : "100%";
+      m[`${bgName}.height`] = bgName === blurBgName ? "125%" : "100%";
+      m[`${bgName}.volume`] = "100%";
 
-  if (bgName === blurBgName) {
-    m[`${bgName}.blur_radius`] = blurAmount;
-  }
-});
+      // Creatomate's blur effect shows this property as "blur_radius" in template JSON.
+      // This lets the website blur slider control the rendered blur.
+      if (bgName === blurBgName) {
+        m[`${bgName}.blur_radius`] = blurAmount;
+      }
+    });
 
     if (isFullMode) {
       showLayer(m, fullBgName);
@@ -333,8 +345,8 @@ function buildModifications(body) {
       m[`${fgName}.fit`] = "cover";
       m[`${fgName}.x`] = pctFromPreviewX(foreCenterX);
       m[`${fgName}.y`] = pctFromPreviewY(foreCenterY);
-      m[`${fgName}.width`] = `${foreSizePct}%`;
-      m[`${fgName}.height`] = `${foreSizePct}%`;
+      m[`${fgName}.width`] = `${foreWidthRenderPct}%`;
+      m[`${fgName}.height`] = `${foreHeightRenderPct}%`;
       m[`${fgName}.volume`] = "100%";
     }
 
@@ -377,7 +389,14 @@ function buildModifications(body) {
       totalDuration,
       title: { text: titleText, font: titleFont, size: titlePreviewSize, color: titleColor, y: titleTopPx },
       ranks: { font: rankFont, labelSize: rankPreviewSize, x: rankLeftPx, y: rankTopPx, spacing: lineSpacingPx, colors },
-      layout: { mode: isFullMode ? "full" : "blurred", foregroundX: foreLeftPx, foregroundY: foreTopPx, foregroundScale: foreScale, blurAmount: layout.blurAmount ?? layout.blur ?? 19 },
+      layout: {
+        mode: isFullMode ? "full" : "blurred",
+        foregroundX: foreLeftPx,
+        foregroundY: foreTopPx,
+        foregroundWidth: foreWidthPct,
+        foregroundHeight: foreHeightPct,
+        blurAmount,
+      },
       music: { enabled: musicEnabled, url: musicUrl, volume: musicVolume },
       items: items.map((it) => ({ rank: it.rank, label: it.label, videoUrl: it.videoUrl, duration: it.duration, fileName: it.fileName })),
     },
@@ -415,6 +434,8 @@ module.exports = async function handler(req, res) {
       itemCount: choices.items.length,
       layoutMode: choices.layout.mode,
       blurAmount: choices.layout.blurAmount,
+      foregroundWidth: choices.layout.foregroundWidth,
+      foregroundHeight: choices.layout.foregroundHeight,
       totalDuration: choices.totalDuration,
       textPositions: {
         titleX: modifications["Title.x"],
